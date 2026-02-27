@@ -20,22 +20,17 @@ def inject_css():
     st.markdown(
         """
         <style>
-        /* App background */
         .stApp { background: #ffffff; }
 
-        /* Sidebar */
         section[data-testid="stSidebar"] {
             background: #f6fbf7;
             border-right: 1px solid #dbeee0;
         }
 
-        /* Titles */
         h1, h2, h3, h4, h5, h6 { color: #0b3d2e !important; }
 
-        /* Accent */
         .tetr-accent { color: #0b3d2e; font-weight: 700; }
 
-        /* Card */
         .tetr-card {
             background: #ffffff;
             border: 1px solid #dbeee0;
@@ -44,7 +39,6 @@ def inject_css():
             box-shadow: 0 1px 8px rgba(11, 61, 46, 0.06);
         }
 
-        /* Subtle badge */
         .tetr-badge {
             display: inline-block;
             padding: 4px 10px;
@@ -56,14 +50,12 @@ def inject_css():
             font-size: 12px;
         }
 
-        /* Metric row container */
         .tetr-metrics {
             display: grid;
             grid-template-columns: repeat(5, minmax(0, 1fr));
             gap: 10px;
         }
 
-        /* Metric box */
         .tetr-metric {
             background: #ffffff;
             border: 1px solid #dbeee0;
@@ -90,7 +82,6 @@ def inject_css():
             margin-top: 4px;
         }
 
-        /* Buttons */
         .stDownloadButton button, .stButton button {
             background: #0b3d2e !important;
             border: 1px solid #0b3d2e !important;
@@ -102,7 +93,6 @@ def inject_css():
             border-color: #0f5a43 !important;
         }
 
-        /* Inputs */
         .stTextInput input, .stSelectbox div, .stMultiSelect div {
             border-radius: 10px !important;
         }
@@ -117,7 +107,6 @@ inject_css()
 # =========================
 # Constants
 # =========================
-# Only these sheets should be analyzed, and only these get batch alignment.
 ALLOWED_SHEETS = {
     "PG - B1 & B2",
     "PG - B3 & B4",
@@ -130,11 +119,11 @@ ALLOWED_SHEETS = {
 }
 
 GREEN_PALETTE = {
-    "Paid / Admitted": "#0b3d2e",  # dark green
-    "Will Pay": "#1f7a56",         # green
-    "Pending": "#6bbf8a",          # light green
-    "Refunded": "#93d8b1",         # pale green
-    "Not Paid": "#cfeedd",         # very light green
+    "Paid / Admitted": "#0b3d2e",
+    "Will Pay": "#1f7a56",
+    "Pending": "#6bbf8a",
+    "Refunded": "#93d8b1",
+    "Not Paid": "#cfeedd",
 }
 
 # =========================
@@ -190,15 +179,6 @@ def parse_date_safe(x):
 
 
 def parse_event_date(val):
-    """
-    Handles:
-      - Timestamp-like / excel dates
-      - '2026-01-24 00:00:00'
-      - '28-30.01.2026'  (takes start date)
-      - '28.01 to 30.01.2026' (takes start date)
-      - '28 Jan 2026', '28 Jan, 2026', '28 January 2026'
-      - Extracts dd-mm-yyyy inside long event names
-    """
     try:
         ts = pd.to_datetime(val, errors="coerce", dayfirst=True)
         if pd.notna(ts):
@@ -210,7 +190,6 @@ def parse_event_date(val):
     if not s:
         return pd.NaT
 
-    # numeric dd ? mm ? yyyy anywhere
     m = re.search(r"(\d{1,2})\D+(\d{1,2})\D+(\d{4})", s)
     if m:
         dd, mm, yyyy = m.group(1), m.group(2), m.group(3)
@@ -219,7 +198,6 @@ def parse_event_date(val):
         except Exception:
             return pd.NaT
 
-    # Month-name formats: 28 Jan 2026
     m2 = re.search(
         r"\b(\d{1,2})\s*(jan|january|feb|february|mar|march|apr|april|may|jun|june|jul|july|aug|august|sep|sept|september|oct|october|nov|november|dec|december)\s*,?\s*(\d{4})\b",
         s.lower(),
@@ -263,10 +241,8 @@ def best_matching_col(df: pd.DataFrame, keywords, hard_excludes=None):
                 hit_strength = max(hit_strength, len(k))
         if hit_strength > 0:
             scored.append((c, hit_strength, df[c].notna().sum()))
-
     if not scored:
         return None
-
     scored.sort(key=lambda x: (x[1], x[2]), reverse=True)
     return scored[0][0]
 
@@ -279,7 +255,6 @@ def row_is_numeric_only(r):
 
 
 def is_probably_event_col(series: pd.Series) -> bool:
-    # More robust for sparse attendance columns
     s = series.fillna("").astype(str).str.strip().str.lower()
     if s.empty:
         return False
@@ -291,65 +266,45 @@ def safe_datetime_range_with_padding(dates, pad_days=3):
     dates = [d for d in dates if pd.notna(d)]
     if not dates:
         return None
-    mn = min(dates)
-    mx = max(dates)
-    mn = mn - pd.Timedelta(days=pad_days)
-    mx = mx + pd.Timedelta(days=pad_days)
+    mn = min(dates) - pd.Timedelta(days=pad_days)
+    mx = max(dates) + pd.Timedelta(days=pad_days)
     return [mn, mx]
 
 
 def infer_batch_from_sheet_name(sheet_name: str) -> str:
-    """
-    Derive batch label from sheet name:
-      - 'UG B5' -> 'B5'
-      - 'PG - B3 & B4' -> 'B3–B4'
-      - 'UG - B1 to B4' -> 'B1–B4'
-    """
     s = clean_text(sheet_name).lower()
     s = s.replace("–", "-").replace("—", "-")
 
-    # b1 to b4 / b1 - b4
     m = re.search(r"\bb\s*(\d+)\s*(to|-)\s*b\s*(\d+)\b", s)
     if m:
         return f"B{m.group(1)}–B{m.group(3)}"
 
-    # b3 & b4
     m = re.search(r"\bb\s*(\d+)\s*&\s*b\s*(\d+)\b", s)
     if m:
         return f"B{m.group(1)}–B{m.group(2)}"
 
-    # single b#
     m = re.search(r"\bb\s*(\d+)\b", s)
     if m:
         return f"B{m.group(1)}"
 
-    # Tetr-X sheets might not encode batch
     return ""
 
 
 # =========================
-# Sheet-aware loader (robust)
+# Sheet-aware loader
 # =========================
 def load_sheet_structured(raw: pd.DataFrame):
-    """
-    Supports:
-      - old: header row with Student Name(s)
-      - new: header row with Name + Email/Batch/Country/Payment etc
-    Date row above header is optional.
-    """
     def row_text(i):
         return " | ".join([clean_text(v).lower() for v in raw.iloc[i, :].tolist()])
 
     header_row = None
 
-    # Old style
     for i in range(min(40, len(raw))):
         t = row_text(i)
         if "student name" in t or "student names" in t:
             header_row = i
             break
 
-    # New style
     if header_row is None:
         for i in range(min(80, len(raw))):
             t = row_text(i)
@@ -363,7 +318,6 @@ def load_sheet_structured(raw: pd.DataFrame):
     if header_row is None:
         return None, None, "Could not find a header row ('Student Name' or 'Name') in top rows."
 
-    # optional date row above
     candidate_rows = list(range(max(0, header_row - 8), header_row))
     best_date_row, best_hits = None, -1
     for r in candidate_rows:
@@ -419,7 +373,7 @@ def load_sheet_structured(raw: pd.DataFrame):
 
 
 # =========================
-# Excel I/O (fast + safe)
+# Excel I/O
 # =========================
 @st.cache_data(show_spinner=False)
 def get_sheet_names(file_bytes: bytes):
@@ -434,7 +388,7 @@ def read_raw_sheet(file_bytes: bytes, sheet_name: str):
 
 
 # =========================
-# Build dataset (single sheet)
+# Build dataset
 # =========================
 def build_dataset_from_sheet(file_bytes: bytes, sheet_name: str):
     raw = read_raw_sheet(file_bytes, sheet_name)
@@ -442,7 +396,6 @@ def build_dataset_from_sheet(file_bytes: bytes, sheet_name: str):
     if err:
         return None, None, err
 
-    # Keyword maps
     KW = {
         "name_strict": ["student name", "student names", "full name", "learner name", "student", "name"],
         "name_fallback": ["name"],
@@ -480,22 +433,18 @@ def build_dataset_from_sheet(file_bytes: bytes, sheet_name: str):
     if sheet_name in ALLOWED_SHEETS:
         inferred = infer_batch_from_sheet_name(sheet_name)
         if inferred:
-            # If batch col missing/empty, set it
             if not batch_col:
                 df["Batch"] = inferred
                 batch_col = "Batch"
             else:
-                # Fill missing batch values with inferred, without overwriting existing
                 bc = df[batch_col].astype(str).map(clean_text)
                 df.loc[bc.eq(""), batch_col] = inferred
 
-    # Drop numeric-only summary rows only when name is blank
     name_series = df[name_col].astype(str).map(clean_text)
     numeric_mask = df.apply(row_is_numeric_only, axis=1)
     blank_name_mask = name_series.map(lambda x: x == "" or x.lower() == "nan")
     df = df.loc[~(numeric_mask & blank_name_mask)].copy()
 
-    # Event columns = everything except metadata
     metadata_cols = {
         c for c in [
             name_col, email_col, phone_col, country_col, batch_col,
@@ -503,13 +452,12 @@ def build_dataset_from_sheet(file_bytes: bytes, sheet_name: str):
         ] if c
     }
 
-    # Candidate event cols are non-metadata
     event_cols = [c for c in df.columns if c not in metadata_cols]
-    # Keep only those that look like yes/no attendance
     event_cols = [c for c in event_cols if is_probably_event_col(df[c])]
 
+    # normalize events
     for c in event_cols:
-        df[c] = df[c].apply(normalize_binary)
+        df[c] = df[c].apply(normalize_binary).astype(np.int8)
 
     df["participation_count"] = df[event_cols].sum(axis=1) if event_cols else 0
 
@@ -537,7 +485,6 @@ def build_dataset_from_sheet(file_bytes: bytes, sheet_name: str):
 
     df["conversion_category"] = df.apply(conv_category, axis=1)
 
-    # Event dates: meta first, otherwise parse from event name
     event_dates = meta.get("event_dates", {}) or {}
     if not event_dates:
         for ev in event_cols:
@@ -736,7 +683,7 @@ else:
     selected_sheets = st.sidebar.multiselect(
         "Select batch sheets to compare",
         options=sheets,
-        default=sheets,  # all allowed by default
+        default=sheets,
     )
 
 if not selected_sheets:
@@ -772,9 +719,10 @@ if errors:
             st.write(f"- **{sname}**: {err}")
 
 # =========================
-# Align event columns + event dates across selected sheets (important!)
+# ✅ FIXED: Align event columns robustly (no astype(int) crashes)
 # =========================
 all_event_cols = sorted(set().union(*[set(ctx["event_cols"]) for _, ctx in contexts])) if contexts else []
+
 all_event_dates = {}
 for _, ctx in contexts:
     for ev, dt in (ctx.get("event_dates") or {}).items():
@@ -785,18 +733,17 @@ for _, ctx in contexts:
         else:
             all_event_dates[ev] = min(all_event_dates[ev], dt)
 
-# Ensure every df has every event column; recompute participation_count consistently
 for i in range(len(dfs)):
     for ev in all_event_cols:
         if ev not in dfs[i].columns:
             dfs[i][ev] = 0
-        dfs[i][ev] = dfs[i][ev].fillna(0).astype(int)
+        # Always normalize safely to int8
+        dfs[i][ev] = dfs[i][ev].apply(normalize_binary).astype(np.int8)
+
     dfs[i]["participation_count"] = dfs[i][all_event_cols].sum(axis=1) if all_event_cols else 0
 
-# Aggregate
 df = pd.concat(dfs, ignore_index=True) if len(dfs) > 1 else dfs[0]
 
-# Use first context as "primary" for naming; events use union
 primary_ctx = contexts[0][1]
 name_col = primary_ctx["name_col"]
 batch_col = primary_ctx["batch_col"] or ("Batch" if "Batch" in df.columns else None)
@@ -805,7 +752,6 @@ conversion_col = primary_ctx["conversion_col"]
 payment_col = primary_ctx["payment_col"]
 event_cols = all_event_cols
 event_dates = all_event_dates
-meta = primary_ctx["meta"]
 
 # =========================
 # Sidebar filters
@@ -823,7 +769,6 @@ min_part = st.sidebar.slider(
     0
 )
 
-# Sheet filter (useful in compare)
 sheet_filter = None
 if "__sheet__" in df.columns and len(selected_sheets) > 1:
     st.sidebar.markdown("### Compare control")
@@ -859,7 +804,7 @@ if search_text.strip():
     fdf = fdf[fdf[name_col].astype(str).str.lower().str.contains(q, na=False)]
 
 # =========================
-# Diagnostics / caption
+# Diagnostics
 # =========================
 st.caption(
     f"Sheets loaded: {len(dfs)} | "
@@ -1505,7 +1450,7 @@ with tab_quality:
     if payment_col and not event_dates:
         issues.append("Payment exists but event dates missing → retention may be less accurate.")
     if not batch_col and mode != "Single sheet":
-        issues.append("Batch column not detected in primary context; cohort analyses may fallback to Country.")
+        issues.append("Batch column not detected; cohort analyses may fallback to Country.")
     if issues:
         for it in issues:
             st.warning(it)
