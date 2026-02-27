@@ -7,10 +7,11 @@ import streamlit as st
 import plotly.express as px
 import plotly.graph_objects as go
 
+
 # =========================
 # Page config
 # =========================
-st.set_page_config(page_title="Tetr Engagement Analytics Dashboard", layout="wide")
+st.set_page_config(page_title="Engagement Analytics Dashboard", layout="wide")
 
 
 # =========================
@@ -28,8 +29,6 @@ def inject_css():
         }
 
         h1, h2, h3, h4, h5, h6 { color: #0b3d2e !important; }
-
-        .tetr-accent { color: #0b3d2e; font-weight: 700; }
 
         .tetr-card {
             background: #ffffff;
@@ -50,51 +49,17 @@ def inject_css():
             font-size: 12px;
         }
 
-        .tetr-metrics {
-            display: grid;
-            grid-template-columns: repeat(5, minmax(0, 1fr));
-            gap: 10px;
-        }
-
-        .tetr-metric {
+        /* Make metrics more compact */
+        div[data-testid="stMetric"] {
             background: #ffffff;
             border: 1px solid #dbeee0;
             border-radius: 14px;
             padding: 10px 12px;
             box-shadow: 0 1px 8px rgba(11, 61, 46, 0.06);
         }
-        .tetr-metric .label {
-            color: #2e6b57;
-            font-weight: 700;
-            font-size: 12px;
-            margin-bottom: 4px;
-        }
-        .tetr-metric .value {
-            color: #0b3d2e;
-            font-weight: 800;
-            font-size: 22px;
-            line-height: 1.1;
-        }
-        .tetr-metric .sub {
-            color: #4e7f6a;
-            font-weight: 600;
-            font-size: 12px;
-            margin-top: 4px;
-        }
-
-        .stDownloadButton button, .stButton button {
-            background: #0b3d2e !important;
-            border: 1px solid #0b3d2e !important;
-            color: #ffffff !important;
-            border-radius: 10px !important;
-        }
-        .stDownloadButton button:hover, .stButton button:hover {
-            background: #0f5a43 !important;
-            border-color: #0f5a43 !important;
-        }
-
-        .stTextInput input, .stSelectbox div, .stMultiSelect div {
-            border-radius: 10px !important;
+        div[data-testid="stMetric"] label {
+            color: #2e6b57 !important;
+            font-weight: 700 !important;
         }
         </style>
         """,
@@ -103,6 +68,7 @@ def inject_css():
 
 
 inject_css()
+
 
 # =========================
 # Constants
@@ -113,10 +79,12 @@ ALLOWED_SHEETS = {
     "UG B7",
     "UG B6",
     "UG B5",
-    "UG - B1 to B4",
+    "UG - B1 To B4",
     "Tetr-X-UG",
     "Tetr-X-PG",
 }
+
+TETR_X_SHEETS = {"Tetr-X-UG", "Tetr-X-PG"}
 
 GREEN_PALETTE = {
     "Paid / Admitted": "#0b3d2e",
@@ -125,6 +93,7 @@ GREEN_PALETTE = {
     "Refunded": "#93d8b1",
     "Not Paid": "#cfeedd",
 }
+
 
 # =========================
 # Helpers
@@ -160,6 +129,9 @@ def make_unique(cols):
 
 
 def normalize_binary(x) -> int:
+    """
+    Robust Yes/No normalization.
+    """
     try:
         if x is None:
             return 0
@@ -179,6 +151,15 @@ def parse_date_safe(x):
 
 
 def parse_event_date(val):
+    """
+    Handles:
+      - Timestamp-like / excel dates
+      - '2026-01-24 00:00:00'
+      - '28-30.01.2026'  (takes start date)
+      - '28.01 to 30.01.2026' (takes start date)
+      - '28 Jan 2026', '28 Jan, 2026', '28 January 2026'
+      - Extracts dd-mm-yyyy inside long event names
+    """
     try:
         ts = pd.to_datetime(val, errors="coerce", dayfirst=True)
         if pd.notna(ts):
@@ -255,6 +236,9 @@ def row_is_numeric_only(r):
 
 
 def is_probably_event_col(series: pd.Series) -> bool:
+    """
+    Attendance-like columns tend to be mostly in this allowed set.
+    """
     s = series.fillna("").astype(str).str.strip().str.lower()
     if s.empty:
         return False
@@ -271,18 +255,39 @@ def safe_datetime_range_with_padding(dates, pad_days=3):
     return [mn, mx]
 
 
-def infer_batch_from_sheet_name(sheet_name: str) -> str:
+def infer_program_from_sheet(sheet_name: str) -> str:
     s = clean_text(sheet_name).lower()
-    s = s.replace("–", "-").replace("—", "-")
+    if "tetr-x-ug" in s or s.startswith("ug"):
+        return "UG"
+    if "tetr-x-pg" in s or s.startswith("pg"):
+        return "PG"
+    return ""
 
-    m = re.search(r"\bb\s*(\d+)\s*(to|-)\s*b\s*(\d+)\b", s)
+
+def infer_batch_from_sheet_name(sheet_name: str) -> str:
+    """
+    Derive batch label from sheet name:
+      - 'UG B5' -> 'B5'
+      - 'PG - B3 & B4' -> 'B3–B4'
+      - 'UG - B1 To B4' -> 'B1–B4'
+      - Tetr-X sheets don't encode batch -> return ""
+    """
+    s = clean_text(sheet_name).lower().replace("–", "-").replace("—", "-")
+
+    if "tetr-x" in s:
+        return ""
+
+    # B1 to B4
+    m = re.search(r"\bb\s*(\d+)\s*to\s*b\s*(\d+)\b", s)
     if m:
-        return f"B{m.group(1)}–B{m.group(3)}"
+        return f"B{m.group(1)}–B{m.group(2)}"
 
+    # B3 & B4
     m = re.search(r"\bb\s*(\d+)\s*&\s*b\s*(\d+)\b", s)
     if m:
         return f"B{m.group(1)}–B{m.group(2)}"
 
+    # single B7
     m = re.search(r"\bb\s*(\d+)\b", s)
     if m:
         return f"B{m.group(1)}"
@@ -299,12 +304,14 @@ def load_sheet_structured(raw: pd.DataFrame):
 
     header_row = None
 
+    # Old style
     for i in range(min(40, len(raw))):
         t = row_text(i)
         if "student name" in t or "student names" in t:
             header_row = i
             break
 
+    # New style
     if header_row is None:
         for i in range(min(80, len(raw))):
             t = row_text(i)
@@ -318,6 +325,7 @@ def load_sheet_structured(raw: pd.DataFrame):
     if header_row is None:
         return None, None, "Could not find a header row ('Student Name' or 'Name') in top rows."
 
+    # optional date row above header
     candidate_rows = list(range(max(0, header_row - 8), header_row))
     best_date_row, best_hits = None, -1
     for r in candidate_rows:
@@ -396,6 +404,10 @@ def build_dataset_from_sheet(file_bytes: bytes, sheet_name: str):
     if err:
         return None, None, err
 
+    # Add program + batch from sheet rules
+    program = infer_program_from_sheet(sheet_name)
+    inferred_batch = infer_batch_from_sheet_name(sheet_name)
+
     KW = {
         "name_strict": ["student name", "student names", "full name", "learner name", "student", "name"],
         "name_fallback": ["name"],
@@ -403,18 +415,16 @@ def build_dataset_from_sheet(file_bytes: bytes, sheet_name: str):
         "phone": ["phone", "mobile", "mobile no", "phone number", "contact"],
         "country": ["country"],
         "batch": ["batch", "cohort", "group"],
-        "conversion": ["conversion status", "conversion", "status", "admitted", "refunded", "pending", "will pay"],
+        "conversion": ["conversion status", "conversion", "status", "admitted", "refunded", "pending", "will pay", "paid"],
         "payment_date": ["payment date", "payment", "paid date", "date of payment"],
-        "engagement_score": ["overall engagement score", "overall engagement", "engagement score", "engagement"],
-        "community_status": ["community status"],
-        "date_of_exit": ["date of exit", "exit date", "community exit date"],
     }
 
     name_col = best_matching_col(df, KW["name_strict"])
     if not name_col:
         name_col = best_matching_col(
-            df, KW["name_fallback"],
-            hard_excludes=["batch", "program", "session", "event", "country", "status"]
+            df,
+            KW["name_fallback"],
+            hard_excludes=["batch", "program", "session", "event", "country", "status", "payment"],
         )
     if not name_col:
         return None, None, "Student/Name column not detected."
@@ -425,53 +435,54 @@ def build_dataset_from_sheet(file_bytes: bytes, sheet_name: str):
     batch_col = best_matching_col(df, KW["batch"])
     conversion_col = best_matching_col(df, KW["conversion"])
     payment_col = best_matching_col(df, KW["payment_date"])
-    engagement_col = best_matching_col(df, KW["engagement_score"])
-    community_col = best_matching_col(df, KW["community_status"])
-    exit_col = best_matching_col(df, KW["date_of_exit"])
 
-    # Batch alignment ONLY for allowed sheets
-    if sheet_name in ALLOWED_SHEETS:
-        inferred = infer_batch_from_sheet_name(sheet_name)
-        if inferred:
-            if not batch_col:
-                df["Batch"] = inferred
-                batch_col = "Batch"
-            else:
-                bc = df[batch_col].astype(str).map(clean_text)
-                df.loc[bc.eq(""), batch_col] = inferred
+    # Ensure Program exists
+    df["Program"] = program if program else ""
 
+    # Ensure Batch alignment ONLY for allowed sheets (and only using sheet logic)
+    if inferred_batch:
+        if not batch_col:
+            df["Batch"] = inferred_batch
+            batch_col = "Batch"
+        else:
+            bc = df[batch_col].astype(str).map(clean_text)
+            df.loc[bc.eq(""), batch_col] = inferred_batch
+
+    # Drop numeric-only summary rows where name is blank
     name_series = df[name_col].astype(str).map(clean_text)
     numeric_mask = df.apply(row_is_numeric_only, axis=1)
     blank_name_mask = name_series.map(lambda x: x == "" or x.lower() == "nan")
     df = df.loc[~(numeric_mask & blank_name_mask)].copy()
 
-    metadata_cols = {
-        c for c in [
-            name_col, email_col, phone_col, country_col, batch_col,
-            conversion_col, payment_col, engagement_col, community_col, exit_col
-        ] if c
-    }
-
+    # Detect event cols
+    metadata_cols = {c for c in [name_col, email_col, phone_col, country_col, batch_col, conversion_col, payment_col, "Program"] if c}
     event_cols = [c for c in df.columns if c not in metadata_cols]
     event_cols = [c for c in event_cols if is_probably_event_col(df[c])]
 
-    # normalize events
+    # Normalize events
     for c in event_cols:
         df[c] = df[c].apply(normalize_binary).astype(np.int8)
 
     df["participation_count"] = df[event_cols].sum(axis=1) if event_cols else 0
 
+    # payment
     if payment_col:
         df[payment_col] = df[payment_col].apply(parse_date_safe)
 
+    # conversion col
     if not conversion_col:
         df["Conversion Status"] = ""
         conversion_col = "Conversion Status"
     df[conversion_col] = df[conversion_col].astype(str).map(lambda x: clean_text(x).lower())
 
+    # conversion category (with special handling for Tetr-X sheets)
     def conv_category(r):
+        if sheet_name in TETR_X_SHEETS:
+            return "Paid / Admitted"
+
         if payment_col and pd.notna(r.get(payment_col, pd.NaT)):
             return "Paid / Admitted"
+
         v = str(r.get(conversion_col, "")).lower()
         if "admitted" in v or "paid" in v:
             return "Paid / Admitted"
@@ -485,6 +496,7 @@ def build_dataset_from_sheet(file_bytes: bytes, sheet_name: str):
 
     df["conversion_category"] = df.apply(conv_category, axis=1)
 
+    # Event dates: meta first, otherwise parse from event name
     event_dates = meta.get("event_dates", {}) or {}
     if not event_dates:
         for ev in event_cols:
@@ -492,14 +504,23 @@ def build_dataset_from_sheet(file_bytes: bytes, sheet_name: str):
             if pd.notna(dt):
                 event_dates[ev] = dt
 
+    # retained: paid + attended after payment date
     def retained_flag(r):
+        if sheet_name in TETR_X_SHEETS:
+            # For paid-only sheets, retention still depends on after-payment attendance if payment date + event dates exist
+            pass
+
         if not payment_col:
             return np.nan
+
         pay = r.get(payment_col, pd.NaT)
         if pd.isna(pay):
-            return 0
+            # In Tetr-X, some payment date might be missing; still treat them as paid but retention cannot be timed
+            return 1 if r.get("participation_count", 0) > 0 else 0
+
         if not event_dates:
             return 1 if r.get("participation_count", 0) > 0 else 0
+
         pay_d = pay.normalize()
         for ev in event_cols:
             if r.get(ev, 0) == 1:
@@ -510,6 +531,7 @@ def build_dataset_from_sheet(file_bytes: bytes, sheet_name: str):
 
     df["retained"] = df.apply(retained_flag, axis=1)
 
+    # lead score
     def lead_score(r):
         score = int(r.get("participation_count", 0)) * 10
         for ev in event_cols:
@@ -543,11 +565,9 @@ def build_dataset_from_sheet(file_bytes: bytes, sheet_name: str):
         "phone_col": phone_col,
         "country_col": country_col,
         "batch_col": batch_col,
+        "program_col": "Program",
         "conversion_col": conversion_col,
         "payment_col": payment_col,
-        "engagement_col": engagement_col,
-        "community_col": community_col,
-        "exit_col": exit_col,
         "event_cols": event_cols,
         "event_dates": event_dates,
     }
@@ -557,50 +577,40 @@ def build_dataset_from_sheet(file_bytes: bytes, sheet_name: str):
 # =========================
 # UI helpers
 # =========================
-def metric_row(items):
-    html = '<div class="tetr-metrics">'
-    for label, value, sub in items:
-        html += f"""
-            <div class="tetr-metric">
-                <div class="label">{label}</div>
-                <div class="value">{value}</div>
-                <div class="sub">{sub}</div>
-            </div>
-        """
-    html += "</div>"
-    st.markdown(html, unsafe_allow_html=True)
-
-
-def kpi_cards(df, ctx, fdf):
+def compact_kpis(df_all, df_filtered, ctx):
+    """
+    Native Streamlit KPI row: compact + reliable (no HTML rendering issues).
+    """
     name_col = ctx["name_col"]
     payment_col = ctx["payment_col"]
 
-    total_students = int(df[name_col].notna().sum())
-    active_students = int((df["participation_count"] > 0).sum())
-    paid_count = int((df["conversion_category"] == "Paid / Admitted").sum())
-    participants = int((df["participation_count"] > 0).sum())
-    conversion_rate = (paid_count / participants * 100) if participants else 0.0
+    total_all = int(df_all[name_col].notna().sum())
+    active_all = int((df_all["participation_count"] > 0).sum())
+    paid_all = int((df_all["conversion_category"] == "Paid / Admitted").sum())
+    participants_all = int((df_all["participation_count"] > 0).sum())
+    conv_all = (paid_all / participants_all * 100) if participants_all else 0.0
 
-    f_total = int(fdf[name_col].notna().sum())
-    f_active = int((fdf["participation_count"] > 0).sum())
-    f_paid = int((fdf["conversion_category"] == "Paid / Admitted").sum())
-    f_participants = int((fdf["participation_count"] > 0).sum())
-    f_conv_rate = (f_paid / f_participants * 100) if f_participants else 0.0
+    total_f = int(df_filtered[name_col].notna().sum())
+    active_f = int((df_filtered["participation_count"] > 0).sum())
+    paid_f = int((df_filtered["conversion_category"] == "Paid / Admitted").sum())
+    participants_f = int((df_filtered["participation_count"] > 0).sum())
+    conv_f = (paid_f / participants_f * 100) if participants_f else 0.0
 
     if payment_col:
-        retention_all = float(df["retained"].mean() * 100) if len(df) else 0.0
-        retention_f = float(fdf["retained"].mean() * 100) if len(fdf) else 0.0
+        ret_all = float(df_all["retained"].mean() * 100) if len(df_all) else 0.0
+        ret_f = float(df_filtered["retained"].mean() * 100) if len(df_filtered) else 0.0
     else:
-        retention_all, retention_f = None, None
+        ret_all, ret_f = None, None
 
-    metric_row([
-        ("Total Students", f"{f_total}", f"All: {total_students}"),
-        ("Active Students", f"{f_active}", f"All: {active_students}"),
-        ("Paid / Admitted", f"{f_paid}", f"All: {paid_count}"),
-        ("Conversion Rate", f"{f_conv_rate:.1f}%", f"All: {conversion_rate:.1f}%"),
-        ("Retention Rate", f"{retention_f:.1f}%" if payment_col else "N/A",
-         f"All: {retention_all:.1f}%" if payment_col else "Needs Payment"),
-    ])
+    c1, c2, c3, c4, c5 = st.columns(5)
+    c1.metric("Total Students", f"{total_f}", help=f"All: {total_all}")
+    c2.metric("Active Students", f"{active_f}", help=f"All: {active_all}")
+    c3.metric("Paid / Admitted", f"{paid_f}", help=f"All: {paid_all}")
+    c4.metric("Conversion Rate", f"{conv_f:.1f}%", help=f"All: {conv_all:.1f}%")
+    if payment_col:
+        c5.metric("Retention Rate", f"{ret_f:.1f}%", help=f"All: {ret_all:.1f}%")
+    else:
+        c5.metric("Retention Rate", "N/A", help="Needs Payment Date column")
 
 
 def plotly_green_layout(fig, height=None, x_tickangle=None, bottom_margin=None):
@@ -631,7 +641,7 @@ st.markdown(
         <div>
           <div style="font-size:28px; font-weight:900; color:#0b3d2e;">📊 Engagement Analytics Dashboard</div>
           <div style="margin-top:4px; color:#2e6b57; font-weight:600;">
-            Only analyzes approved batch sheets • Batch-aligned parsing • Conversion + retention + event intelligence
+            Analyzes only UG/PG batch sheets + Tetr-X paid sheets • Batch-aligned • Conversion + retention + event intelligence
           </div>
         </div>
         <div class="tetr-badge">Green / White Theme</div>
@@ -642,6 +652,7 @@ st.markdown(
 )
 st.write("")
 
+
 uploaded_file = st.file_uploader("Upload Master Engagement Tracker Excel File", type=["xlsx"])
 if not uploaded_file:
     st.stop()
@@ -649,7 +660,7 @@ if not uploaded_file:
 file_bytes = uploaded_file.getvalue()
 all_sheets = get_sheet_names(file_bytes)
 
-# Only allow the 8 batch sheets
+# Only allow the specified sheets
 sheets = [s for s in all_sheets if s in ALLOWED_SHEETS]
 missing = [s for s in sorted(ALLOWED_SHEETS) if s not in set(all_sheets)]
 
@@ -665,30 +676,25 @@ if missing:
         for s in missing:
             st.write(f"- {s}")
 
+
 # =========================
 # Sidebar: mode + sheet selection
 # =========================
 st.sidebar.markdown("## Mode")
-mode = st.sidebar.radio(
-    "Choose view",
-    ["Single sheet", "Compare batches (multi-sheet)"],
-    index=1
-)
+mode = st.sidebar.radio("Choose view", ["Single sheet", "Compare (multi-sheet)"], index=1)
 st.sidebar.markdown("---")
 
 if mode == "Single sheet":
     selected_sheet = st.sidebar.selectbox("Select Sheet", sheets)
     selected_sheets = [selected_sheet]
 else:
-    selected_sheets = st.sidebar.multiselect(
-        "Select batch sheets to compare",
-        options=sheets,
-        default=sheets,
-    )
+    # Default select all allowed sheets found
+    selected_sheets = st.sidebar.multiselect("Select sheets to compare", options=sheets, default=sheets)
 
 if not selected_sheets:
     st.warning("Select at least one sheet.")
     st.stop()
+
 
 # =========================
 # Load datasets
@@ -718,8 +724,9 @@ if errors:
         for sname, err in errors:
             st.write(f"- **{sname}**: {err}")
 
+
 # =========================
-# ✅ FIXED: Align event columns robustly (no astype(int) crashes)
+# ✅ Robust event alignment (prevents .astype(int) crash)
 # =========================
 all_event_cols = sorted(set().union(*[set(ctx["event_cols"]) for _, ctx in contexts])) if contexts else []
 
@@ -737,7 +744,6 @@ for i in range(len(dfs)):
     for ev in all_event_cols:
         if ev not in dfs[i].columns:
             dfs[i][ev] = 0
-        # Always normalize safely to int8
         dfs[i][ev] = dfs[i][ev].apply(normalize_binary).astype(np.int8)
 
     dfs[i]["participation_count"] = dfs[i][all_event_cols].sum(axis=1) if all_event_cols else 0
@@ -746,12 +752,14 @@ df = pd.concat(dfs, ignore_index=True) if len(dfs) > 1 else dfs[0]
 
 primary_ctx = contexts[0][1]
 name_col = primary_ctx["name_col"]
-batch_col = primary_ctx["batch_col"] or ("Batch" if "Batch" in df.columns else None)
 country_col = primary_ctx["country_col"]
+batch_col = primary_ctx["batch_col"] or ("Batch" if "Batch" in df.columns else None)
+program_col = primary_ctx.get("program_col", "Program")
 conversion_col = primary_ctx["conversion_col"]
 payment_col = primary_ctx["payment_col"]
 event_cols = all_event_cols
 event_dates = all_event_dates
+
 
 # =========================
 # Sidebar filters
@@ -762,25 +770,30 @@ all_conv_vals = ["Paid / Admitted", "Will Pay", "Pending", "Refunded", "Not Paid
 present_conv = [c for c in all_conv_vals if c in set(df["conversion_category"].unique())]
 conv_filter = st.sidebar.multiselect("Conversion category", present_conv, default=present_conv)
 
-min_part = st.sidebar.slider(
-    "Minimum participation count",
-    0,
-    int(df["participation_count"].max() or 0),
-    0
-)
+min_part = st.sidebar.slider("Minimum participation count", 0, int(df["participation_count"].max() or 0), 0)
 
+# Sheet filter in compare mode
 sheet_filter = None
 if "__sheet__" in df.columns and len(selected_sheets) > 1:
     st.sidebar.markdown("### Compare control")
     all_sheet_vals = sorted(df["__sheet__"].dropna().astype(str).unique().tolist())
     sheet_filter = st.sidebar.multiselect("Limit to sheet(s)", all_sheet_vals, default=all_sheet_vals)
 
+# Program filter (UG/PG)
+program_filter = None
+if program_col in df.columns:
+    progs = sorted([p for p in df[program_col].dropna().astype(str).map(clean_text).unique().tolist() if p])
+    if progs:
+        program_filter = st.sidebar.multiselect("Program", progs, default=progs)
+
+# Batch filter
 batch_filter = None
 if batch_col and batch_col in df.columns:
     batches = sorted([b for b in df[batch_col].dropna().astype(str).map(clean_text).unique().tolist() if b])
     if batches:
         batch_filter = st.sidebar.multiselect("Batch", batches, default=batches)
 
+# Country filter
 country_filter = None
 if country_col and country_col in df.columns:
     countries = sorted([c for c in df[country_col].dropna().astype(str).map(clean_text).unique().tolist() if c])
@@ -795,6 +808,8 @@ fdf = fdf[fdf["conversion_category"].isin(conv_filter)]
 fdf = fdf[fdf["participation_count"] >= min_part]
 if sheet_filter is not None:
     fdf = fdf[fdf["__sheet__"].astype(str).isin(set(sheet_filter))]
+if program_filter is not None and program_col in fdf.columns:
+    fdf = fdf[fdf[program_col].astype(str).map(clean_text).isin(set(program_filter))]
 if batch_col and batch_filter is not None and batch_col in fdf.columns:
     fdf = fdf[fdf[batch_col].astype(str).map(clean_text).isin(set(batch_filter))]
 if country_col and country_filter is not None and country_col in fdf.columns:
@@ -803,23 +818,22 @@ if search_text.strip():
     q = search_text.strip().lower()
     fdf = fdf[fdf[name_col].astype(str).str.lower().str.contains(q, na=False)]
 
+
 # =========================
-# Diagnostics
+# Diagnostics / caption
 # =========================
-st.caption(
-    f"Sheets loaded: {len(dfs)} | "
-    f"Mode: {mode} | "
-    f"Filtered rows: {len(fdf)} / {len(df)}"
-)
+st.caption(f"Sheets loaded: {len(dfs)} | Mode: {mode} | Filtered rows: {len(fdf)} / {len(df)}")
 
 if payment_col and not event_dates:
     st.warning("Retention: Payment Date exists but event dates were not parsed/inferred → retention falls back to “any participation”.")
 
+
 # =========================
-# KPIs
+# KPIs (compact + clean)
 # =========================
-kpi_cards(df, primary_ctx, fdf)
+compact_kpis(df, fdf, primary_ctx)
 st.write("")
+
 
 # =========================
 # Downloads
@@ -850,12 +864,14 @@ with c_dl2:
 
 st.divider()
 
+
 # =========================
 # Tabs
 # =========================
 tab_overview, tab_students, tab_conversion, tab_events, tab_timeline, tab_quality = st.tabs(
     ["🌿 Overview", "👥 Students", "💳 Conversion & Retention", "🎯 Events", "🗓️ Timeline", "🧪 Data Quality"]
 )
+
 
 # =========================
 # OVERVIEW
@@ -870,7 +886,7 @@ with tab_overview:
         dist.columns = ["Participation Count", "Students"]
 
         fig_dist = px.bar(dist, x="Participation Count", y="Students", title="Participation Count Distribution")
-        fig_dist = plotly_green_layout(fig_dist, height=380)
+        fig_dist = plotly_green_layout(fig_dist, height=360)
         st.plotly_chart(fig_dist, use_container_width=True)
 
         seg = fdf.copy()
@@ -879,8 +895,7 @@ with tab_overview:
             bins=[-1, 0, 2, 5, 999999],
             labels=["Dormant (0)", "Warm (1–2)", "Engaged (3–5)", "Super Engaged (6+)"],
         )
-        seg_summary = seg.groupby(["segment", "conversion_category"], as_index=False).size()
-        seg_summary = seg_summary.rename(columns={"size": "Students"})
+        seg_summary = seg.groupby(["segment", "conversion_category"], as_index=False).size().rename(columns={"size": "Students"})
 
         fig_seg = px.bar(
             seg_summary,
@@ -891,12 +906,17 @@ with tab_overview:
             barmode="stack",
             title="Segments vs Conversion (stacked)"
         )
-        fig_seg = plotly_green_layout(fig_seg, height=420, x_tickangle=-15)
+        fig_seg = plotly_green_layout(fig_seg, height=380, x_tickangle=-15)
         st.plotly_chart(fig_seg, use_container_width=True)
 
-    st.subheader("Cohort performance (Batch/Country)")
+    st.subheader("Cohort performance")
+    # Prefer Batch, else Program, else Country
+    group_col = None
+    for cand in [batch_col, program_col, country_col]:
+        if cand and cand in fdf.columns:
+            group_col = cand
+            break
 
-    group_col = batch_col if (batch_col and batch_col in fdf.columns) else (country_col if (country_col and country_col in fdf.columns) else None)
     if group_col and len(fdf) > 0:
         tmp = fdf.copy()
         tmp[group_col] = tmp[group_col].astype(str).map(clean_text)
@@ -911,14 +931,15 @@ with tab_overview:
         grp["Paid_Rate"] = grp["Paid_Rate"].round(1)
         grp = grp.sort_values(["Paid_Rate", "Active Rate %", "Students"], ascending=False)
 
-        st.dataframe(grp, use_container_width=True, height=360)
+        st.dataframe(grp, use_container_width=True, height=340)
 
         fig_paid = px.bar(grp.head(25), x=group_col, y="Paid_Rate", title=f"Paid Rate % by {group_col} (Top 25)")
         fig_paid.update_traces(marker_color="#0b3d2e")
-        fig_paid = plotly_green_layout(fig_paid, height=380, x_tickangle=-30, bottom_margin=120)
+        fig_paid = plotly_green_layout(fig_paid, height=360, x_tickangle=-30, bottom_margin=120)
         st.plotly_chart(fig_paid, use_container_width=True)
     else:
-        st.info("No Batch/Country column detected to show cohort performance.")
+        st.info("No cohort column available for grouping.")
+
 
 # =========================
 # STUDENTS
@@ -926,8 +947,10 @@ with tab_overview:
 with tab_students:
     st.subheader("Top participating students (Filtered)")
     cols_show = [name_col, "participation_count", "conversion_category", "lead_score"]
-    if "__sheet__" in fdf.columns:
-        cols_show.append("__sheet__")
+    for extra in [program_col, batch_col, "__sheet__"]:
+        if extra and extra in fdf.columns and extra not in cols_show:
+            cols_show.append(extra)
+
     st.dataframe(
         fdf.sort_values("participation_count", ascending=False)[cols_show].head(250),
         use_container_width=True,
@@ -940,8 +963,10 @@ with tab_students:
     with cA:
         st.markdown("#### 🎯 High engagement but not paid (best conversion targets)")
         tcols = [name_col, "participation_count", "lead_score", "conversion_category"]
-        if "__sheet__" in fdf.columns:
-            tcols.append("__sheet__")
+        for extra in [program_col, batch_col, "__sheet__"]:
+            if extra and extra in fdf.columns and extra not in tcols:
+                tcols.append(extra)
+
         targets = (
             fdf[(fdf["conversion_category"] != "Paid / Admitted") & (fdf["participation_count"] >= 3)]
             .sort_values(["participation_count", "lead_score"], ascending=False)[tcols]
@@ -954,8 +979,10 @@ with tab_students:
         rcols = [name_col, "participation_count", "lead_score"]
         if payment_col:
             rcols.append(payment_col)
-        if "__sheet__" in fdf.columns:
-            rcols.append("__sheet__")
+        for extra in [program_col, batch_col, "__sheet__"]:
+            if extra and extra in fdf.columns and extra not in rcols:
+                rcols.append(extra)
+
         risks = (
             fdf[(fdf["conversion_category"] == "Paid / Admitted") & (fdf["participation_count"] <= 1)]
             .sort_values(["participation_count", "lead_score"], ascending=True)[rcols]
@@ -963,29 +990,6 @@ with tab_students:
         )
         st.dataframe(risks, use_container_width=True, height=360)
 
-    st.write("")
-    st.subheader("Students with NO participation (Filtered)")
-    cols_no = [name_col, conversion_col]
-    if payment_col:
-        cols_no.append(payment_col)
-    if "__sheet__" in fdf.columns:
-        cols_no.append("__sheet__")
-    st.dataframe(
-        fdf[fdf["participation_count"] == 0][cols_no],
-        use_container_width=True,
-        height=320,
-    )
-
-    st.write("")
-    st.subheader("🏆 Lead score leaderboard (Filtered)")
-    cols_lead = [name_col, "lead_score", "participation_count", "conversion_category"]
-    if "__sheet__" in fdf.columns:
-        cols_lead.append("__sheet__")
-    st.dataframe(
-        fdf.sort_values("lead_score", ascending=False)[cols_lead].head(250),
-        use_container_width=True,
-        height=420,
-    )
 
 # =========================
 # CONVERSION & RETENTION
@@ -993,141 +997,47 @@ with tab_students:
 with tab_conversion:
     st.subheader("Conversion breakdown (Filtered)")
 
-    paid_df = fdf[fdf["conversion_category"] == "Paid / Admitted"].copy()
-    will_df = fdf[fdf["conversion_category"] == "Will Pay"].copy()
-    pending_df = fdf[fdf["conversion_category"] == "Pending"].copy()
-    refunded_df = fdf[fdf["conversion_category"] == "Refunded"].copy()
-    not_df = fdf[fdf["conversion_category"] == "Not Paid"].copy()
-
-    cols_base = [name_col, conversion_col, "participation_count"]
-    if payment_col:
+    cols_base = [name_col, conversion_col, "participation_count", "conversion_category"]
+    for extra in [program_col, batch_col, "__sheet__"]:
+        if extra and extra in fdf.columns and extra not in cols_base:
+            cols_base.append(extra)
+    if payment_col and payment_col in fdf.columns:
         cols_base.insert(2, payment_col)
-    if "__sheet__" in fdf.columns:
-        cols_base.append("__sheet__")
 
-    c1, c2, c3 = st.columns(3)
+    c1, c2 = st.columns(2)
     with c1:
-        st.markdown("### ✅ Paid / Admitted")
-        st.dataframe(paid_df[cols_base], use_container_width=True, height=260)
+        st.markdown("### Conversion category counts")
+        st.dataframe(
+            fdf["conversion_category"].value_counts().reset_index().rename(columns={"index": "Category", "conversion_category": "Count"}),
+            use_container_width=True,
+            height=240,
+        )
+
     with c2:
-        st.markdown("### 🟡 Will Pay")
-        st.dataframe(will_df[cols_base], use_container_width=True, height=260)
-    with c3:
-        st.markdown("### 🟠 Pending")
-        st.dataframe(pending_df[cols_base], use_container_width=True, height=260)
-
-    c4, c5 = st.columns(2)
-    with c4:
-        st.markdown("### 🔵 Refunded")
-        st.dataframe(refunded_df[cols_base], use_container_width=True, height=240)
-    with c5:
-        st.markdown("### 🔴 Not Paid")
-        st.dataframe(not_df[cols_base], use_container_width=True, height=240)
-
-    st.write("")
-    st.markdown("### Raw conversion status values (Filtered)")
-    raw_conv = fdf[conversion_col].replace({"": np.nan, "nan": np.nan}).dropna()
-    raw_conv_counts = raw_conv.value_counts().reset_index()
-    raw_conv_counts.columns = ["Conversion Status", "Count"]
-    st.dataframe(raw_conv_counts, use_container_width=True, height=240)
+        st.markdown("### Raw conversion status values")
+        raw_conv = fdf[conversion_col].replace({"": np.nan, "nan": np.nan}).dropna()
+        raw_conv_counts = raw_conv.value_counts().reset_index()
+        raw_conv_counts.columns = ["Conversion Status", "Count"]
+        st.dataframe(raw_conv_counts, use_container_width=True, height=240)
 
     st.divider()
 
     st.subheader("Retention")
     if payment_col:
         f_ret = float(fdf["retained"].mean() * 100) if len(fdf) else 0.0
-        st.markdown(f"**Retention rate (filtered):** <span class='tetr-accent'>{f_ret:.2f}%</span>", unsafe_allow_html=True)
+        st.markdown(f"**Retention rate (filtered):** {f_ret:.2f}%")
 
         retained_cols = [name_col, payment_col, "participation_count"]
-        if "__sheet__" in fdf.columns:
-            retained_cols.append("__sheet__")
+        for extra in [program_col, batch_col, "__sheet__"]:
+            if extra and extra in fdf.columns and extra not in retained_cols:
+                retained_cols.append(extra)
+
         retained = fdf[fdf["retained"] == 1][retained_cols].copy()
         st.markdown("Retained students (paid + attended after payment date)")
         st.dataframe(retained, use_container_width=True, height=280)
-
-        group_col = batch_col if (batch_col and batch_col in fdf.columns) else (country_col if (country_col and country_col in fdf.columns) else None)
-        if group_col:
-            tmp = fdf.copy()
-            tmp[group_col] = tmp[group_col].astype(str).map(clean_text)
-            coh = tmp.groupby(group_col, as_index=False).agg(
-                Students=(name_col, "count"),
-                Paid=("conversion_category", lambda s: int((s == "Paid / Admitted").sum())),
-                Retained=("retained", "sum"),
-            )
-            coh["Retention % (Paid only)"] = np.where(
-                coh["Paid"] > 0,
-                (coh["Retained"] / coh["Paid"] * 100).round(1),
-                np.nan
-            )
-            coh = coh.sort_values("Retention % (Paid only)", ascending=False)
-
-            st.markdown(f"### Retention by {group_col}")
-            st.dataframe(coh, use_container_width=True, height=320)
     else:
         st.info("Retention not available (no Payment Date column detected).")
 
-    st.divider()
-
-    st.subheader("Engagement Before vs After Payment Date (Filtered)")
-    if payment_col and event_dates and event_cols and len(fdf) > 0:
-        rows = []
-        for _, r in fdf.iterrows():
-            pay = r.get(payment_col, pd.NaT)
-            if pd.isna(pay):
-                continue
-            pay = pay.normalize()
-            for ev in event_cols:
-                ev_dt = event_dates.get(ev, pd.NaT)
-                if pd.isna(ev_dt):
-                    continue
-                rows.append(
-                    {
-                        "Student": str(r.get(name_col, "")),
-                        "Payment Date": pay,
-                        "Event": ev,
-                        "Event Date": ev_dt,
-                        "Attended": int(r.get(ev, 0)),
-                        "Days From Payment": int((ev_dt - pay).days),
-                    }
-                )
-
-        long_df = pd.DataFrame(rows)
-        if long_df.empty:
-            st.info("Not enough data to compute engagement around payment date for this view.")
-        else:
-            min_d, max_d = int(long_df["Days From Payment"].min()), int(long_df["Days From Payment"].max())
-            left = max(-60, min_d)
-            right = min(60, max_d)
-
-            window = st.slider(
-                "Window (days relative to payment date)",
-                min_value=left,
-                max_value=right,
-                value=(-14, 30),
-            )
-
-            wdf = long_df[(long_df["Days From Payment"] >= window[0]) & (long_df["Days From Payment"] <= window[1])]
-            agg = (
-                wdf.groupby("Days From Payment", as_index=False)
-                .agg(Attended=("Attended", "sum"), Events=("Attended", "count"))
-            )
-            agg["Attendance Rate"] = (agg["Attended"] / agg["Events"]).fillna(0.0)
-
-            fig_pay = px.line(
-                agg,
-                x="Days From Payment",
-                y="Attendance Rate",
-                markers=True,
-                hover_data=["Attended", "Events"],
-                title="Attendance Rate vs Days From Payment Date",
-            )
-            fig_pay.add_vline(x=0, line_dash="dash", line_color="#0b3d2e")
-            fig_pay.update_traces(line_color="#0b3d2e")
-            fig_pay = plotly_green_layout(fig_pay, height=420)
-            st.plotly_chart(fig_pay, use_container_width=True)
-            st.caption("Day 0 = payment date. Positive days = events after payment.")
-    else:
-        st.info("Needs both Payment Date and Event Dates for this view.")
 
 # =========================
 # EVENTS
@@ -1164,81 +1074,6 @@ with tab_events:
 
     st.divider()
 
-    st.subheader("Pareto (80/20) — do a few events drive most participation?")
-    if event_cols and len(fdf) > 0:
-        event_counts = fdf[event_cols].sum().sort_values(ascending=False)
-        if event_counts.sum() == 0:
-            st.info("No event participation in current filtered view.")
-        else:
-            pareto = pd.DataFrame({"Event": event_counts.index, "Participants": event_counts.values.astype(int)})
-            pareto["Cumulative %"] = (pareto["Participants"].cumsum() / pareto["Participants"].sum() * 100).round(1)
-
-            fig_par = go.Figure()
-            fig_par.add_trace(go.Bar(x=pareto["Event"], y=pareto["Participants"], name="Participants",
-                                     marker_color="#0f5a43"))
-            fig_par.add_trace(go.Scatter(x=pareto["Event"], y=pareto["Cumulative %"], yaxis="y2",
-                                         name="Cumulative %", line=dict(color="#0b3d2e")))
-            fig_par.update_layout(
-                title="Event counts + cumulative share (Pareto)",
-                xaxis_tickangle=-45,
-                height=480,
-                margin=dict(l=10, r=10, t=60, b=170),
-                yaxis=dict(title="Participants"),
-                yaxis2=dict(title="Cumulative %", overlaying="y", side="right", range=[0, 100]),
-                showlegend=True,
-                paper_bgcolor="white",
-                plot_bgcolor="white",
-                font=dict(color="#0b3d2e"),
-            )
-            fig_par.update_xaxes(showgrid=True, gridcolor="#e8f4ec")
-            fig_par.update_yaxes(showgrid=True, gridcolor="#e8f4ec")
-            st.plotly_chart(fig_par, use_container_width=True)
-    else:
-        st.info("Pareto needs event columns.")
-
-    st.divider()
-
-    st.subheader("Event conversion impact (Paid rate among attendees)")
-    if event_cols and len(fdf) > 0:
-        rows = []
-        for ev in event_cols:
-            attendees = fdf[fdf[ev] == 1]
-            n_att = len(attendees)
-            if n_att == 0:
-                continue
-            paid_rate = (attendees["conversion_category"].eq("Paid / Admitted").mean()) * 100
-            rows.append({"Event": ev, "Attendees": n_att, "Paid Rate % (Attendees)": round(paid_rate, 1)})
-
-        impact = pd.DataFrame(rows)
-        if impact.empty:
-            st.info("No attendee data found for events in this view.")
-        else:
-            impact = impact.sort_values(["Paid Rate % (Attendees)", "Attendees"], ascending=False)
-            min_att = st.slider(
-                "Minimum attendees to include an event",
-                1,
-                max(1, int(impact["Attendees"].max())),
-                min(10, max(1, int(impact["Attendees"].max()))),
-            )
-            impact_f = impact[impact["Attendees"] >= min_att]
-            if impact_f.empty:
-                st.info("No events meet the minimum attendee threshold.")
-            else:
-                fig_imp = px.bar(
-                    impact_f.head(40),
-                    x="Event",
-                    y="Paid Rate % (Attendees)",
-                    hover_data=["Attendees"],
-                    title="Paid/Admitted rate among attendees (higher = stronger conversion signal)",
-                )
-                fig_imp.update_traces(marker_color="#0b3d2e")
-                fig_imp = plotly_green_layout(fig_imp, height=440, x_tickangle=-45, bottom_margin=160)
-                st.plotly_chart(fig_imp, use_container_width=True)
-    else:
-        st.info("No event columns detected.")
-
-    st.divider()
-
     st.subheader("Event calendar (date-sorted)")
     if event_dates:
         cal = []
@@ -1257,6 +1092,7 @@ with tab_events:
             st.dataframe(cal_df, use_container_width=True, height=360)
     else:
         st.info("No event dates detected/inferred.")
+
 
 # =========================
 # TIMELINE
@@ -1286,123 +1122,19 @@ with tab_timeline:
     else:
         st.info("No event dates detected in this view.")
 
-    st.divider()
-
-    st.subheader("Per-student participation timeline (Filtered)")
-    students = fdf[name_col].dropna().astype(str).unique().tolist()
-    if not students:
-        st.info("No students detected in this filtered view.")
-    else:
-        selected_student = st.selectbox("Select Student", students)
-        row = fdf[fdf[name_col].astype(str) == str(selected_student)].iloc[0]
-
-        use_dates = bool(event_dates)
-        timeline_events = event_cols[:]
-
-        if use_dates:
-            timeline_events = sorted(
-                timeline_events,
-                key=lambda ev: (pd.isna(event_dates.get(ev, pd.NaT)), event_dates.get(ev, pd.NaT)),
-            )
-
-        x_vals, attended = [], []
-        event_dt_list = []
-        for i, ev in enumerate(timeline_events, start=1):
-            if use_dates and pd.notna(event_dates.get(ev, pd.NaT)):
-                dt = event_dates[ev]
-                x_vals.append(dt)
-                event_dt_list.append(dt)
-            else:
-                x_vals.append(i)
-            attended.append(int(row.get(ev, 0)))
-
-        attended_x, attended_y = [], []
-        missed_x, missed_y = [], []
-        for xv, a in zip(x_vals, attended):
-            if a == 1:
-                attended_x.append(xv)
-                attended_y.append(1)
-            else:
-                missed_x.append(xv)
-                missed_y.append(0)
-
-        fig = go.Figure()
-        fig.add_trace(go.Scatter(
-            x=x_vals,
-            y=[0.5] * len(x_vals),
-            mode="lines",
-            hoverinfo="skip",
-            showlegend=False,
-            line=dict(width=1, dash="dot", color="#6bbf8a"),
-            opacity=0.35,
-        ))
-
-        fig.add_trace(go.Scatter(
-            x=attended_x, y=attended_y,
-            mode="lines+markers",
-            name="Attended",
-            connectgaps=False,
-            line=dict(color="#0b3d2e"),
-            marker=dict(color="#0b3d2e", size=8)
-        ))
-
-        fig.add_trace(go.Scatter(
-            x=missed_x, y=missed_y,
-            mode="markers",
-            name="Missed",
-            marker=dict(symbol="x", size=10, color="#1f7a56")
-        ))
-
-        if payment_col and pd.notna(row.get(payment_col, pd.NaT)) and use_dates:
-            pay_dt = row[payment_col]
-            fig.add_trace(go.Scatter(
-                x=[pay_dt], y=[1.18], mode="markers+text",
-                text=["<b>✔ Payment</b>"],
-                textposition="top center",
-                name="Payment Date",
-                marker=dict(symbol="star", size=18, color="#0f5a43"),
-                textfont=dict(size=14, color="#0f5a43"),
-            ))
-
-        fig.update_yaxes(range=[-0.2, 1.3], tickvals=[0, 1], title="Participation (1=Attended, 0=Missed)")
-        fig.update_layout(
-            height=560,
-            margin=dict(l=10, r=10, t=60, b=80),
-            title=f"Timeline — {selected_student}",
-            xaxis_title="Event Date" if use_dates else "Event Sequence",
-            showlegend=True,
-            paper_bgcolor="white",
-            plot_bgcolor="white",
-            font=dict(color="#0b3d2e"),
-        )
-        fig.update_xaxes(showgrid=True, gridcolor="#e8f4ec")
-        fig.update_yaxes(showgrid=True, gridcolor="#e8f4ec")
-
-        if use_dates and event_dt_list:
-            rng = safe_datetime_range_with_padding(event_dt_list, pad_days=4)
-            if rng:
-                fig.update_xaxes(range=rng, autorange=False)
-
-        if not use_dates:
-            fig.update_xaxes(
-                tickmode="array",
-                tickvals=list(range(1, len(timeline_events) + 1)),
-                ticktext=timeline_events,
-                tickangle=-45
-            )
-
-        st.plotly_chart(fig, use_container_width=True)
 
 # =========================
 # DATA QUALITY / DIAGNOSTICS
 # =========================
 with tab_quality:
-    st.subheader("Parsing diagnostics")
+    st.subheader("Parsing diagnostics (per sheet)")
 
     diag_rows = []
     for sname, ctx_i in contexts:
         diag_rows.append({
             "Sheet": sname,
+            "Program inferred": infer_program_from_sheet(sname),
+            "Batch inferred": infer_batch_from_sheet_name(sname),
             "Header row": ctx_i["meta"]["header_row"],
             "Date row": ctx_i["meta"]["date_row"],
             "Event row": ctx_i["meta"]["event_row"],
@@ -1411,34 +1143,7 @@ with tab_quality:
             "Has payment col": bool(ctx_i["payment_col"]),
             "Has batch col": bool(ctx_i["batch_col"] or ("Batch" in df.columns)),
         })
-    st.dataframe(pd.DataFrame(diag_rows), use_container_width=True, height=260)
-
-    st.write("")
-    st.subheader("Column mapping (primary view)")
-    st.write({
-        "name_col": primary_ctx["name_col"],
-        "email_col": primary_ctx["email_col"],
-        "phone_col": primary_ctx["phone_col"],
-        "country_col": primary_ctx["country_col"],
-        "batch_col": batch_col,
-        "conversion_col": primary_ctx["conversion_col"],
-        "payment_col": primary_ctx["payment_col"],
-        "engagement_col": primary_ctx["engagement_col"],
-        "community_col": primary_ctx["community_col"],
-        "exit_col": primary_ctx["exit_col"],
-    })
-
-    st.write("")
-    st.subheader("Event date coverage (union)")
-    if event_cols:
-        cover = pd.DataFrame({
-            "Event": event_cols,
-            "Has date?": [pd.notna(event_dates.get(e, pd.NaT)) for e in event_cols],
-            "Parsed date": [event_dates.get(e, pd.NaT) for e in event_cols],
-        })
-        st.dataframe(cover, use_container_width=True, height=360)
-    else:
-        st.info("No event columns detected.")
+    st.dataframe(pd.DataFrame(diag_rows), use_container_width=True, height=320)
 
     st.write("")
     st.subheader("Potential issues")
@@ -1449,13 +1154,12 @@ with tab_quality:
         issues.append("No event columns detected (attendance columns might not be yes/no-style).")
     if payment_col and not event_dates:
         issues.append("Payment exists but event dates missing → retention may be less accurate.")
-    if not batch_col and mode != "Single sheet":
-        issues.append("Batch column not detected; cohort analyses may fallback to Country.")
     if issues:
         for it in issues:
             st.warning(it)
     else:
         st.success("No obvious issues detected.")
+
 
 # =========================
 # Footer
@@ -1463,8 +1167,7 @@ with tab_quality:
 st.markdown(
     """
     <div style="margin-top:14px; color:#4e7f6a; font-weight:600;">
-      Tip: In <b>Compare batches</b> mode you can load multiple batch sheets and use the <b>sheet filter</b> in the sidebar
-      to quickly compare them.
+      Tip: Use <b>Program</b> and <b>Sheet</b> filters to compare UG vs PG and the Tetr-X paid sheets.
     </div>
     """,
     unsafe_allow_html=True,
