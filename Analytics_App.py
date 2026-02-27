@@ -124,7 +124,7 @@ ALLOWED_SHEETS = {
     "UG B7",
     "UG B6",
     "UG B5",
-    "UG - B1 To B4",
+    "UG - B1 to B4",
     "Tetr-X-UG",
     "Tetr-X-PG",
 }
@@ -303,7 +303,7 @@ def infer_batch_from_sheet_name(sheet_name: str) -> str:
     Derive batch label from sheet name:
       - 'UG B5' -> 'B5'
       - 'PG - B3 & B4' -> 'B3–B4'
-      - 'UG - B1 To B4' -> 'B1–B4'
+      - 'UG - B1 to B4' -> 'B1–B4'
     """
     s = clean_text(sheet_name).lower()
     s = s.replace("–", "-").replace("—", "-")
