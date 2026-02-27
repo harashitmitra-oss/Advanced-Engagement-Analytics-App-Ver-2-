@@ -10,7 +10,7 @@ import plotly.graph_objects as go
 # =========================
 # Page config
 # =========================
-st.set_page_config(page_title="Engagement Analytics Dashboard", layout="wide")
+st.set_page_config(page_title="Tetr Engagement Analytics Dashboard", layout="wide")
 
 
 # =========================
