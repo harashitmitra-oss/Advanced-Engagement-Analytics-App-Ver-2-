@@ -79,7 +79,7 @@ ALLOWED_SHEETS = {
     "UG B7",
     "UG B6",
     "UG B5",
-    "UG - B1 To B4",
+    "UG - B1 to B4",
     "Tetr-X-UG",
     "Tetr-X-PG",
 }
