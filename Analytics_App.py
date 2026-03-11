@@ -722,13 +722,6 @@ else:
 if data_source == "Google Sheets (auto)":
     USE_GSHEETS = True
 
-    # Try to load key from Streamlit secrets first
-    default_key = ""
-    try:
-        default_key = st.secrets.get("GSHEET_KEY_JSON", "")
-    except Exception:
-        pass
-
     HARDCODED_SHEET_ID = "1By2Zb8vKQnTIQn72JRgyEuuRgO6ZZARCZ1JNklmf25U"
     default_sheet_id = (
         st.secrets.get("GSHEET_SPREADSHEET_ID", HARDCODED_SHEET_ID)
@@ -740,6 +733,23 @@ if data_source == "Google Sheets (auto)":
         help="Google Sheets ID from the URL (pre-filled)",
     )
 
+    # Key resolution: (1) ./key.json  (2) Streamlit secrets  (3) sidebar upload
+    import os
+    default_key = ""
+
+    _local_key_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "key.json")
+    if os.path.isfile(_local_key_path):
+        with open(_local_key_path, "r", encoding="utf-8") as _f:
+            default_key = _f.read()
+        st.sidebar.success("🔑 Using `key.json` from local folder.")
+    else:
+        try:
+            default_key = st.secrets.get("GSHEET_KEY_JSON", "")
+            if default_key:
+                st.sidebar.success("🔑 Using service account key from Streamlit secrets.")
+        except Exception:
+            pass
+
     if not default_key:
         uploaded_key = st.sidebar.file_uploader(
             "Service Account Key JSON",
@@ -750,7 +760,6 @@ if data_source == "Google Sheets (auto)":
             key_json_str = uploaded_key.read().decode("utf-8")
     else:
         key_json_str = default_key
-        st.sidebar.success("🔑 Using service account key from Streamlit secrets.")
 
     if not spreadsheet_id or not key_json_str:
         st.info(
