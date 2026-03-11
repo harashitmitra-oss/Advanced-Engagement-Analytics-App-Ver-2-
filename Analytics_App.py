@@ -1,5 +1,6 @@
 import re
 from io import BytesIO
+import json
 
 import numpy as np
 import pandas as pd
@@ -7,6 +8,12 @@ import streamlit as st
 import plotly.express as px
 import plotly.graph_objects as go
 
+try:
+    import gspread
+    from google.oauth2.service_account import Credentials
+    GSPREAD_AVAILABLE = True
+except ImportError:
+    GSPREAD_AVAILABLE = False
 
 # =========================
 # Page config
@@ -381,7 +388,47 @@ def load_sheet_structured(raw: pd.DataFrame):
 
 
 # =========================
-# Excel I/O
+# Google Sheets helpers
+# =========================
+GSHEETS_SCOPES = [
+    "https://spreadsheets.google.com/feeds",
+    "https://www.googleapis.com/auth/drive",
+]
+
+
+def _get_gsheets_client(key_dict: dict):
+    """Build an authenticated gspread client from a service-account dict."""
+    creds = Credentials.from_service_account_info(key_dict, scopes=GSHEETS_SCOPES)
+    return gspread.authorize(creds)
+
+
+@st.cache_data(show_spinner=False, ttl=300)
+def gsheets_get_tab_names(spreadsheet_id: str, key_json_str: str) -> list:
+    """Return list of worksheet (tab) names from the spreadsheet."""
+    key_dict = json.loads(key_json_str)
+    gc = _get_gsheets_client(key_dict)
+    sh = gc.open_by_key(spreadsheet_id)
+    return [ws.title for ws in sh.worksheets()]
+
+
+@st.cache_data(show_spinner=False, ttl=300)
+def gsheets_read_raw_sheet(spreadsheet_id: str, sheet_name: str, key_json_str: str) -> pd.DataFrame:
+    """Fetch a worksheet as a raw DataFrame (header=None style) — same shape as read_raw_sheet."""
+    key_dict = json.loads(key_json_str)
+    gc = _get_gsheets_client(key_dict)
+    sh = gc.open_by_key(spreadsheet_id)
+    ws = sh.worksheet(sheet_name)
+    data = ws.get_all_values()  # list of lists of strings
+    if not data:
+        return pd.DataFrame()
+    df = pd.DataFrame(data)
+    # Replace empty strings with NaN (mirrors how Excel reads blank cells)
+    df.replace("", np.nan, inplace=True)
+    return df.dropna(how="all")
+
+
+# =========================
+# Excel I/O (kept for fallback manual upload)
 # =========================
 @st.cache_data(show_spinner=False)
 def get_sheet_names(file_bytes: bytes):
@@ -398,8 +445,12 @@ def read_raw_sheet(file_bytes: bytes, sheet_name: str):
 # =========================
 # Build dataset
 # =========================
-def build_dataset_from_sheet(file_bytes: bytes, sheet_name: str):
-    raw = read_raw_sheet(file_bytes, sheet_name)
+def build_dataset_from_sheet(raw_df_or_file_bytes, sheet_name: str, use_gsheets: bool = False,
+                              spreadsheet_id: str = "", key_json_str: str = ""):
+    if use_gsheets:
+        raw = gsheets_read_raw_sheet(spreadsheet_id, sheet_name, key_json_str)
+    else:
+        raw = read_raw_sheet(raw_df_or_file_bytes, sheet_name)
     df, meta, err = load_sheet_structured(raw)
     if err:
         return None, None, err
@@ -653,12 +704,77 @@ st.markdown(
 st.write("")
 
 
-uploaded_file = st.file_uploader("Upload Master Engagement Tracker Excel File", type=["xlsx"])
-if not uploaded_file:
-    st.stop()
+# =========================
+# Data source: Google Sheets (auto) or Excel (manual fallback)
+# =========================
+USE_GSHEETS = False
+spreadsheet_id = ""
+key_json_str = ""
+file_bytes = None
 
-file_bytes = uploaded_file.getvalue()
-all_sheets = get_sheet_names(file_bytes)
+if GSPREAD_AVAILABLE:
+    st.sidebar.markdown("## 📡 Data Source")
+    data_source = st.sidebar.radio("Source", ["Google Sheets (auto)", "Upload Excel (manual)"], index=0)
+else:
+    data_source = "Upload Excel (manual)"
+    st.sidebar.warning("Install `gspread` and `google-auth` to enable Google Sheets auto-fetch.")
+
+if data_source == "Google Sheets (auto)":
+    USE_GSHEETS = True
+
+    # Try to load key from Streamlit secrets first
+    default_key = ""
+    try:
+        default_key = st.secrets.get("GSHEET_KEY_JSON", "")
+    except Exception:
+        pass
+
+    HARDCODED_SHEET_ID = "1By2Zb8vKQnTIQn72JRgyEuuRgO6ZZARCZ1JNklmf25U"
+    default_sheet_id = (
+        st.secrets.get("GSHEET_SPREADSHEET_ID", HARDCODED_SHEET_ID)
+        if hasattr(st, "secrets") else HARDCODED_SHEET_ID
+    )
+    spreadsheet_id = st.sidebar.text_input(
+        "Spreadsheet ID",
+        value=default_sheet_id,
+        help="Google Sheets ID from the URL (pre-filled)",
+    )
+
+    if not default_key:
+        uploaded_key = st.sidebar.file_uploader(
+            "Service Account Key JSON",
+            type=["json"],
+            help="Upload the JSON key file for your Google service account.",
+        )
+        if uploaded_key:
+            key_json_str = uploaded_key.read().decode("utf-8")
+    else:
+        key_json_str = default_key
+        st.sidebar.success("🔑 Using service account key from Streamlit secrets.")
+
+    if not spreadsheet_id or not key_json_str:
+        st.info(
+            "👈 Paste your **Spreadsheet ID** and upload your **service account key JSON** in the sidebar "
+            "to automatically load data from Google Sheets."
+        )
+        st.stop()
+
+    st.sidebar.markdown("---")
+
+    with st.spinner("Fetching sheet list from Google Sheets…"):
+        try:
+            all_sheets = gsheets_get_tab_names(spreadsheet_id, key_json_str)
+        except Exception as e:
+            st.error(f"❌ Could not connect to Google Sheets: {e}")
+            st.stop()
+else:
+    # Manual Excel upload (original behaviour)
+    USE_GSHEETS = False
+    uploaded_file = st.file_uploader("Upload Master Engagement Tracker Excel File", type=["xlsx"])
+    if not uploaded_file:
+        st.stop()
+    file_bytes = uploaded_file.getvalue()
+    all_sheets = get_sheet_names(file_bytes)
 
 # Only allow the specified sheets
 sheets = [s for s in all_sheets if s in ALLOWED_SHEETS]
@@ -704,7 +820,12 @@ contexts = []
 errors = []
 
 for sname in selected_sheets:
-    df_i, ctx_i, err = build_dataset_from_sheet(file_bytes, sname)
+    df_i, ctx_i, err = build_dataset_from_sheet(
+        file_bytes, sname,
+        use_gsheets=USE_GSHEETS,
+        spreadsheet_id=spreadsheet_id,
+        key_json_str=key_json_str,
+    )
     if err:
         errors.append((sname, err))
         continue
