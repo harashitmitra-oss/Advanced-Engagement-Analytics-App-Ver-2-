@@ -733,38 +733,21 @@ if data_source == "Google Sheets (auto)":
         help="Google Sheets ID from the URL (pre-filled)",
     )
 
-    # Key resolution: (1) ./key.json  (2) Streamlit secrets  (3) sidebar upload
+    # Key resolution: ./key.json
     import os
-    default_key = ""
+    key_json_str = ""
 
     _local_key_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "key.json")
     if os.path.isfile(_local_key_path):
         with open(_local_key_path, "r", encoding="utf-8") as _f:
-            default_key = _f.read()
+            key_json_str = _f.read()
         st.sidebar.success("🔑 Using `key.json` from local folder.")
     else:
-        st.sidebar.success("🔑 unable to use key.json from local folder.")
-        try:
-            default_key = st.secrets.get("GSHEET_KEY_JSON", "")
-            if default_key:
-                st.sidebar.success("🔑 Using service account key from Streamlit secrets.")
-        except Exception:
-            pass
-
-    if not default_key:
-        uploaded_key = st.sidebar.file_uploader(
-            "Service Account Key JSON",
-            type=["json"],
-            help="Upload the JSON key file for your Google service account.",
-        )
-        if uploaded_key:
-            key_json_str = uploaded_key.read().decode("utf-8")
-    else:
-        key_json_str = default_key
+        st.sidebar.error("🔑 unable to use `key.json` from local folder.")
 
     if not spreadsheet_id or not key_json_str:
         st.info(
-            "👈 Paste your **Spreadsheet ID** and upload your **service account key JSON** in the sidebar "
+            "👈 Paste your **Spreadsheet ID** in the sidebar and ensure **key.json** is present in the app's folder "
             "to automatically load data from Google Sheets."
         )
         st.stop()
