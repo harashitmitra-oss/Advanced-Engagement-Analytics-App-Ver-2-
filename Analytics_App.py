@@ -743,6 +743,7 @@ if data_source == "Google Sheets (auto)":
             default_key = _f.read()
         st.sidebar.success("🔑 Using `key.json` from local folder.")
     else:
+        st.sidebar.success("🔑 unable to use key.json from local folder.")
         try:
             default_key = st.secrets.get("GSHEET_KEY_JSON", "")
             if default_key:
