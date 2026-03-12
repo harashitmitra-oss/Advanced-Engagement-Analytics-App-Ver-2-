@@ -733,21 +733,26 @@ if data_source == "Google Sheets (auto)":
         help="Google Sheets ID from the URL (pre-filled)",
     )
 
-    # Key resolution: ./key.json
-    import os
-    key_json_str = ""
+    # Hardcoded Key resolution
+    key_json_str = r"""{
+  "type": "service_account",
+  "project_id": "strong-summer-488709-b9",
+  "private_key_id": "3dce9306f7b018f815af7e839c005ed1ffb0efa4",
+  "private_key": "-----BEGIN PRIVATE KEY-----\nMIIEvgIBADANBgkqhkiG9w0BAQEFAASCBKgwggSkAgEAAoIBAQDaZFViLclZp1H9\nBh4S3skMaMmsdLUZsCs330a4kuiG3qikWb4Igpb6jLS16rr8s7IpbY9IVfBPV5YN\nR3ZZnMuoGJ/FsyDVlN5wUZOZxoCtJ2HBRxUEnIPK2AeBwERZnFqRboziN+v5rFBe\nW1+9j8z7x2eCOQ9nbFWTD9PHW7B2w/mqw2/vWC1AO9kbrmGP7HmXe/xxQogxO4Vm\n+rJfHnu7pzmTfpikDJNXjfASocWj7fn4CrMdunvBf+qhyRbh0E8F/AHx8XgHeam8\nxEZWSJUaLjvzJAaLDQv1sMF0N4Yii111Sdiwj7/rlly0ZGOFm2XEv4Y3znKLyPOg\nxJFRAhiDAgMBAAECggEACs9kmpOBn/p0SH4BBxYYBZE6SlsMi9T4jq9ypLhA4kwr\nNNdsXKd6KbTFTSvtTYzniL1vljkKyCKhvs6GwTDNs+hkIDkZqvjPeefP0pDM1cVZ\nRWPrWmsU6vl+haGqwHTI1uIN/zSdbaJl6AXF23A+yUe5i+yfIpNuOPVTmk6jkX1S\nbb5OQ7RYQ9NC9OZSkmIVaJ50Vc2vznBWFyUyDIuPUZRPXtWB+q6QEEmp7KFJU/00\nDPv1p3y8kttTrIRbdIVYnJgZEfqGI9Ul6K/gn1BNYZyc7gRyh1Nfevvd5SMdNNzg\n5mo+LGFK1CmAs3X/JvdOCGhUlirDO4fN44GMm1mWwQKBgQD8AYNMbM56xHYCTdb6\nKPwzVzBqVsDStz0E4RIPNEo92d0cYqryg5VU1ZUmeqTnVV9DslErg6LZsncEUkR+\n2qCQJfsS5YLdO+9gK44ER/MpSRbPTeFAgfaFV2b8A89iRg6lATL4NXlKVjXk5dpZ\noT5NBxaax8oY4MiApt2vG4C26QKBgQDd2m98rtcJRseDdQpETuWO9Iw0pd5iw4gW\ngJlQAu3SJvLCWSlxtlyDGLiIs9P+Z0t5LWsJsoZsvoylTAsRLA4yQNrsXAKjw2Oj\ns3pWUnF1xE7HqeMV6lGl/5AYEA0LjqudXMxVswBs8ieUxXzj79ljQl2210oAJ8Nq\nMS/Kx3uIiwKBgANfTc9/AUBZUq7zNbZBSCazuv0hThFDzHg9Ps2fSIMNYE0Z8Omv\n4xawiP9r0rsZxF2WjEmFyG8bWUZgh3QfHtju+S4mjhrBy5FA4/SgtdtOlBSQGTyQ\nwKjGI6Wps2PARj/lBTaXGJlrD+uRO9vJMZk8SAwoMkck8unt0befKZjJAoGBANiH\nRaDPlJk9N6UaKncY+fxYui74ZODILp6nzPrGoQ8nbHA7TbPqZMie7BygRxxZ/NO8\nfGfukjy4jdUXLwYHlaN+oS1ncDwdi7ZOieyOcqaafrlpGnZdSGtXz29s2w6YpO7l\nj5llJ9ktT2xog8iEZAv4zjaSUWttY9DVSOwFXpCZAoGBAIFeK26Up6yTpNHu0rlq\nlCavYOSpYIkpyhSE/5y0DVebgpOcJGwCbIbzNcwM+c8KQbWsF2P/kFZk9ewh6U6e\nJX5k5T4U1CiwwKxJMaVFSeyYhr9FY2Lcnao7JKV44g3J5+5JlFTsBOQY5LEsbw64\n2+F5O6xY+1PJgxc+bGF1rfHz\n-----END PRIVATE KEY-----\n",
+  "client_email": "tetr-101@strong-summer-488709-b9.iam.gserviceaccount.com",
+  "client_id": "110965885023187393080",
+  "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+  "token_uri": "https://oauth2.googleapis.com/token",
+  "auth_provider_x509_cert_url": "https://www.googleapis.com/oauth2/v1/certs",
+  "client_x509_cert_url": "https://www.googleapis.com/robot/v1/metadata/x509/tetr-101%40strong-summer-488709-b9.iam.gserviceaccount.com",
+  "universe_domain": "googleapis.com"
+}"""
 
-    _local_key_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "key.json")
-    if os.path.isfile(_local_key_path):
-        with open(_local_key_path, "r", encoding="utf-8") as _f:
-            key_json_str = _f.read()
-        st.sidebar.success("🔑 Using `key.json` from local folder.")
-    else:
-        st.sidebar.error("🔑 unable to use `key.json` from local folder.")
+    st.sidebar.success("🔑 Using hardcoded credentials.")
 
     if not spreadsheet_id or not key_json_str:
         st.info(
-            "👈 Paste your **Spreadsheet ID** in the sidebar and ensure **key.json** is present in the app's folder "
+            "👈 Paste your **Spreadsheet ID** in the sidebar "
             "to automatically load data from Google Sheets."
         )
         st.stop()
