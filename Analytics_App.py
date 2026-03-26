@@ -398,17 +398,38 @@ GSHEETS_SCOPES = [
 
 def _get_gsheets_client(key_dict: dict):
     """Build an authenticated gspread client from a service-account dict."""
-    creds = Credentials.from_service_account_info(key_dict, scopes=GSHEETS_SCOPES)
-    return gspread.authorize(creds)
+    import sys
+    print(f"🔑 Authenticating with Google Sheets using service account: {key_dict.get('client_email')}...", file=sys.stderr)
+    try:
+        creds = Credentials.from_service_account_info(key_dict, scopes=GSHEETS_SCOPES)
+        gc = gspread.authorize(creds)
+        print("✅ Google Sheets authentication successful!", file=sys.stderr)
+        return gc
+    except Exception as e:
+        print(f"❌ Google Sheets authentication failed: {e}", file=sys.stderr)
+        raise e
 
 
 @st.cache_data(show_spinner=False, ttl=300)
 def gsheets_get_tab_names(spreadsheet_id: str, key_json_str: str) -> list:
     """Return list of worksheet (tab) names from the spreadsheet."""
-    key_dict = json.loads(key_json_str)
-    gc = _get_gsheets_client(key_dict)
-    sh = gc.open_by_key(spreadsheet_id)
-    return [ws.title for ws in sh.worksheets()]
+    import sys
+    print(f"📡 Fetching tabs for spreadsheet ID: {spreadsheet_id}", file=sys.stderr)
+    try:
+        key_dict = json.loads(key_json_str)
+        gc = _get_gsheets_client(key_dict)
+        sh = gc.open_by_key(spreadsheet_id)
+        tabs = [ws.title for ws in sh.worksheets()]
+        print(f"✅ Successfully fetched {len(tabs)} tabs: {tabs}", file=sys.stderr)
+        return tabs
+    except gspread.exceptions.SpreadsheetNotFound:
+        email = json.loads(key_json_str).get('client_email', 'the service account')
+        msg = f"Spreadsheet Not Found or Access Denied! Please make sure you have shared the Google Sheet with the service account email: {email}"
+        print(f"❌ {msg}", file=sys.stderr)
+        raise Exception(msg)
+    except Exception as e:
+        print(f"❌ Error fetching tabs: {e}", file=sys.stderr)
+        raise e
 
 
 @st.cache_data(show_spinner=False, ttl=300)
