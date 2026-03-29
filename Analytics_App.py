@@ -41,8 +41,8 @@ HARDCODED_SHEET_ID = "1By2Zb8vKQnTIQn72JRgyEuuRgO6ZZARCZ1JNklmf25U"
 HARDCODED_SERVICE_ACCOUNT_JSON = r"""{
   "type": "service_account",
   "project_id": "strong-summer-488709-b9",
-  "private_key_id": "341016a860e4a43af945c06ff3a6b54fa78c967c",
-  "private_key": "-----BEGIN PRIVATE KEY-----\nMIIEvAIBADANBgkqhkiG9w0BAQEFAASCBKYwggSiAgEAAoIBAQCevmZ8CwXAPxnY\n4jo4O9MghJm71Q0anRle8YiasQCqQ80lmRE1s4BoxCcsDe+IrP0/loM16rCYHLOI\nlua/4xh+3dLqwNLEK5gcSFR5cQ32zZqHX9SjLo7PlfY3Pkbi3wYfmwSlBX1NJtjI\nRhGcY03GIh6N25RZcIv1IwOFX1tUt/obcxZXz0lJ0oHpIkPVAIg9t145JQC7k/4Y\nju/HooolLF0CroeqGQZlMRnfmSEzubtZiHQin81PmDdGv5VORe9dns1WeblL2JEV\nJ22z7W60y8BIvqzSJXKypIWxU95IvmnNrlViI2NgAd2bjF4FesCVFdxVokVSelVH\naKasPDzxAgMBAAECggEAJbv3y5OpLc4yHDKGiVh7MtciXhpiT4m5fq6mfLMHh/Gv\nAbl1dFDzfLPn5dp4LoKEfomOLhJYIQhtitHoDwPyDjI3kVL9puD/+vUck3OS0LCG\nA5j9iD6oduLcULxuiD5gi8HDJGD+LIlH7a9uP0EBu0/f+HOSO4J72m0UyK7mnGfx\nYkAw+R4cCFTlJGmvpdnljVlfoPljx/q3sB0cMN8knG2bu7eQLcToNFE+pW22w6XY\n80N8MK4vrHhPLG0XaYZdgD7c99+cSKkRQmfyVI4JH7qir1crULneEurt11sHxbJQ\n4KrbdAeIHzYaNxftNYpeB6fnhXeOmUY1QR6r7R1rQwKBgQDNaX0Ck5/OB2tJkTCs\njKFcofaL/9UQ+E1zeB2M7IHvN6dzVyCFri7IRqohZ6tJE6gT5xMGzuxDr5aODiqf\nAuZUevZkijRRYYPtLqYBEgdHetHgwuY4DDuniNxVf288T4aMIcH/qzt75KDAJXm2\n8+JkgyAFuMljqTKSnW/D6H63IwKBgQDF1qNkMS7+hsHOkW3IGJWKSm+q6zsi9BTQ\nEzBhe+8s4B9twKIdeIhT32rhDpR8thdhHMlssyVJ3vpHwOvcqD1NCF2JnE1bWy2F\n5PUdx3NPFp3NDXoWbvrtnkqN8J+rgDinSYLIx4+VRbjkhJr9z3OSzLBAEq2UZ5wA\n0wGitFZG2wKBgErfOIHH7WfbrG+UTHmYiPiK0KMXDUKyPwjnr12+l13qm06fY2tW\noha+KyUh9H0efRVEFNtWcSf6yJXe9AohtHL2nvjmp0tCkCPT7Q5W0/BqBDY41FF5\npATdDfLcEF+bXR+W7m+SqovuOenPvx3Ap7SbVwC+6ik5cwWd/S8bf5ShAoGAQ+4y\nRknZEA5nZ61p26YNWuG6PB7vPE5BAz1DhIWQl4ERaZcWUzY64Um6ojJma/f+SRsg\nUpGkwRuuJososaiW++debszbhv3kwK/gNmxwvHxQjMMO47sRsBuFD/3KZZHuYgqM\nvLJBLAk3tkeODI556bMc5bNEJMv6thG94wc3BLcCgYAjdwFP6ve12X3PbV94OkRi\nHjd0DcBQ5/6cRVgYoklDFVrYZB2JTqarq4Sn4m0pUkJm7/UFXnRomnhBgL0CXs+6\n4rjcSbvH4lDimqWo9Mpt8VxJz83QhojLBrfzKDqhHmHAxBicPPOxZ4SkZ0AUvE2c\n/r1XXCCTbbpFB2DlWMdLCQ==\n-----END PRIVATE KEY-----\n",
+  "private_key_id": "7f0ed5e69e39a9dcea12af767271707fa76232a3",
+  "private_key": "-----BEGIN PRIVATE KEY-----\nMIIEvAIBADANBgkqhkiG9w0BAQEFAASCBKYwggSiAgEAAoIBAQDp0aGl5LMQDvmH\nrnrRnVsoJx1Mq/52/L+1dGgpL/RAn42HundcN/D7TBH68YmQkDXyk+ZRf/MtEXfc\naNVA1zL20dtMTQdzrqTTidHL4Q36df3OCmthWIMy5f2q9LJNMPt/aDhlmrbQlb6Q\noBDFwXhCcnwuFzy8tEqBGEVmMIzJBTWsZ9c7iQKeJpB+u6HAd4YJjnHJMdJ/7vM9\nRIjmdcYKXpVLNsCE4md5GlJU0iVxDYXlwkKknPOLdLh+Y/5EjHhtZXSSqdSjntqS\nVJPTsn/fsMqko5CBIEdsWWT6leVvq3HBaVBETs5OrB6vVUkQ0PdwqtKcOMmKTBvE\nWr6f+cK/AgMBAAECggEAA5uSCVbXn6fOsdYMKK/Rq3NVc5lm+iI5BjofLh0cGuMo\nJXzH2rE1ed5ZAkY3zFzTq3dP8AuWKCipo/z6GixrEBcTPlolHOPU9Ag5J6wq5KWg\nnoBxDhxCtsZVsHP8f4E1LQIVD+Ks1dfgDA5sM9Qh+hewhgWI9y03X3nAZSzamNkA\n+Ti8iFosVvQ+bbLt5S+M2II46UwCW9lZBR/NHMF2AVp70TxzjyLfxmr8LsZVvr/o\ndclRLW0LAz951cukYEfby5nwLCg37NnFNnXtEQq9mxpQHtZtoKH2W+tp1yTFfiHt\n7qsCm6/u9NE/HjuB3WVCPmcULcA9xXsQLv8WVRHiAQKBgQD/ZsFMbcq1S6VKrETc\nfjEEGVC2B3FBhC2Lyid/z2sr2fHYJTss/FBEgEF2CFst4DDyBz5/odcpmV4zNNXY\nOR+l4kSd7loNMv7yxmhf7ToCgsNu3epVabqZf9w2BI5e2v17D7T+fiIWCuGreHM+\n/+Xisbn8IE6azAx/p4RNzLq/PQKBgQDqXe0vyzxN2NaX9pNuJCMoZ5DRJPZTC2y6\neCvcmDZ11MG1UhELvTh8+V0QGzhAz24yBcLPE2z4DJjhHgrDbmdVt9qeApeoLpM7\nLl5ZBbWXbY4pqYV3rv6kvQ2MSdLorlhGvtU2J457HNp3ZZxYA8XoEnQ8JbuEyci1\nHDZOjrxpqwKBgElWtV0ADfxfW3iE3UU/i021A0MyAeihTv7cLtl5szmlXNgHYOW7\nEkWJWsLNBXm37fYh9GVsEL/mRXGI03tCc/8LaU68eeleYm1OYfxhv42nBP2aBcc/\nFBEt8Qsl5cgBNFaZHQ0TJTCVMVYuwVEu5FFjXZezoz66J0Ck1s4MYve1AoGAagN0\nv/LR43DbmT/bbq4ADU3TrxdmKSh41Vx4kr9zmxdTTD7EIShFvhpaY2e8qWxrL0t1\n1I+38fhYyzP4sHBnY9nXlTQc/+GZjeKqoOA5RTc0YFojWoEZBNHTqArY0ZHTsqSt\n82IvTDdAB1Q6RYHnatO2KmLzENzp4irR0fU0+yMCgYBKpHfgS3PgOX1StB+8lE3B\nLOz7Oj795yrmyR2K+1a+86dHz1EPhxkEP7QExfCwJLSKc3o0OiBDv52KHYj6nrvi\nyQIyxw25Ya2C14qhDPTD6VkN2ia5TSibzO7l0ts8Jwj8wRUj6aT8LPmQ8+VaaPne\nB7AeElVWsTkHo+sHQ4TNgA==\n-----END PRIVATE KEY-----\n",
   "client_email": "tetr-101@strong-summer-488709-b9.iam.gserviceaccount.com",
   "client_id": "110965885023187393080",
   "auth_uri": "https://accounts.google.com/o/oauth2/auth",
@@ -295,14 +295,52 @@ def make_unique(cols):
     return out
 
 
-def find_header_row(raw: pd.DataFrame, max_scan=30):
+def find_header_row(raw: pd.DataFrame, max_scan=30, is_master=False):
+    best_row = None
+    best_score = -1
+
     for i in range(min(max_scan, len(raw))):
-        row = " | ".join(clean_text(v).lower() for v in raw.iloc[i].tolist())
-        if "student name" in row:
+        vals = [clean_text(v).lower() for v in raw.iloc[i].tolist()]
+        non_empty = sum(1 for v in vals if v)
+        if non_empty < 3:
+            continue
+
+        score = 0
+        joined = " | ".join(vals)
+
+        if any("student name" in v for v in vals):
+            score += 10
+        if any(v == "name" or v.startswith("name ") for v in vals):
+            score += 8
+        if any("email" in v for v in vals):
+            score += 6
+        if any("country" in v for v in vals):
+            score += 4
+        if any("batch" in v for v in vals):
+            score += 4
+        if any("status" in v for v in vals):
+            score += 4
+        if any("payment" in v for v in vals):
+            score += 5
+        if any("contact" in v or "phone" in v or "mobile" in v for v in vals):
+            score += 3
+        if is_master and any("admitted group" in v for v in vals):
+            score += 3
+        if is_master and any("term zero" in v for v in vals):
+            score += 2
+
+        # Penalize rows that are mostly numbers or percentages.
+        numeric_like = sum(bool(re.fullmatch(r"[\d\.,%]+", v)) for v in vals if v)
+        score -= numeric_like * 0.5
+
+        if "name" in joined and "email" in joined and score >= 10:
             return i
-        if "payment status" in row and "email" in row:
-            return i
-    return None
+
+        if score > best_score:
+            best_score = score
+            best_row = i
+
+    return best_row if best_score >= 8 else None
 
 
 def row_nonempty_count(raw: pd.DataFrame, row_idx: int, start_col: int = 0) -> int:
@@ -362,7 +400,15 @@ def clean_student_frame(df: pd.DataFrame, name_col: str, email_col: str | None):
 
 
 def load_master_sheet(raw: pd.DataFrame, program: str):
-    header_row = find_header_row(raw, max_scan=25)
+    header_row = find_header_row(raw, max_scan=40, is_master=True)
+    if header_row is None:
+        # Fallback for live Google Sheets when header metadata is slightly inconsistent.
+        first_rows = min(6, len(raw))
+        for i in range(first_rows):
+            vals = [clean_text(v).lower() for v in raw.iloc[i].tolist()]
+            if any(v in {"name", "student name"} for v in vals) and any("email" in v for v in vals):
+                header_row = i
+                break
     if header_row is None:
         raise ValueError(f"Could not detect header row in master sheet for {program}.")
 
@@ -437,7 +483,7 @@ def load_master_sheet(raw: pd.DataFrame, program: str):
 
 
 def load_detail_sheet(raw: pd.DataFrame, sheet_name: str):
-    header_row = find_header_row(raw, max_scan=25)
+    header_row = find_header_row(raw, max_scan=40, is_master=False)
     if header_row is None:
         raise ValueError(f"Could not detect header row in {sheet_name}.")
 
@@ -1081,7 +1127,8 @@ def main():
 
     with st.sidebar:
         st.markdown("---")
-        page = st.radio("Navigation", NAV_ITEMS, index=0)
+        st.markdown("### Navigation")
+        page = st.radio("Navigation", NAV_ITEMS, index=0, label_visibility="collapsed")
 
     st.markdown(
         f"""
