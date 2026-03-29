@@ -691,64 +691,116 @@ def render_detail_tab(sheet_name, df, ctx):
     st.dataframe(df[display_cols].sort_values(["engagement_pct", "engagement_score"], ascending=False), use_container_width=True, height=440)
 
 
+
 def resolve_credentials_and_source():
-    default_sheet_id = st.secrets.get("GSHEET_SPREADSHEET_ID", "") if hasattr(st, "secrets") else ""
-    secrets_credentials = None
-    if hasattr(st, "secrets"):
-        if "GOOGLE_SERVICE_ACCOUNT" in st.secrets:
-            secrets_credentials = json.dumps(dict(st.secrets["GOOGLE_SERVICE_ACCOUNT"]))
-        elif "gcp_service_account" in st.secrets:
-            secrets_credentials = json.dumps(dict(st.secrets["gcp_service_account"]))
+    spreadsheet_id = ""
+    credentials_payload = None
+    file_bytes = None
+    connected_ok = False
+    connection_note = ""
 
-    with st.sidebar:
-        st.markdown("## Data source")
-        options = ["Google Sheets (live)", "Excel upload (fallback)"] if GSPREAD_AVAILABLE else ["Excel upload (fallback)"]
-        source_choice = st.radio("Source", options, index=0)
-        spreadsheet_id = ""
-        credentials_payload = None
-        file_bytes = None
-        connected_ok = False
-        connection_note = ""
+    if GSPREAD_AVAILABLE:
+        with st.sidebar:
+            st.markdown("## 📡 Data Source")
+            source_choice = st.radio("Source", ["Google Sheets (auto)", "Upload Excel (manual)"], index=0)
+    else:
+        source_choice = "Upload Excel (manual)"
+        with st.sidebar:
+            st.warning("Install `gspread` and `google-auth` to enable Google Sheets auto-fetch.")
 
-        if source_choice == "Google Sheets (live)":
-            spreadsheet_id = st.text_input("Spreadsheet ID", value=default_sheet_id)
-            credentials_mode = st.radio("Credentials", ["Use Streamlit secrets", "Paste JSON key"], index=0 if secrets_credentials else 1)
-            if credentials_mode == "Use Streamlit secrets":
-                credentials_payload = secrets_credentials
-                if not credentials_payload:
-                    st.info("Add GOOGLE_SERVICE_ACCOUNT or gcp_service_account to Streamlit secrets.")
-            else:
-                pasted = st.text_area("Service account JSON", height=180, help="Paste the full service account JSON.")
-                credentials_payload = pasted.strip() or None
+    if source_choice == "Google Sheets (auto)":
+        HARDCODED_SHEET_ID = "1By2Zb8vKQnTIQn72JRgyEuuRgO6ZZARCZ1JNklmf25U"
+        default_sheet_id = (
+            st.secrets.get("GSHEET_SPREADSHEET_ID", HARDCODED_SHEET_ID)
+            if hasattr(st, "secrets") else HARDCODED_SHEET_ID
+        )
+        with st.sidebar:
+            spreadsheet_id = st.text_input(
+                "Spreadsheet ID",
+                value=default_sheet_id,
+                help="Google Sheets ID from the URL (pre-filled)",
+            )
 
-            if spreadsheet_id and credentials_payload:
-                try:
-                    gsheets_get_sheet_names(spreadsheet_id, credentials_payload)
-                    connected_ok = True
-                    connection_note = "Connected to Google Sheets"
-                except Exception as e:
-                    connected_ok = False
-                    connection_note = f"Connection failed: {e}"
-                    st.error(connection_note)
-        else:
-            uploaded_file = st.file_uploader("Excel workbook", type=["xlsx"])
-            if uploaded_file is not None:
-                file_bytes = uploaded_file.getvalue()
-                connected_ok = True
-                connection_note = "Using uploaded workbook"
-            else:
-                local_path = Path("New Master Engagement  (13).xlsx")
-                if local_path.exists():
-                    file_bytes = local_path.read_bytes()
-                    connected_ok = True
-                    connection_note = "Using local workbook"
+        credentials_payload = r"""{
+  "type": "service_account",
+  "project_id": "strong-summer-488709-b9",
+  "private_key_id": "4499482b8729efba2eafd82e28e4925abdb19957",
+  "private_key": "-----BEGIN PRIVATE KEY-----
+MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQDU2igPtv46dHB8
+gW+zmvX/BvQOCWhVCBzx6BJnpy+hYH1/6A6XTIACaRx9DK7PbFBAdID3srtWO1vp
+XnYmQ19Ds52CPMm99Axw2Fheq/nTKkJGEJHCWhrCWTNv2R5PRgOfAebM+bqSf/Zo
+m3J4aqgFfGS8/UMhCLs7zwQSN3lmhzWaHh1GBI+iyOwTFoVTpX7hE3ObGqU5yi3R
+7bwtK/T/I/TH05LQQlS6Fw0pS+3sbst+NEz0VqT4JLF6MPxFMEORJELWAnunKOxK
+JyFlUi60eS8AUbioDi+xq6KPkMX/U5rJCQKEEsnUa1DQQAJGqehXdNMkpMmoZSjf
+UlkzibFTAgMBAAECggEANfN77wvHocJs1qoqSYCQNM2q47nvt4ngaFKWA67lTEa8
+WMTVmfT6h2HkJjAmSQ4fw06kd+RWRrOyBtN6KBWwmmT3GhFVY2/uDVZRA+IcZzFR
+bhf6EiSrnrJkbse+PoK1HUMqoK714vdLWlV4bNw/7XALyrl5H/DqIG1HD2T/QQSy
+/JG6uyiqcCsBzmVUgmnXWVQ9TOkurDnvhHHEMllTXOfL0RJgN4DJc4BRbt3I9H6j
+DXc9/c1QLmJACf/7hmHDaBGIN8NR4/7OWiLzupxVR7ZaBK66CGOzyP0TbcT5mu5u
+3HUdiUIx0iUEacW6XwmiUGLx3TzwY1sL2Qtl4gXEOQKBgQD3+BbqZ3BOv8DCL3h0
+QS6OmIsCd1aqkksXkBF/xtdwYkbFBIQSVEIjozgz24XvNt8LLZxUNTWUZLSED941
+zWTtlbAbx1ER3mPZHdaQ1YcYEnf+ca6ZjeU08QIacTRtWL0Xc3grU50NZDtuOdvl
+lN4ER3L9jVw5FM6n+FdHRC90KQKBgQDbvumorEV+ds8U5pzfsQXpA7DNKBK8XUh1
+d+UGlyTo/xtT+xhvFFqb3idhvBEQkvB0YB+W1vsPu6WGGBj508U8gqu+TeCpOATV
+JQk4s9qnvAgk6ePEcfP2gvlepmMyy4cNIDKkELG63G+9X4SanxpR3ZvywtxyZa/t
+tdbFQjsJGwKBgCN9mqoKDAT5ZPlmGfNpsOQv6RV9RyY6sgy5Tgffyc4IAuEH+G83
+KBA5uD2T2eOXEu1ipdFXnEeU8lFEhCVnNF7c4cvYBz5rehcFMkSgiyli21HLq5XG
+vVuKcyadtUdBQC8vE6//06arBeaM2XBOkkhCga7QoLZ6x+k6niNRGwmhAoGAHBhF
+kX4tCGUyRq7RYbwlUExbf29fLdwTVol0q6oJWwy6trsEvbbxeroleNZtrBvNSGO9
+xjBIOxO3rvRHxTExJ3JheNxGG/yAiavJiQldrFJbDDUnHMeg9GR8c4B8cFMbOi9i
+qh1ES+rBEooyzv4GhG778Ea/npSnsJGuGtxD5f8CgYEApPVq37RfyIhJ3URR6cqK
+F9MYfORQDjK+I77MVhtI9bFMcCx8LpFgUJBlRnfqg8rGzwmK5c5b+xS0BUWveeTw
+VqSzhbD++0+OPuOCpAs2eR7n/HoVoQN5rV+LgebFLMGHNy8YyM4ZmpKNMDWWleyT
+gMxPCtmg4m81LIwIxkxJbHs=
+-----END PRIVATE KEY-----
+",
+  "client_email": "tetr-101@strong-summer-488709-b9.iam.gserviceaccount.com",
+  "client_id": "110965885023187393080",
+  "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+  "token_uri": "https://oauth2.googleapis.com/token",
+  "auth_provider_x509_cert_url": "https://www.googleapis.com/oauth2/v1/certs",
+  "client_x509_cert_url": "https://www.googleapis.com/robot/v1/metadata/x509/tetr-101%40strong-summer-488709-b9.iam.gserviceaccount.com",
+  "universe_domain": "googleapis.com"
+}
+"""
 
-        st.markdown("## Global filters")
-        only_active = st.checkbox("Show only active students", value=False)
-        only_paid = st.checkbox("Show only paid/admitted students", value=False)
-        selected_programs = st.multiselect("Program filter", ["UG", "PG"], default=["UG", "PG"])
+        with st.sidebar:
+            st.success("🔑 Using hardcoded credentials.")
 
-    source_mode = "gsheets" if source_choice == "Google Sheets (live)" else "excel"
+        if not spreadsheet_id or not credentials_payload:
+            st.info(
+                "👈 Paste your **Spreadsheet ID** in the sidebar "
+                "to automatically load data from Google Sheets."
+            )
+            st.stop()
+
+        with st.sidebar:
+            st.markdown("---")
+            st.markdown("## Global filters")
+            only_active = st.checkbox("Show only active students", value=False)
+            only_paid = st.checkbox("Show only paid/admitted students", value=False)
+            selected_programs = st.multiselect("Program filter", ["UG", "PG"], default=["UG", "PG"])
+
+        try:
+            gsheets_get_sheet_names(spreadsheet_id, credentials_payload)
+            connected_ok = True
+            connection_note = "Connected to Google Sheets"
+        except Exception as e:
+            connected_ok = False
+            connection_note = f"Connection failed: {e}"
+    else:
+        uploaded_file = st.file_uploader("Upload Master Engagement Tracker Excel File", type=["xlsx"])
+        if uploaded_file is not None:
+            file_bytes = uploaded_file.getvalue()
+            connected_ok = True
+            connection_note = "Using uploaded workbook"
+        with st.sidebar:
+            st.markdown("## Global filters")
+            only_active = st.checkbox("Show only active students", value=False)
+            only_paid = st.checkbox("Show only paid/admitted students", value=False)
+            selected_programs = st.multiselect("Program filter", ["UG", "PG"], default=["UG", "PG"])
+
+    source_mode = "gsheets" if source_choice == "Google Sheets (auto)" else "excel"
     return {
         "source_mode": source_mode,
         "spreadsheet_id": spreadsheet_id,
@@ -760,6 +812,7 @@ def resolve_credentials_and_source():
         "only_paid": only_paid,
         "selected_programs": selected_programs,
     }
+
 
 
 def main():
