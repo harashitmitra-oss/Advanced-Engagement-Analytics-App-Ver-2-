@@ -1,7 +1,7 @@
-
 import json
 import re
 from io import BytesIO
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
@@ -22,6 +22,11 @@ MASTER_SHEETS = ["Master UG", "Master PG"]
 DETAIL_SHEETS = ["UG B9", "UG B8", "UG B7", "UG B6", "PG B5"]
 NAV_ITEMS = ["Overview", "Student Profile"] + DETAIL_SHEETS
 ALL_REQUIRED = MASTER_SHEETS + DETAIL_SHEETS
+DEFAULT_SHEET_ID = "1By2Zb8vKQnTIQn72JRgyEuuRgO6ZZARCZ1JNklmf25U"
+GSHEETS_SCOPES = [
+    "https://spreadsheets.google.com/feeds",
+    "https://www.googleapis.com/auth/drive",
+]
 
 GREEN = "#0b3d2e"
 GREEN_2 = "#1f7a56"
@@ -31,63 +36,12 @@ GREEN_5 = "#dff3e7"
 DARK = "#12372a"
 LIGHT_BG = "#f7fbf8"
 RED = "#d9534f"
-
-GSHEETS_SCOPES = [
-    "https://spreadsheets.google.com/feeds",
-    "https://www.googleapis.com/auth/drive",
-]
-
-HARDCODED_SHEET_ID = "1By2Zb8vKQnTIQn72JRgyEuuRgO6ZZARCZ1JNklmf25U"
-HARDCODED_SERVICE_ACCOUNT_JSON = r"""{
-  "type": "service_account",
-  "project_id": "strong-summer-488709-b9",
-  "private_key_id": "7f0ed5e69e39a9dcea12af767271707fa76232a3",
-  "private_key": "-----BEGIN PRIVATE KEY-----\nMIIEvAIBADANBgkqhkiG9w0BAQEFAASCBKYwggSiAgEAAoIBAQDp0aGl5LMQDvmH\nrnrRnVsoJx1Mq/52/L+1dGgpL/RAn42HundcN/D7TBH68YmQkDXyk+ZRf/MtEXfc\naNVA1zL20dtMTQdzrqTTidHL4Q36df3OCmthWIMy5f2q9LJNMPt/aDhlmrbQlb6Q\noBDFwXhCcnwuFzy8tEqBGEVmMIzJBTWsZ9c7iQKeJpB+u6HAd4YJjnHJMdJ/7vM9\nRIjmdcYKXpVLNsCE4md5GlJU0iVxDYXlwkKknPOLdLh+Y/5EjHhtZXSSqdSjntqS\nVJPTsn/fsMqko5CBIEdsWWT6leVvq3HBaVBETs5OrB6vVUkQ0PdwqtKcOMmKTBvE\nWr6f+cK/AgMBAAECggEAA5uSCVbXn6fOsdYMKK/Rq3NVc5lm+iI5BjofLh0cGuMo\nJXzH2rE1ed5ZAkY3zFzTq3dP8AuWKCipo/z6GixrEBcTPlolHOPU9Ag5J6wq5KWg\nnoBxDhxCtsZVsHP8f4E1LQIVD+Ks1dfgDA5sM9Qh+hewhgWI9y03X3nAZSzamNkA\n+Ti8iFosVvQ+bbLt5S+M2II46UwCW9lZBR/NHMF2AVp70TxzjyLfxmr8LsZVvr/o\ndclRLW0LAz951cukYEfby5nwLCg37NnFNnXtEQq9mxpQHtZtoKH2W+tp1yTFfiHt\n7qsCm6/u9NE/HjuB3WVCPmcULcA9xXsQLv8WVRHiAQKBgQD/ZsFMbcq1S6VKrETc\nfjEEGVC2B3FBhC2Lyid/z2sr2fHYJTss/FBEgEF2CFst4DDyBz5/odcpmV4zNNXY\nOR+l4kSd7loNMv7yxmhf7ToCgsNu3epVabqZf9w2BI5e2v17D7T+fiIWCuGreHM+\n/+Xisbn8IE6azAx/p4RNzLq/PQKBgQDqXe0vyzxN2NaX9pNuJCMoZ5DRJPZTC2y6\neCvcmDZ11MG1UhELvTh8+V0QGzhAz24yBcLPE2z4DJjhHgrDbmdVt9qeApeoLpM7\nLl5ZBbWXbY4pqYV3rv6kvQ2MSdLorlhGvtU2J457HNp3ZZxYA8XoEnQ8JbuEyci1\nHDZOjrxpqwKBgElWtV0ADfxfW3iE3UU/i021A0MyAeihTv7cLtl5szmlXNgHYOW7\nEkWJWsLNBXm37fYh9GVsEL/mRXGI03tCc/8LaU68eeleYm1OYfxhv42nBP2aBcc/\nFBEt8Qsl5cgBNFaZHQ0TJTCVMVYuwVEu5FFjXZezoz66J0Ck1s4MYve1AoGAagN0\nv/LR43DbmT/bbq4ADU3TrxdmKSh41Vx4kr9zmxdTTD7EIShFvhpaY2e8qWxrL0t1\n1I+38fhYyzP4sHBnY9nXlTQc/+GZjeKqoOA5RTc0YFojWoEZBNHTqArY0ZHTsqSt\n82IvTDdAB1Q6RYHnatO2KmLzENzp4irR0fU0+yMCgYBKpHfgS3PgOX1StB+8lE3B\nLOz7Oj795yrmyR2K+1a+86dHz1EPhxkEP7QExfCwJLSKc3o0OiBDv52KHYj6nrvi\nyQIyxw25Ya2C14qhDPTD6VkN2ia5TSibzO7l0ts8Jwj8wRUj6aT8LPmQ8+VaaPne\nB7AeElVWsTkHo+sHQ4TNgA==\n-----END PRIVATE KEY-----\n",
-  "client_email": "tetr-101@strong-summer-488709-b9.iam.gserviceaccount.com",
-  "client_id": "110965885023187393080",
-  "auth_uri": "https://accounts.google.com/o/oauth2/auth",
-  "token_uri": "https://oauth2.googleapis.com/token",
-  "auth_provider_x509_cert_url": "https://www.googleapis.com/oauth2/v1/certs",
-  "client_x509_cert_url": "https://www.googleapis.com/robot/v1/metadata/x509/tetr-101%40strong-summer-488709-b9.iam.gserviceaccount.com",
-  "universe_domain": "googleapis.com"
-}
-
-"""
+PAID_HINTS = {"paid", "admitted"}
+EVENT_RESPONSES = {"yes", "y", "1", "true", "present", "attended", "done", "no", "n", "0", "false", "absent", ""}
+MASTER_SKIP_ROWS_AFTER_HEADER = 2
 
 
-def safe_get_secrets_dict():
-    try:
-        return st.secrets
-    except Exception:
-        return {}
-
-
-def resolve_streamlit_service_account():
-    secrets = safe_get_secrets_dict()
-    for key in ("GOOGLE_SERVICE_ACCOUNT", "gcp_service_account"):
-        try:
-            if key in secrets:
-                val = secrets[key]
-                if hasattr(val, "to_dict"):
-                    val = val.to_dict()
-                else:
-                    val = dict(val)
-                if "private_key" in val:
-                    return json.dumps(val)
-        except Exception:
-            pass
-    return None
-
-
-def resolve_spreadsheet_id_default():
-    secrets = safe_get_secrets_dict()
-    try:
-        return secrets.get("GSHEET_SPREADSHEET_ID", HARDCODED_SHEET_ID)
-    except Exception:
-        return HARDCODED_SHEET_ID
-
-
-def inject_css():
+def inject_css() -> None:
     st.markdown(
         f"""
         <style>
@@ -106,14 +60,6 @@ def inject_css():
             box-shadow: 0 8px 24px rgba(11, 61, 46, 0.06);
             margin-bottom: 8px;
         }}
-        .profile-card {{
-            background: #ffffff;
-            border: 1px solid #dbeee0;
-            border-radius: 18px;
-            padding: 18px 20px;
-            box-shadow: 0 4px 14px rgba(11, 61, 46, 0.04);
-            margin-bottom: 14px;
-        }}
         .live-pill {{
             display: inline-flex;
             align-items: center;
@@ -131,65 +77,43 @@ def inject_css():
             background: #fdeceb;
             border-color: #f3cdca;
         }}
-        .heartbeat-wrap {{
-            position: relative;
-            width: 12px;
-            height: 12px;
-        }}
+        .heartbeat-wrap {{ position: relative; width: 12px; height: 12px; }}
         .heartbeat-dot {{
-            width: 12px;
-            height: 12px;
-            border-radius: 50%;
-            background: #1bb55c;
-            position: absolute;
-            top: 0;
-            left: 0;
-            z-index: 2;
+            width: 12px; height: 12px; border-radius: 50%; background: #1bb55c;
+            position: absolute; top: 0; left: 0; z-index: 2;
         }}
         .heartbeat-ping {{
-            width: 12px;
-            height: 12px;
-            border-radius: 50%;
-            background: rgba(27,181,92,0.30);
-            position: absolute;
-            top: 0;
-            left: 0;
-            animation: heartbeatPing 1.5s ease-out infinite;
-            z-index: 1;
+            width: 12px; height: 12px; border-radius: 50%; background: rgba(27,181,92,0.30);
+            position: absolute; top: 0; left: 0; animation: heartbeatPing 1.5s ease-out infinite; z-index: 1;
         }}
-        .offline-dot {{
-            width: 12px;
-            height: 12px;
-            border-radius: 50%;
-            background: {RED};
-        }}
+        .offline-dot {{ width: 12px; height: 12px; border-radius: 50%; background: {RED}; }}
         @keyframes heartbeatPing {{
             0% {{ transform: scale(0.9); opacity: 0.9; }}
             70% {{ transform: scale(2.2); opacity: 0; }}
             100% {{ transform: scale(2.2); opacity: 0; }}
         }}
         div[data-testid="stMetric"] {{
-            background: #ffffff;
-            border: 1px solid #dbeee0;
-            border-radius: 16px;
-            padding: 10px 12px;
-            box-shadow: 0 2px 10px rgba(11, 61, 46, 0.05);
+            background: #ffffff; border: 1px solid #dbeee0; border-radius: 16px;
+            padding: 10px 12px; box-shadow: 0 2px 10px rgba(11, 61, 46, 0.05);
         }}
-        div[data-testid="stMetric"] label {{
-            color: {GREEN_2} !important;
-            font-weight: 700 !important;
-        }}
+        div[data-testid="stMetric"] label {{ color: {GREEN_2} !important; font-weight: 700 !important; }}
         h1, h2, h3 {{ color: {DARK} !important; }}
+        .stRadio > div {{ gap: 0.45rem; }}
+        .stRadio label {{ width: 100%; }}
+        .stRadio [role="radiogroup"] > label {{
+            background: linear-gradient(180deg, #edf8f1 0%, #e3f3ea 100%);
+            border: 1px solid #d5eadf;
+            padding: 10px 12px;
+            border-radius: 12px;
+            margin-bottom: 6px;
+        }}
         </style>
         """,
         unsafe_allow_html=True,
     )
 
 
-inject_css()
-
-
-def clean_text(x):
+def clean_text(x) -> str:
     if x is None:
         return ""
     if isinstance(x, float) and np.isnan(x):
@@ -197,30 +121,12 @@ def clean_text(x):
     return str(x).replace("\n", " ").replace("\r", " ").replace("\xa0", " ").strip()
 
 
-def normalize_name(s: str) -> str:
-    s = clean_text(s).lower()
-    s = re.sub(r"\s+", " ", s)
-    return s.strip()
+def normalize_name(x: str) -> str:
+    return re.sub(r"\s+", " ", clean_text(x).lower()).strip()
 
 
-def parse_numeric(x):
-    if x is None:
-        return np.nan
-    if isinstance(x, (int, float, np.integer, np.floating)):
-        return float(x)
-    s = clean_text(x)
-    if not s or s.lower() in {"nan", "none", "#div/0!", "inf", "-inf"}:
-        return np.nan
-    s = s.replace("%", "").replace(",", "")
-    try:
-        return float(s)
-    except Exception:
-        return np.nan
-
-
-def normalize_yes_no(x):
-    s = clean_text(x).lower()
-    return 1 if s in {"yes", "y", "1", "true", "present", "attended", "done"} else 0
+def to_numeric_clean(series: pd.Series) -> pd.Series:
+    return pd.to_numeric(series.astype(str).str.replace("%", "", regex=False).str.strip(), errors="coerce")
 
 
 def parse_date_safe(x):
@@ -249,6 +155,20 @@ def parse_event_date(val):
     return pd.NaT
 
 
+def make_unique(cols: List[str]) -> List[str]:
+    seen: Dict[str, int] = {}
+    out = []
+    for c in cols:
+        base = clean_text(c) or "Unnamed"
+        if base not in seen:
+            seen[base] = 0
+            out.append(base)
+        else:
+            seen[base] += 1
+            out.append(f"{base}_{seen[base]}")
+    return out
+
+
 def infer_program_from_sheet(sheet_name: str) -> str:
     s = clean_text(sheet_name).lower()
     if "ug" in s:
@@ -263,210 +183,119 @@ def infer_batch_from_sheet_name(sheet_name: str) -> str:
     return m.group(1).upper() if m else ""
 
 
-def best_matching_col(df: pd.DataFrame, candidates):
+def best_matching_col(df: pd.DataFrame, candidates: List[str]) -> Optional[str]:
     lowered = {c: clean_text(c).lower() for c in df.columns}
     for cand in candidates:
+        cand = cand.lower()
         for col, low in lowered.items():
             if cand in low:
                 return col
     return None
 
 
-def best_matching_index(values, candidates):
-    lowered = [clean_text(v).lower() for v in values]
-    for cand in candidates:
-        for idx, low in enumerate(lowered):
-            if cand in low:
-                return idx
+def find_master_header_row(raw: pd.DataFrame) -> Optional[int]:
+    for i in range(min(15, len(raw))):
+        row = [clean_text(v).lower() for v in raw.iloc[i].tolist()]
+        hits = sum(any(token in cell for token in ["name", "email", "batch", "country", "status", "payment"]) for cell in row)
+        if "name" in row[0] or hits >= 5:
+            return i
     return None
 
 
-def make_unique(cols):
-    seen = {}
-    out = []
-    for c in cols:
-        c = clean_text(c) or "Unnamed"
-        if c not in seen:
-            seen[c] = 0
-            out.append(c)
-        else:
-            seen[c] += 1
-            out.append(f"{c}_{seen[c]}")
-    return out
-
-
-def find_header_row(raw: pd.DataFrame, max_scan=30, is_master=False):
-    best_row = None
-    best_score = -1
-
-    for i in range(min(max_scan, len(raw))):
-        vals = [clean_text(v).lower() for v in raw.iloc[i].tolist()]
-        non_empty = sum(1 for v in vals if v)
-        if non_empty < 3:
-            continue
-
-        score = 0
-        joined = " | ".join(vals)
-
-        if any("student name" in v for v in vals):
-            score += 10
-        if any(v == "name" or v.startswith("name ") for v in vals):
-            score += 8
-        if any("email" in v for v in vals):
-            score += 6
-        if any("country" in v for v in vals):
-            score += 4
-        if any("batch" in v for v in vals):
-            score += 4
-        if any("status" in v for v in vals):
-            score += 4
-        if any("payment" in v for v in vals):
-            score += 5
-        if any("contact" in v or "phone" in v or "mobile" in v for v in vals):
-            score += 3
-        if is_master and any("admitted group" in v for v in vals):
-            score += 3
-        if is_master and any("term zero" in v for v in vals):
-            score += 2
-
-        # Penalize rows that are mostly numbers or percentages.
-        numeric_like = sum(bool(re.fullmatch(r"[\d\.,%]+", v)) for v in vals if v)
-        score -= numeric_like * 0.5
-
-        if "name" in joined and "email" in joined and score >= 10:
+def find_detail_header_row(raw: pd.DataFrame) -> Optional[int]:
+    for i in range(min(20, len(raw))):
+        row = " | ".join(clean_text(v).lower() for v in raw.iloc[i].tolist())
+        if "student name" in row and "payment" in row:
             return i
-
-        if score > best_score:
-            best_score = score
-            best_row = i
-
-    return best_row if best_score >= 8 else None
+    return None
 
 
-def row_nonempty_count(raw: pd.DataFrame, row_idx: int, start_col: int = 0) -> int:
-    if row_idx is None or row_idx < 0 or row_idx >= len(raw):
-        return 0
-    vals = raw.iloc[row_idx, start_col:].tolist()
-    return sum(1 for v in vals if clean_text(v) != "")
+def normalize_event_value(x) -> int:
+    s = clean_text(x).lower()
+    return 1 if s in {"yes", "y", "1", "true", "present", "attended", "done"} else 0
 
 
-def detect_event_rows(raw: pd.DataFrame, header_row: int, event_start: int):
-    search_rows = list(range(max(0, header_row - 6), header_row))
-    best_date_row = None
-    best_date_hits = -1
-    for r in search_rows:
-        hits = sum(pd.notna(parse_event_date(v)) for v in raw.iloc[r, event_start:].tolist())
-        if hits > best_date_hits:
-            best_date_hits = hits
-            best_date_row = r
-    if best_date_hits <= 0:
-        best_date_row = None
-    best_name_row = None
-    if best_date_row is not None:
-        candidate_rows = [r for r in search_rows if r < best_date_row]
-        best_name_row = max(candidate_rows, key=lambda r: row_nonempty_count(raw, r, event_start), default=None)
-        if best_name_row is not None and row_nonempty_count(raw, best_name_row, event_start) == 0:
-            best_name_row = None
-    return best_name_row, best_date_row
-
-
-def standardize_numeric_columns(df: pd.DataFrame, columns):
-    for col in columns:
-        if col and col in df.columns:
-            df[col] = df[col].apply(parse_numeric)
-
-
-def is_paid_status(val) -> bool:
-    s = clean_text(val).lower()
-    if not s:
+def is_event_response_series(series: pd.Series) -> bool:
+    s = series.fillna("").astype(str).str.strip().str.lower()
+    if len(s) == 0:
         return False
-    if "admitted" in s:
-        return True
-    return bool(re.search(r"\bpaid\b", s))
+    return (s.isin(EVENT_RESPONSES).mean() >= 0.55)
 
 
-def clean_student_frame(df: pd.DataFrame, name_col: str, email_col: str | None):
-    df = df.dropna(how="all").copy()
-    if name_col:
-        df = df[df[name_col].astype(str).str.strip().ne("")]
-    if email_col and email_col in df.columns:
-        temp_email = df[email_col].astype(str).str.strip().str.lower()
-        df = df.loc[~((temp_email == "") & (df[name_col].astype(str).str.strip() == ""))]
-        df = df.assign(_dedupe_key=np.where(temp_email.ne(""), temp_email, df[name_col].astype(str).map(normalize_name)))
-        df = df.drop_duplicates("_dedupe_key", keep="first").drop(columns=["_dedupe_key"])
-    else:
-        df = df.drop_duplicates(subset=[name_col], keep="first")
-    return df.reset_index(drop=True)
+def build_event_col_name(category, name, date_val) -> str:
+    cat = clean_text(category)
+    title = clean_text(name)
+    date_txt = ""
+    dt = parse_event_date(date_val)
+    if pd.notna(dt):
+        date_txt = dt.strftime("%Y-%m-%d")
+    parts = [p for p in [cat, title, date_txt] if p]
+    if not parts:
+        return ""
+    return " | ".join(parts)
 
 
-def load_master_sheet(raw: pd.DataFrame, program: str):
-    header_row = find_header_row(raw, max_scan=40, is_master=True)
-    if header_row is None:
-        # Fallback for live Google Sheets when header metadata is slightly inconsistent.
-        first_rows = min(6, len(raw))
-        for i in range(first_rows):
-            vals = [clean_text(v).lower() for v in raw.iloc[i].tolist()]
-            if any(v in {"name", "student name"} for v in vals) and any("email" in v for v in vals):
-                header_row = i
-                break
+def load_master_sheet(raw: pd.DataFrame, program: str) -> Tuple[pd.DataFrame, Dict]:
+    header_row = find_master_header_row(raw)
     if header_row is None:
         raise ValueError(f"Could not detect header row in master sheet for {program}.")
 
-    header_vals = raw.iloc[header_row].tolist()
-    df = raw.iloc[header_row + 1:].copy().reset_index(drop=True)
-    df.columns = make_unique(header_vals)
+    headers = make_unique(raw.iloc[header_row].tolist())
+    start_row = min(header_row + 1 + MASTER_SKIP_ROWS_AFTER_HEADER, len(raw))
+    df = raw.iloc[start_row:].copy().reset_index(drop=True)
+    df.columns = headers
     df = df.dropna(how="all")
 
-    # Master sheets contain summary rows immediately below the header.
-    # Remove leading rows where the name cell is blank or purely numeric.
-    preview_name_col = best_matching_col(df, ["student name", "name"])
-    if preview_name_col:
-        start_idx = 0
-        while start_idx < len(df):
-            candidate = clean_text(df.iloc[start_idx][preview_name_col])
-            if candidate and not re.fullmatch(r"[\d\.]+", candidate):
-                break
-            start_idx += 1
-        if start_idx > 0:
-            df = df.iloc[start_idx:].reset_index(drop=True)
-
-    name_col = best_matching_col(df, ["student name", "name"])
+    name_col = best_matching_col(df, ["name", "student name"])
     email_col = best_matching_col(df, ["email"])
     country_col = best_matching_col(df, ["country"])
     batch_col = best_matching_col(df, ["batch"])
     income_col = best_matching_col(df, ["income", "household income"])
-    engagement_pct_col = best_matching_col(df, ["overall engagement %", "engagement %"])
-    engagement_score_col = best_matching_col(df, ["overall engagement score", "engagement score"])
-    payment_status_col = best_matching_col(df, ["payment status", "status"])
-    payment_date_col = best_matching_col(df, ["payment date"])
+    payment_status_col = best_matching_col(df, ["payment", "payment status"])
+    status_col = best_matching_col(df, ["status"])
+    engagement_pct_col = best_matching_col(df, ["engagement %", "overall engagement %"])
+    engagement_score_col = best_matching_col(df, ["engagement score", "overall engagement score"])
 
-    if name_col is None:
+    if not name_col:
         raise ValueError(f"Name column not found in master sheet for {program}.")
 
-    df = clean_student_frame(df, name_col, email_col)
+    df[name_col] = df[name_col].map(clean_text)
+    df = df[df[name_col].ne("")].copy()
     df["Program"] = program
-    df["Batch"] = df[batch_col].astype(str).str.strip() if batch_col and batch_col in df.columns else ""
+    df["Batch"] = df[batch_col].map(clean_text) if batch_col else ""
+    df["email_clean"] = df[email_col].map(clean_text) if email_col else ""
+    df["country_clean"] = df[country_col].map(clean_text) if country_col else ""
+    df["income_clean"] = df[income_col].map(clean_text) if income_col else ""
 
-    standardize_numeric_columns(df, [engagement_pct_col, engagement_score_col])
-    df["engagement_pct"] = df[engagement_pct_col].fillna(0) if engagement_pct_col else 0
-    if pd.to_numeric(df["engagement_pct"], errors="coerce").max() <= 1.05:
-        df["engagement_pct"] = pd.to_numeric(df["engagement_pct"], errors="coerce").fillna(0) * 100
-    df["engagement_score"] = df[engagement_score_col].fillna(0) if engagement_score_col else 0
-
-    payment_series = df[payment_status_col] if payment_status_col and payment_status_col in df.columns else pd.Series("", index=df.index)
-    df["payment_status_clean"] = payment_series.astype(str).str.strip()
-    df["is_paid"] = payment_series.apply(is_paid_status)
-    df["paid_label"] = np.where(df["is_paid"], "Paid / Admitted", "Not Paid")
-    df["is_active"] = pd.to_numeric(df["engagement_pct"], errors="coerce").fillna(0) > 0
-
-    if payment_date_col and payment_date_col in df.columns:
-        df[payment_date_col] = df[payment_date_col].apply(parse_date_safe)
-
-    if email_col and email_col in df.columns:
-        df["email_clean"] = df[email_col].astype(str).str.strip().str.lower()
+    if engagement_pct_col:
+        df["engagement_pct"] = to_numeric_clean(df[engagement_pct_col]).fillna(0)
+        if float(df["engagement_pct"].max() or 0) <= 1.05:
+            df["engagement_pct"] = df["engagement_pct"] * 100
     else:
-        df["email_clean"] = ""
-    df["student_name_clean"] = df[name_col].astype(str).map(normalize_name)
+        event_candidates = []
+        metadata = {name_col, email_col, country_col, batch_col, income_col, payment_status_col, status_col}
+        for col in df.columns:
+            if col in metadata:
+                continue
+            s = df[col].fillna("").astype(str).str.strip().str.lower()
+            if s.isin(EVENT_RESPONSES).mean() >= 0.5:
+                event_candidates.append(col)
+        if event_candidates:
+            df["engagement_pct"] = (df[event_candidates].applymap(normalize_event_value).sum(axis=1) / max(len(event_candidates), 1)) * 100
+        else:
+            df["engagement_pct"] = 0
+
+    if engagement_score_col:
+        df["engagement_score"] = to_numeric_clean(df[engagement_score_col]).fillna(0)
+    else:
+        df["engagement_score"] = df["engagement_pct"]
+
+    payment_source_col = payment_status_col or status_col
+    payment_series = df[payment_source_col].map(clean_text).str.lower() if payment_source_col else pd.Series("", index=df.index)
+    df["payment_status_clean"] = payment_series
+    df["is_paid"] = payment_series.apply(lambda s: any(h in s for h in PAID_HINTS))
+    df["paid_label"] = np.where(df["is_paid"], "Paid / Admitted", "Not Paid")
+    df["is_active"] = df["engagement_pct"] > 0
 
     ctx = {
         "name_col": name_col,
@@ -476,42 +305,34 @@ def load_master_sheet(raw: pd.DataFrame, program: str):
         "income_col": income_col,
         "engagement_pct_col": engagement_pct_col,
         "engagement_score_col": engagement_score_col,
-        "payment_status_col": payment_status_col,
-        "payment_date_col": payment_date_col,
     }
     return df, ctx
 
 
-def load_detail_sheet(raw: pd.DataFrame, sheet_name: str):
-    header_row = find_header_row(raw, max_scan=40, is_master=False)
+def load_detail_sheet(raw: pd.DataFrame, sheet_name: str) -> Tuple[pd.DataFrame, Dict]:
+    header_row = find_detail_header_row(raw)
     if header_row is None:
         raise ValueError(f"Could not detect header row in {sheet_name}.")
 
-    header_vals = raw.iloc[header_row].tolist()
-    comments_idx = best_matching_index(header_vals, ["comments"])
-    if comments_idx is None:
-        comments_idx = 19
-    event_start = comments_idx + 1
-
-    event_name_row, event_date_row = detect_event_rows(raw, header_row, event_start)
-
-    built_headers = []
-    date_map = {}
-    for idx, h in enumerate(header_vals):
-        header_name = clean_text(h)
-        if idx >= event_start and not header_name:
-            if event_name_row is not None:
-                header_name = clean_text(raw.iloc[event_name_row, idx])
-            if not header_name:
-                header_name = f"Event {idx - event_start + 1}"
-        built_headers.append(header_name)
-        if idx >= event_start and event_date_row is not None:
-            dt = parse_event_date(raw.iloc[event_date_row, idx])
-            if pd.notna(dt):
-                date_map[idx] = dt
+    headers = list(raw.iloc[header_row].tolist())
+    name_row = raw.iloc[header_row - 4].tolist() if header_row >= 4 else [""] * len(headers)
+    date_row = raw.iloc[header_row - 3].tolist() if header_row >= 3 else [""] * len(headers)
+    enriched_headers = []
+    event_dates = {}
+    for idx, h in enumerate(headers):
+        base = clean_text(h)
+        if base:
+            enriched_headers.append(base)
+        else:
+            built = build_event_col_name(raw.iloc[header_row - 5, idx] if header_row >= 5 else "", name_row[idx], date_row[idx])
+            enriched_headers.append(built or f"Unnamed_{idx}")
+        dt = parse_event_date(date_row[idx])
+        if pd.notna(dt):
+            event_dates[enriched_headers[-1]] = dt
+    enriched_headers = make_unique(enriched_headers)
 
     df = raw.iloc[header_row + 1:].copy().reset_index(drop=True)
-    df.columns = make_unique(built_headers)
+    df.columns = enriched_headers
     df = df.dropna(how="all")
 
     name_col = best_matching_col(df, ["student name", "name"])
@@ -523,56 +344,47 @@ def load_detail_sheet(raw: pd.DataFrame, sheet_name: str):
     engagement_pct_col = best_matching_col(df, ["overall engagement %", "engagement %"])
     engagement_score_col = best_matching_col(df, ["overall engagement score", "engagement score"])
 
-    if name_col is None:
+    if not name_col:
         raise ValueError(f"Name column not found in {sheet_name}.")
 
-    df = clean_student_frame(df, name_col, email_col)
+    df[name_col] = df[name_col].map(clean_text)
+    df = df[df[name_col].ne("")].copy()
     df["Program"] = infer_program_from_sheet(sheet_name)
     df["Batch"] = infer_batch_from_sheet_name(sheet_name)
+    df["email_clean"] = df[email_col].map(clean_text) if email_col else ""
+    df["country_clean"] = df[country_col].map(clean_text) if country_col else ""
 
-    standardize_numeric_columns(df, [engagement_pct_col, engagement_score_col])
+    metadata_cols = {c for c in [name_col, email_col, country_col, income_col, payment_status_col, payment_date_col, engagement_pct_col, engagement_score_col] if c}
     event_cols = []
-    event_dates = {}
-    for idx, col in enumerate(df.columns):
-        if idx < event_start:
+    for col in df.columns:
+        if col in metadata_cols or col in {"Program", "Batch", "email_clean", "country_clean"}:
             continue
-        if col.startswith("Unnamed"):
-            continue
-        ser = df[col] if col in df.columns else pd.Series(dtype=object)
-        if is_probably_event_series(ser) or pd.to_numeric(ser.apply(parse_numeric), errors="coerce").fillna(0).isin([0, 1]).mean() > 0.8:
-            df[col] = ser.apply(normalize_yes_no).astype(int)
+        if is_event_response_series(df[col]):
             event_cols.append(col)
-            if idx in date_map:
-                event_dates[col] = date_map[idx]
+
+    for col in event_cols:
+        df[col] = df[col].apply(normalize_event_value).astype(int)
 
     df["participation_count"] = df[event_cols].sum(axis=1) if event_cols else 0
-    if engagement_score_col and engagement_score_col in df.columns:
-        df["engagement_score"] = pd.to_numeric(df[engagement_score_col], errors="coerce").fillna(df["participation_count"])
+    if engagement_pct_col:
+        df["engagement_pct"] = to_numeric_clean(df[engagement_pct_col]).fillna(0)
+        if float(df["engagement_pct"].max() or 0) <= 1.05:
+            df["engagement_pct"] = df["engagement_pct"] * 100
+    else:
+        df["engagement_pct"] = (df["participation_count"] / max(len(event_cols), 1)) * 100
+
+    if engagement_score_col:
+        df["engagement_score"] = to_numeric_clean(df[engagement_score_col]).fillna(df["participation_count"])
     else:
         df["engagement_score"] = df["participation_count"]
 
-    if engagement_pct_col and engagement_pct_col in df.columns:
-        df["engagement_pct"] = pd.to_numeric(df[engagement_pct_col], errors="coerce").fillna(0)
-        if df["engagement_pct"].max() <= 1.05:
-            df["engagement_pct"] = df["engagement_pct"] * 100
-    else:
-        total_events = max(len(event_cols), 1)
-        df["engagement_pct"] = (df["participation_count"] / total_events) * 100
-
-    payment_series = df[payment_status_col] if payment_status_col and payment_status_col in df.columns else pd.Series("", index=df.index)
-    df["payment_status_clean"] = payment_series.astype(str).str.strip()
-    df["is_paid"] = payment_series.apply(is_paid_status)
+    payment_source = df[payment_status_col].map(clean_text).str.lower() if payment_status_col else pd.Series("", index=df.index)
+    df["payment_status_clean"] = payment_source
+    df["is_paid"] = payment_source.apply(lambda s: any(h in s for h in PAID_HINTS))
     df["paid_label"] = np.where(df["is_paid"], "Paid / Admitted", "Not Paid")
-    df["is_active"] = pd.to_numeric(df["engagement_pct"], errors="coerce").fillna(0) > 0
-
-    if payment_date_col and payment_date_col in df.columns:
+    df["is_active"] = df["engagement_pct"] > 0
+    if payment_date_col:
         df[payment_date_col] = df[payment_date_col].apply(parse_date_safe)
-
-    if email_col and email_col in df.columns:
-        df["email_clean"] = df[email_col].astype(str).str.strip().str.lower()
-    else:
-        df["email_clean"] = ""
-    df["student_name_clean"] = df[name_col].astype(str).map(normalize_name)
 
     ctx = {
         "name_col": name_col,
@@ -589,15 +401,25 @@ def load_detail_sheet(raw: pd.DataFrame, sheet_name: str):
     return df, ctx
 
 
-def is_probably_event_series(series: pd.Series) -> bool:
-    s = series.fillna("").astype(str).str.strip().str.lower()
-    allowed = {"yes", "no", "y", "n", "true", "false", "1", "0", "attended", "present", "absent", "done", "", "nan"}
-    return ((s.isin(allowed)).mean() >= 0.55) if len(s) else False
+def resolve_streamlit_service_account() -> str:
+    if not hasattr(st, "secrets"):
+        raise ValueError("Streamlit secrets are not available.")
+    if "GOOGLE_SERVICE_ACCOUNT" in st.secrets:
+        return json.dumps(dict(st.secrets["GOOGLE_SERVICE_ACCOUNT"]))
+    if "gcp_service_account" in st.secrets:
+        return json.dumps(dict(st.secrets["gcp_service_account"]))
+    raise ValueError("Missing GOOGLE_SERVICE_ACCOUNT in Streamlit secrets.")
+
+
+def resolve_spreadsheet_id_default() -> str:
+    if hasattr(st, "secrets") and "GSHEET_SPREADSHEET_ID" in st.secrets:
+        return st.secrets["GSHEET_SPREADSHEET_ID"]
+    return DEFAULT_SHEET_ID
 
 
 def _get_gsheets_client(credentials_payload: str):
-    key_dict = json.loads(credentials_payload)
-    creds = Credentials.from_service_account_info(key_dict, scopes=GSHEETS_SCOPES)
+    info = json.loads(credentials_payload)
+    creds = Credentials.from_service_account_info(info, scopes=GSHEETS_SCOPES)
     return gspread.authorize(creds)
 
 
@@ -616,8 +438,8 @@ def gsheets_read_raw_sheet(spreadsheet_id: str, sheet_name: str, credentials_pay
     values = ws.get_all_values()
     if not values:
         return pd.DataFrame()
-    width = max(len(r) for r in values)
-    padded = [r + [""] * (width - len(r)) for r in values]
+    max_len = max(len(r) for r in values)
+    padded = [r + [""] * (max_len - len(r)) for r in values]
     df = pd.DataFrame(padded)
     df.replace("", np.nan, inplace=True)
     return df.dropna(how="all").reset_index(drop=True)
@@ -652,11 +474,7 @@ def load_dashboard_data(source_mode: str, spreadsheet_id=None, credentials_paylo
     sheet_names = get_sheet_names(source_mode, spreadsheet_id, credentials_payload, file_bytes)
     missing = [s for s in ALL_REQUIRED if s not in sheet_names]
 
-    masters = {}
-    details = {}
-    master_contexts = {}
-    detail_contexts = {}
-
+    masters, details, master_contexts, detail_contexts = { }, { }, { }, { }
     for sheet in MASTER_SHEETS:
         if sheet in sheet_names:
             raw = load_raw_sheet(source_mode, sheet, spreadsheet_id, credentials_payload, file_bytes)
@@ -696,37 +514,33 @@ def nice_layout(fig, height=360, x_tickangle=None):
 
 def gauge_chart(value, title, maximum=None, suffix=""):
     maximum = maximum or max(value, 1)
-    fig = go.Figure(
-        go.Indicator(
-            mode="gauge+number",
-            value=value,
-            number={"suffix": suffix},
-            title={"text": title},
-            gauge={
-                "axis": {"range": [0, maximum]},
-                "bar": {"color": GREEN},
-                "bgcolor": "white",
-                "steps": [
-                    {"range": [0, maximum * 0.5], "color": GREEN_5},
-                    {"range": [maximum * 0.5, maximum * 0.8], "color": GREEN_4},
-                    {"range": [maximum * 0.8, maximum], "color": GREEN_3},
-                ],
-            },
-        )
-    )
+    fig = go.Figure(go.Indicator(
+        mode="gauge+number",
+        value=value,
+        number={"suffix": suffix},
+        title={"text": title},
+        gauge={
+            "axis": {"range": [0, maximum]},
+            "bar": {"color": GREEN},
+            "bgcolor": "white",
+            "steps": [
+                {"range": [0, maximum * 0.5], "color": GREEN_5},
+                {"range": [maximum * 0.5, maximum * 0.8], "color": GREEN_4},
+                {"range": [maximum * 0.8, maximum], "color": GREEN_3},
+            ],
+        },
+    ))
     return nice_layout(fig, height=300)
 
 
 def donut_chart(labels, values, title):
-    fig = go.Figure(
-        go.Pie(
-            labels=labels,
-            values=values,
-            hole=0.62,
-            marker=dict(colors=[GREEN, GREEN_2, GREEN_3, GREEN_4, GREEN_5][: len(labels)]),
-            textinfo="label+percent",
-        )
-    )
+    fig = go.Figure(go.Pie(
+        labels=labels,
+        values=values,
+        hole=0.62,
+        marker=dict(colors=[GREEN, GREEN_2, GREEN_3, GREEN_4, GREEN_5][:len(labels)]),
+        textinfo="label+percent",
+    ))
     fig.update_layout(title=title)
     return nice_layout(fig, height=340)
 
@@ -772,80 +586,49 @@ def render_overview(overview_df, ctx, key_prefix="overview"):
     m1.metric("Total Students", f"{total_students:,}")
     m2.metric("Active Students", f"{total_active:,}", delta=f"{active_rate}% active")
     m3.metric("Paid / Admitted", f"{total_paid:,}", delta=f"{paid_rate}% paid")
-    m4.metric("UG vs PG", f"{ug_students:,} / {pg_students:,}", delta="UG / PG")
+    m4.metric("UG vs PG", f"{ug_students:,} / {pg_students:,}")
 
     g1, g2, g3 = st.columns([1.2, 1, 1])
     with g1:
         st.plotly_chart(gauge_chart(total_students, "Total Students", maximum=max(total_students, 1)), use_container_width=True, key=f"{key_prefix}_gauge")
     with g2:
-        st.plotly_chart(donut_chart(["UG", "PG"], [ug_students, pg_students], "UG / PG Distribution"), use_container_width=True, key=f"{key_prefix}_ugpg")
+        st.plotly_chart(donut_chart(["UG", "PG"], [ug_students, pg_students], "UG / PG Distribution"), use_container_width=True, key=f"{key_prefix}_program")
     with g3:
-        st.plotly_chart(donut_chart(["UG Paid", "PG Paid"], [ug_paid, pg_paid], "Paid Distribution"), use_container_width=True, key=f"{key_prefix}_paid_dist")
+        st.plotly_chart(donut_chart(["UG Paid", "PG Paid"], [ug_paid, pg_paid], "Paid Distribution"), use_container_width=True, key=f"{key_prefix}_paid")
 
     a1, a2 = st.columns(2)
     with a1:
-        if batch_col and batch_col in overview_df.columns:
-            batch_plot = (
-                overview_df.groupby(batch_col, dropna=False)[name_col]
-                .count()
-                .reset_index(name="Students")
-                .sort_values("Students", ascending=False)
-            )
+        if batch_col in overview_df.columns:
+            batch_plot = overview_df.groupby(batch_col, dropna=False)[name_col].count().reset_index(name="Students")
             batch_plot[batch_col] = batch_plot[batch_col].replace("", "Unknown")
-            fig = px.bar(batch_plot, x=batch_col, y="Students", title="Students by Batch")
+            fig = px.bar(batch_plot.sort_values("Students", ascending=False), x=batch_col, y="Students", title="Students by Batch")
             fig.update_traces(marker_color=GREEN_2)
             st.plotly_chart(nice_layout(fig, height=380, x_tickangle=-25), use_container_width=True, key=f"{key_prefix}_batch")
     with a2:
         status_plot = overview_df.groupby(["Program", "paid_label"])[name_col].count().reset_index(name="Students")
-        fig = px.bar(
-            status_plot,
-            x="Program",
-            y="Students",
-            color="paid_label",
-            barmode="group",
-            title="Paid vs Not Paid by Program",
-            color_discrete_map={"Paid / Admitted": GREEN, "Not Paid": GREEN_4},
-        )
+        fig = px.bar(status_plot, x="Program", y="Students", color="paid_label", barmode="group", title="Paid vs Not Paid by Program", color_discrete_map={"Paid / Admitted": GREEN, "Not Paid": GREEN_4})
         st.plotly_chart(nice_layout(fig, height=380), use_container_width=True, key=f"{key_prefix}_status")
 
     b1, b2 = st.columns(2)
     with b1:
         if country_col and country_col in overview_df.columns:
-            country_plot = (
-                overview_df.groupby(country_col)[name_col]
-                .count()
-                .reset_index(name="Students")
-                .sort_values("Students", ascending=False)
-                .head(12)
-            )
-            if not country_plot.empty:
-                fig = px.bar(country_plot, x=country_col, y="Students", title="Top Countries")
-                fig.update_traces(marker_color=GREEN_3)
-                st.plotly_chart(nice_layout(fig, height=400, x_tickangle=-30), use_container_width=True, key=f"{key_prefix}_countries")
+            country_plot = overview_df.groupby(country_col)[name_col].count().reset_index(name="Students").sort_values("Students", ascending=False).head(12)
+            fig = px.bar(country_plot, x=country_col, y="Students", title="Top Countries")
+            fig.update_traces(marker_color=GREEN_3)
+            st.plotly_chart(nice_layout(fig, height=400, x_tickangle=-30), use_container_width=True, key=f"{key_prefix}_country")
     with b2:
         if income_col and income_col in overview_df.columns:
-            income_plot = (
-                overview_df.groupby(income_col)[name_col]
-                .count()
-                .reset_index(name="Students")
-                .sort_values("Students", ascending=False)
-            )
-            if not income_plot.empty:
-                fig = px.bar(income_plot, x=income_col, y="Students", title="Income Distribution")
-                fig.update_traces(marker_color=GREEN)
-                st.plotly_chart(nice_layout(fig, height=400, x_tickangle=-25), use_container_width=True, key=f"{key_prefix}_income")
+            income_plot = overview_df.groupby(income_col)[name_col].count().reset_index(name="Students").sort_values("Students", ascending=False)
+            fig = px.bar(income_plot, x=income_col, y="Students", title="Income Distribution")
+            fig.update_traces(marker_color=GREEN)
+            st.plotly_chart(nice_layout(fig, height=400, x_tickangle=-25), use_container_width=True, key=f"{key_prefix}_income")
 
-    st.markdown("#### Overview Table")
     preview_cols = [c for c in [name_col, "Program", batch_col, country_col, income_col, "engagement_pct", "engagement_score", "payment_status_clean", "paid_label"] if c and c in overview_df.columns]
-    st.dataframe(
-        overview_df[preview_cols].sort_values(["engagement_pct", "engagement_score"], ascending=False),
-        use_container_width=True,
-        height=420,
-        key=f"{key_prefix}_table",
-    )
+    st.markdown("#### Overview Table")
+    st.dataframe(overview_df[preview_cols].sort_values(["engagement_pct", "engagement_score"], ascending=False), use_container_width=True, height=420, key=f"{key_prefix}_table")
 
 
-def render_detail_tab(sheet_name, df, ctx, key_prefix):
+def render_detail_tab(sheet_name, df, ctx, key_prefix="detail"):
     st.subheader(sheet_name)
     if df.empty:
         st.warning(f"No data available for {sheet_name}.")
@@ -860,7 +643,7 @@ def render_detail_tab(sheet_name, df, ctx, key_prefix):
     total_students = int(df[name_col].count())
     active_students = int(df["is_active"].sum())
     paid_students = int(df["is_paid"].sum())
-    avg_engagement = round(float(pd.to_numeric(df["engagement_pct"], errors="coerce").fillna(0).mean()), 1) if len(df) else 0
+    avg_engagement = round(float(df["engagement_pct"].mean()), 1) if len(df) else 0
 
     k1, k2, k3, k4 = st.columns(4)
     k1.metric("Students", f"{total_students:,}")
@@ -872,13 +655,13 @@ def render_detail_tab(sheet_name, df, ctx, key_prefix):
     with c1:
         fig = px.histogram(df, x="engagement_pct", nbins=10, title="Engagement Distribution")
         fig.update_traces(marker_color=GREEN_2)
-        st.plotly_chart(nice_layout(fig, height=360), use_container_width=True, key=f"{key_prefix}_eng_hist")
+        st.plotly_chart(nice_layout(fig, height=360), use_container_width=True, key=f"{key_prefix}_hist")
     with c2:
         status = df["paid_label"].value_counts().reset_index()
         status.columns = ["Status", "Students"]
         fig = px.pie(status, names="Status", values="Students", hole=0.58, color="Status", color_discrete_map={"Paid / Admitted": GREEN, "Not Paid": GREEN_4})
         fig.update_layout(title="Paid Status")
-        st.plotly_chart(nice_layout(fig, height=360), use_container_width=True, key=f"{key_prefix}_paid_pie")
+        st.plotly_chart(nice_layout(fig, height=360), use_container_width=True, key=f"{key_prefix}_pie")
 
     d1, d2 = st.columns(2)
     with d1:
@@ -892,26 +675,21 @@ def render_detail_tab(sheet_name, df, ctx, key_prefix):
             st.plotly_chart(nice_layout(fig, height=460), use_container_width=True, key=f"{key_prefix}_events")
     with d2:
         if country_col and country_col in df.columns:
-            top_country = (
-                df.groupby(country_col)[name_col]
-                .count().reset_index(name="Students")
-                .sort_values("Students", ascending=False)
-                .head(10)
-            )
+            top_country = df.groupby(country_col)[name_col].count().reset_index(name="Students").sort_values("Students", ascending=False).head(10)
             fig = px.bar(top_country, x=country_col, y="Students", title="Country Split")
             fig.update_traces(marker_color=GREEN_3)
             st.plotly_chart(nice_layout(fig, height=430, x_tickangle=-30), use_container_width=True, key=f"{key_prefix}_country")
 
     t1, t2 = st.columns(2)
     with t1:
-        students = df[[name_col, "engagement_pct", "engagement_score", "payment_status_clean", "paid_label"]].sort_values(["engagement_pct", "engagement_score"], ascending=False).head(20)
+        students = df[[name_col, "engagement_pct", "engagement_score", "paid_label"]].sort_values(["engagement_pct", "engagement_score"], ascending=False).head(20)
         st.markdown("#### Top Students")
-        st.dataframe(students, use_container_width=True, height=390, key=f"{key_prefix}_top_students")
+        st.dataframe(students, use_container_width=True, height=390, key=f"{key_prefix}_top")
     with t2:
-        target = df[(~df["is_paid"]) & (df["engagement_pct"] > 0)][[name_col, "engagement_pct", "engagement_score", "payment_status_clean", "paid_label"]]
+        target = df[(~df["is_paid"]) & (df["engagement_pct"] > 0)][[name_col, "engagement_pct", "engagement_score", "paid_label"]]
         target = target.sort_values(["engagement_pct", "engagement_score"], ascending=False).head(20)
         st.markdown("#### Best Upgrade Targets")
-        st.dataframe(target, use_container_width=True, height=390, key=f"{key_prefix}_targets")
+        st.dataframe(target, use_container_width=True, height=390, key=f"{key_prefix}_upgrade")
 
     if event_cols:
         timeline = pd.DataFrame({
@@ -926,13 +704,13 @@ def render_detail_tab(sheet_name, df, ctx, key_prefix):
 
     st.markdown("#### Full Student Table")
     display_cols = [c for c in [name_col, country_col, payment_date_col, "engagement_pct", "engagement_score", "payment_status_clean", "paid_label"] if c and c in df.columns]
-    event_preview = event_cols[:8]
-    display_cols += [c for c in event_preview if c in df.columns]
+    display_cols += [c for c in event_cols[:8] if c in df.columns]
     st.dataframe(df[display_cols].sort_values(["engagement_pct", "engagement_score"], ascending=False), use_container_width=True, height=440, key=f"{key_prefix}_full")
 
 
 def build_profile_index(data):
     profiles = {}
+
     def get_key(row, name_col):
         email = clean_text(row.get("email_clean", "")).lower()
         if email:
@@ -944,18 +722,17 @@ def build_profile_index(data):
         name_col = ctx["name_col"]
         for _, row in df.iterrows():
             key = get_key(row, name_col)
-            if key not in profiles:
-                profiles[key] = {"master": None, "details": [], "name": clean_text(row[name_col]), "email": clean_text(row.get("email_clean", ""))}
+            profiles.setdefault(key, {"master": None, "details": [], "name": clean_text(row[name_col]), "email": clean_text(row.get("email_clean", ""))})
             profiles[key]["master"] = row.to_dict()
             profiles[key]["name"] = clean_text(row[name_col])
             profiles[key]["email"] = clean_text(row.get("email_clean", ""))
+
     for sheet, df in data["details"].items():
         ctx = data["detail_contexts"][sheet]
         name_col = ctx["name_col"]
         for _, row in df.iterrows():
             key = get_key(row, name_col)
-            if key not in profiles:
-                profiles[key] = {"master": None, "details": [], "name": clean_text(row[name_col]), "email": clean_text(row.get("email_clean", ""))}
+            profiles.setdefault(key, {"master": None, "details": [], "name": clean_text(row[name_col]), "email": clean_text(row.get("email_clean", ""))})
             profiles[key]["details"].append({"sheet": sheet, "row": row.to_dict(), "ctx": ctx})
             if not profiles[key]["name"]:
                 profiles[key]["name"] = clean_text(row[name_col])
@@ -972,102 +749,79 @@ def render_student_profile(data):
         return
 
     names = sorted({p["name"] for p in profiles.values() if p["name"]})
-    query = st.text_input("Search student name", placeholder="Type a student name")
-    matches = [n for n in names if query.lower() in n.lower()] if query else names[:50]
-    selected = st.multiselect("Select one or more students", options=matches, default=matches[:1] if query and matches else [])
+    query = st.text_input("Search student name", placeholder="Type a student name", key="profile_search")
+    pasted = st.text_area("Search multiple names", placeholder="Paste one name per line", key="profile_multiline")
+    pasted_names = [line.strip() for line in pasted.splitlines() if line.strip()]
+    filtered = names
+    if query:
+        filtered = [n for n in filtered if query.lower() in n.lower()]
+    if pasted_names:
+        norm_targets = {normalize_name(n) for n in pasted_names}
+        filtered = [n for n in names if normalize_name(n) in norm_targets]
 
-    bulk = st.text_area("Or paste multiple student names", placeholder="One name per line or comma separated")
-    extra_names = []
-    if bulk.strip():
-        extra_names = [n.strip() for n in re.split(r"[\n,]+", bulk) if n.strip()]
-    wanted = list(dict.fromkeys(selected + extra_names))
-
-    if not wanted:
-        st.info("Search and select one or more students to view their profiles.")
+    selected = st.multiselect("Select one or more students", options=filtered if filtered else names, default=(filtered[:1] if filtered else []), key="profile_select")
+    targets = selected or filtered[:10]
+    if not targets:
+        st.info("No matching students found.")
         return
 
-    lookup = {}
-    for key, p in profiles.items():
-        lookup.setdefault(normalize_name(p["name"]), []).append(p)
+    name_to_profiles = {}
+    for profile in profiles.values():
+        name_to_profiles.setdefault(profile["name"], []).append(profile)
 
-    for wanted_name in wanted:
-        found = lookup.get(normalize_name(wanted_name), [])
-        if not found:
-            st.warning(f"No profile found for {wanted_name}")
-            continue
-
-        for idx, prof in enumerate(found, start=1):
-            master = prof["master"] or {}
-            details = prof["details"]
-            title = prof["name"] or wanted_name
-            program = clean_text(master.get("Program", "")) or (clean_text(details[0]["row"].get("Program", "")) if details else "")
-            batch = clean_text(master.get("Batch", "")) or (clean_text(details[0]["row"].get("Batch", "")) if details else "")
-            country = clean_text(master.get("Country", master.get("country", "")))
-            email = clean_text(master.get("email_clean", prof.get("email", "")))
-            paid = "Paid / Admitted" if bool(master.get("is_paid", False)) else clean_text(master.get("payment_status_clean", ""))
-            engagement = master.get("engagement_pct", np.nan)
-
-            st.markdown(f"""
-            <div class="profile-card">
-                <div style="font-size:28px;font-weight:800;color:{DARK};">{title}</div>
-                <div style="margin-top:6px;color:#2a6a52;font-size:15px;">
-                    {program or "Program N/A"} • {batch or "Batch N/A"} • {country or "Country N/A"}<br>
-                    {email or "Email N/A"}
-                </div>
-            </div>
-            """, unsafe_allow_html=True)
-
+    for idx, title in enumerate(targets, start=1):
+        matches = name_to_profiles.get(title, [])
+        for match_idx, profile in enumerate(matches, start=1):
+            st.markdown(f"### {title}")
+            if profile.get("email"):
+                st.caption(profile["email"])
+            master = profile.get("master") or {}
             c1, c2, c3, c4 = st.columns(4)
-            c1.metric("Program", program or "N/A")
-            c2.metric("Batch", batch or "N/A")
-            c3.metric("Payment", paid or "Not Paid")
-            c4.metric("Engagement", f"{float(engagement):.1f}%" if pd.notna(engagement) else "N/A")
+            c1.metric("Program", clean_text(master.get("Program", "-")) or "-")
+            c2.metric("Batch", clean_text(master.get("Batch", "-")) or "-")
+            c3.metric("Paid", "Yes" if master.get("is_paid") else "No")
+            c4.metric("Active", "Yes" if master.get("is_active") else "No")
 
+            summary_rows = []
             if master:
-                master_view = {
-                    "Student Name": title,
+                summary_rows.append({
+                    "Source": "Master",
                     "Program": master.get("Program", ""),
                     "Batch": master.get("Batch", ""),
-                    "Country": master.get("Country", master.get("country", "")),
-                    "Income": master.get("Income", master.get("income", "")),
+                    "Country": master.get("country_clean", ""),
                     "Payment Status": master.get("payment_status_clean", ""),
                     "Engagement %": round(float(master.get("engagement_pct", 0) or 0), 2),
                     "Engagement Score": round(float(master.get("engagement_score", 0) or 0), 2),
-                    "Active": "Yes" if master.get("is_active", False) else "No",
-                }
-                st.markdown("#### Master Profile")
-                st.dataframe(pd.DataFrame([master_view]), use_container_width=True, key=f"profile_master_{normalize_name(title)}_{idx}")
+                })
+            for entry in profile.get("details", []):
+                row = entry["row"]
+                summary_rows.append({
+                    "Source": entry["sheet"],
+                    "Program": row.get("Program", ""),
+                    "Batch": row.get("Batch", ""),
+                    "Country": row.get("country_clean", ""),
+                    "Payment Status": row.get("payment_status_clean", ""),
+                    "Engagement %": round(float(row.get("engagement_pct", 0) or 0), 2),
+                    "Engagement Score": round(float(row.get("engagement_score", 0) or 0), 2),
+                })
+            st.dataframe(pd.DataFrame(summary_rows), use_container_width=True, key=f"profile_summary_{normalize_name(title)}_{idx}_{match_idx}")
 
-            if details:
-                st.markdown("#### Batch Sheet Details")
-                rows = []
-                attendance_rows = []
-                for entry in details:
-                    row = entry["row"]
-                    ctx = entry["ctx"]
-                    event_cols = ctx["event_cols"]
-                    attended = [c for c in event_cols if row.get(c, 0) == 1]
-                    rows.append({
+            attendance_rows = []
+            for entry in profile.get("details", []):
+                row = entry["row"]
+                ctx = entry["ctx"]
+                attended = [ev for ev in ctx["event_cols"] if int(row.get(ev, 0) or 0) == 1]
+                if attended:
+                    detail_rows = [{
                         "Sheet": entry["sheet"],
-                        "Program": row.get("Program", ""),
-                        "Batch": row.get("Batch", ""),
-                        "Payment Status": row.get("payment_status_clean", ""),
-                        "Engagement %": round(float(row.get("engagement_pct", 0) or 0), 2),
-                        "Engagement Score": round(float(row.get("engagement_score", 0) or 0), 2),
-                        "Participation Count": int(row.get("participation_count", 0) or 0),
-                        "Events Attended": ", ".join(attended[:8]),
-                    })
-                    for ev in attended:
-                        attendance_rows.append({
-                            "Sheet": entry["sheet"],
-                            "Event": ev,
-                            "Date": ctx["event_dates"].get(ev, pd.NaT),
-                        })
-                st.dataframe(pd.DataFrame(rows), use_container_width=True, key=f"profile_detail_{normalize_name(title)}_{idx}")
-                if attendance_rows:
-                    att_df = pd.DataFrame(attendance_rows).sort_values(["Date", "Event"], na_position="last")
-                    st.markdown("#### Attendance History")
-                    st.dataframe(att_df, use_container_width=True, key=f"profile_att_{normalize_name(title)}_{idx}")
+                        "Event": ev,
+                        "Date": ctx["event_dates"].get(ev, pd.NaT),
+                    } for ev in attended]
+                    attendance_rows.extend(detail_rows)
+            if attendance_rows:
+                att_df = pd.DataFrame(attendance_rows).sort_values(["Date", "Event"], na_position="last")
+                st.markdown("#### Attendance History")
+                st.dataframe(att_df, use_container_width=True, key=f"profile_att_{normalize_name(title)}_{idx}_{match_idx}")
 
 
 def resolve_credentials_and_source():
@@ -1081,30 +835,25 @@ def resolve_credentials_and_source():
     if GSPREAD_AVAILABLE:
         with st.sidebar:
             st.markdown("## 📡 Data Source")
-            source_choice = st.radio("Source", ["Google Sheets (auto)", "Upload Excel (manual)"], index=0)
+            source_choice = st.radio("Source", ["Google Sheets (auto)", "Upload Excel (manual)"], index=0, key="source_choice")
     else:
         source_choice = "Upload Excel (manual)"
         with st.sidebar:
             st.warning("Install `gspread` and `google-auth` to enable Google Sheets auto-fetch.")
 
     if source_choice == "Google Sheets (auto)":
-        default_sheet_id = resolve_spreadsheet_id_default()
-        with st.sidebar:
-            spreadsheet_id = st.text_input("Spreadsheet ID", value=default_sheet_id, help="Google Sheets ID from the URL (pre-filled)")
-
-        secret_creds = resolve_streamlit_service_account()
-        credentials_payload = secret_creds if secret_creds else HARDCODED_SERVICE_ACCOUNT_JSON
-
+        spreadsheet_id = st.sidebar.text_input("Spreadsheet ID", value=resolve_spreadsheet_id_default(), help="Google Sheets ID from the URL", key="spreadsheet_id")
         try:
+            credentials_payload = resolve_streamlit_service_account()
             sheet_names = gsheets_get_sheet_names(spreadsheet_id, credentials_payload)
             connected_ok = True
             connection_note = f"Connected to Google Sheets · {len(sheet_names)} tabs found"
         except Exception as e:
             connected_ok = False
-            connection_note = f"Connection failed: {e}"
-            debug_note = "Check Streamlit logs for the exact Google Sheets auth or access error."
+            connection_note = f"Connection failed: {type(e).__name__}"
+            debug_note = str(e)
     else:
-        uploaded_file = st.file_uploader("Upload Master Engagement Tracker Excel File", type=["xlsx"])
+        uploaded_file = st.sidebar.file_uploader("Upload Master Engagement Tracker Excel File", type=["xlsx"], key="upload_excel")
         if uploaded_file is not None:
             file_bytes = uploaded_file.getvalue()
             connected_ok = True
@@ -1122,13 +871,14 @@ def resolve_credentials_and_source():
 
 
 def main():
+    inject_css()
     cfg = resolve_credentials_and_source()
     live_mode = cfg["source_mode"] == "gsheets"
 
     with st.sidebar:
         st.markdown("---")
         st.markdown("### Navigation")
-        page = st.radio("Navigation", NAV_ITEMS, index=0, label_visibility="collapsed")
+        page = st.radio("Navigation", NAV_ITEMS, index=0, label_visibility="collapsed", key="page_nav")
 
     st.markdown(
         f"""
@@ -1146,11 +896,12 @@ def main():
         """,
         unsafe_allow_html=True,
     )
+    st.caption(cfg["connection_note"])
 
     if not cfg["connected_ok"]:
         st.warning("Connect the Google Sheet or upload the workbook to load the dashboard.")
         if cfg["debug_note"]:
-            st.caption(cfg["debug_note"])
+            st.code(cfg["debug_note"])
         st.stop()
 
     data = load_dashboard_data(
