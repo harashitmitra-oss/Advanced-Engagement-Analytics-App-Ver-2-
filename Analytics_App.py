@@ -18,7 +18,7 @@ except Exception:
     GSPREAD_AVAILABLE = False
 
 
-st.set_page_config(page_title="Tetr Business School Analytics Dashboard", layout="wide")
+st.set_page_config(page_title="Tetr College of Business Analytics Dashboard", layout="wide")
 
 MASTER_SHEETS = ["Master UG", "Master PG"]
 DETAIL_SHEETS = ["PG B5", "UG B9", "UG B8", "UG B7", "UG B6"]
@@ -846,7 +846,7 @@ def render_header(connected_ok, source_label):
         st.markdown(
             """
             <div class="hero-card">
-              <div style="font-size:30px;font-weight:900;color:#0b3d2e;">Tetr Business School Analytics Dashboard</div>
+              <div style="font-size:30px;font-weight:900;color:#0b3d2e;">Tetr College of Business Analytics Dashboard</div>
               <div style="margin-top:6px;color:#2e6b57;font-weight:600;">
                 Live overview, batch analytics, student profiles, Tetr-X tracking, and payment-linked participation insights.
               </div>
