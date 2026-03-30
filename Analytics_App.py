@@ -481,8 +481,12 @@ def parse_activity_sheet(raw: pd.DataFrame, sheet_name: str):
     df["_email_norm"] = df[email_col].astype(str).str.strip().str.lower() if email_col else ""
 
     # Event columns
-    event_info = pd.DataFrame(event_info_rows)
-    event_cols = [c for c in event_info["column_name"].tolist() if c in df.columns]
+    event_info = pd.DataFrame(
+        event_info_rows,
+        columns=["column_name", "event_name", "event_type", "event_date", "sheet"],
+    )
+    event_cols = event_info["column_name"].tolist() if not event_info.empty else []
+    event_cols = [c for c in event_cols if c in df.columns]
     for c in event_cols:
         df[c] = df[c].apply(normalize_yes_no).astype(int)
 
