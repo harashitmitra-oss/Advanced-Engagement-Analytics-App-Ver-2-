@@ -1,9 +1,7 @@
-
 import json
 import re
 from io import BytesIO
 from pathlib import Path
-from collections import Counter, defaultdict
 
 import numpy as np
 import pandas as pd
@@ -20,15 +18,11 @@ except Exception:
 
 st.set_page_config(page_title="Tetr Analytics Dashboard", layout="wide")
 
-# -----------------------------
-# Constants
-# -----------------------------
 MASTER_SHEETS = ["Master UG", "Master PG"]
 UG_BATCH_SHEETS = ["UG - B1 to B4", "UG B5", "UG B6", "UG B7", "UG B8", "UG B9"]
 PG_BATCH_SHEETS = ["PG - B1 & B2", "PG - B3 & B4", "PG B5"]
-TETRX_SHEETS = ["Tetr-X-UG", "Tetr-X-PG"]
-DETAIL_SHEETS = UG_BATCH_SHEETS + PG_BATCH_SHEETS + TETRX_SHEETS
-ALL_REQUIRED = MASTER_SHEETS + DETAIL_SHEETS
+TX_SHEETS = ["Tetr-X-UG", "Tetr-X-PG"]
+ALL_REQUIRED = MASTER_SHEETS + UG_BATCH_SHEETS + PG_BATCH_SHEETS + TX_SHEETS
 
 GREEN = "#0b3d2e"
 GREEN_2 = "#1f7a56"
@@ -38,154 +32,152 @@ GREEN_5 = "#dff3e7"
 DARK = "#12372a"
 LIGHT_BG = "#f7fbf8"
 RED = "#d9534f"
-AMBER = "#c17d11"
+AMBER = "#ffb000"
 
 GSHEETS_SCOPES = [
     "https://spreadsheets.google.com/feeds",
     "https://www.googleapis.com/auth/drive",
 ]
 
-# -----------------------------
-# Styling
-# -----------------------------
-def inject_css():
-    st.markdown(f"""
-    <style>
-    .stApp {{
-        background: linear-gradient(180deg, #ffffff 0%, {LIGHT_BG} 100%);
-    }}
-    section[data-testid="stSidebar"] {{
-        background: #eef8f2;
-        border-right: 1px solid #d8eadf;
-    }}
-    .hero-card {{
-        background: linear-gradient(135deg, #ffffff 0%, #eef8f2 100%);
-        border: 1px solid #d8eadf;
-        border-radius: 22px;
-        padding: 22px 24px;
-        box-shadow: 0 8px 24px rgba(11, 61, 46, 0.06);
-        margin-bottom: 8px;
-    }}
-    .section-card {{
-        background: #ffffff;
-        border: 1px solid #e0eee5;
-        border-radius: 18px;
-        padding: 14px 16px;
-        box-shadow: 0 4px 14px rgba(11, 61, 46, 0.04);
-    }}
-    .live-pill {{
-        display: inline-flex;
-        align-items: center;
-        gap: 10px;
-        padding: 10px 14px;
-        border-radius: 999px;
-        font-weight: 800;
-        border: 1px solid #cfe8d9;
-        color: {GREEN};
-        background: #e8f6ed;
-        white-space: nowrap;
-    }}
-    .live-pill.offline {{
-        color: #7a1f1b;
-        background: #fdeceb;
-        border-color: #f3cdca;
-    }}
-    .heartbeat-wrap {{
-        position: relative;
-        width: 12px;
-        height: 12px;
-    }}
-    .heartbeat-dot {{
-        width: 12px;
-        height: 12px;
-        border-radius: 50%;
-        background: #1bb55c;
-        position: absolute;
-        top: 0;
-        left: 0;
-        z-index: 2;
-    }}
-    .heartbeat-ping {{
-        width: 12px;
-        height: 12px;
-        border-radius: 50%;
-        background: rgba(27,181,92,0.30);
-        position: absolute;
-        top: 0;
-        left: 0;
-        animation: heartbeatPing 1.5s ease-out infinite;
-        z-index: 1;
-    }}
-    .offline-dot {{
-        width: 12px;
-        height: 12px;
-        border-radius: 50%;
-        background: {RED};
-    }}
-    @keyframes heartbeatPing {{
-        0% {{ transform: scale(0.9); opacity: 0.9; }}
-        70% {{ transform: scale(2.2); opacity: 0; }}
-        100% {{ transform: scale(2.2); opacity: 0; }}
-    }}
-    div[data-testid="stMetric"] {{
-        background: #ffffff;
-        border: 1px solid #dbeee0;
-        border-radius: 16px;
-        padding: 10px 12px;
-        box-shadow: 0 2px 10px rgba(11, 61, 46, 0.05);
-    }}
-    div[data-testid="stMetric"] label {{
-        color: {GREEN_2} !important;
-        font-weight: 700 !important;
-    }}
-    h1, h2, h3, h4 {{ color: {DARK} !important; }}
 
-    /* Full-width radio "tab bars" */
-    section[data-testid="stSidebar"] div[role="radiogroup"] > label {{
-        display: flex !important;
-        width: 100% !important;
-        margin: 0 0 10px 0 !important;
-        padding: 11px 14px !important;
-        border-radius: 12px !important;
-        border: 1px solid #cfe5d7 !important;
-        background: #dff3e7 !important;
-        color: {GREEN} !important;
-        font-weight: 700 !important;
-    }}
-    section[data-testid="stSidebar"] div[role="radiogroup"] > label:hover {{
-        background: #cfeedd !important;
-        border-color: #b8dcc7 !important;
-    }}
-    section[data-testid="stSidebar"] div[role="radiogroup"] > label[data-selected="true"] {{
-        background: linear-gradient(90deg, {GREEN} 0%, {GREEN_2} 100%) !important;
-        color: white !important;
-        border-color: {GREEN} !important;
-    }}
-    section[data-testid="stSidebar"] div[role="radiogroup"] > label p {{
-        color: inherit !important;
-        font-weight: 700 !important;
-        margin: 0 !important;
-    }}
-    </style>
-    """, unsafe_allow_html=True)
+def inject_css():
+    st.markdown(
+        f"""
+        <style>
+        .stApp {{
+            background: linear-gradient(180deg, #ffffff 0%, {LIGHT_BG} 100%);
+        }}
+        section[data-testid="stSidebar"] {{
+            background: #f3faf5;
+            border-right: 1px solid #d9eee1;
+        }}
+        .hero-card {{
+            background: linear-gradient(135deg, #ffffff 0%, #eef8f2 100%);
+            border: 1px solid #d8eadf;
+            border-radius: 22px;
+            padding: 18px 22px;
+            box-shadow: 0 8px 24px rgba(11, 61, 46, 0.06);
+            margin-bottom: 12px;
+        }}
+        .section-card {{
+            background: #ffffff;
+            border: 1px solid #e0eee5;
+            border-radius: 18px;
+            padding: 12px 14px;
+            box-shadow: 0 4px 14px rgba(11, 61, 46, 0.04);
+        }}
+        .live-pill {{
+            display: inline-flex;
+            align-items: center;
+            gap: 10px;
+            padding: 10px 14px;
+            border-radius: 999px;
+            font-weight: 800;
+            border: 1px solid #cfe8d9;
+            color: {GREEN};
+            background: #e8f6ed;
+            white-space: nowrap;
+        }}
+        .live-pill.offline {{
+            color: #7a1f1b;
+            background: #fdeceb;
+            border-color: #f3cdca;
+        }}
+        .heartbeat-wrap {{ position: relative; width: 12px; height: 12px; }}
+        .heartbeat-dot {{
+            width: 12px; height: 12px; border-radius: 50%; background: #1bb55c;
+            position: absolute; top: 0; left: 0; z-index: 2;
+        }}
+        .heartbeat-ping {{
+            width: 12px; height: 12px; border-radius: 50%; background: rgba(27,181,92,0.30);
+            position: absolute; top: 0; left: 0; animation: heartbeatPing 1.5s ease-out infinite; z-index: 1;
+        }}
+        .offline-dot {{ width: 12px; height: 12px; border-radius: 50%; background: {RED}; }}
+        @keyframes heartbeatPing {{ 0% {{ transform: scale(0.9); opacity: 0.9; }} 70% {{ transform: scale(2.2); opacity: 0; }} 100% {{ transform: scale(2.2); opacity: 0; }} }}
+        div[data-testid="stMetric"] {{
+            background: #ffffff;
+            border: 1px solid #dbeee0;
+            border-radius: 16px;
+            padding: 10px 12px;
+            box-shadow: 0 2px 10px rgba(11, 61, 46, 0.05);
+        }}
+        div[data-testid="stMetric"] label {{ color: {GREEN_2} !important; font-weight: 700 !important; }}
+        h1, h2, h3 {{ color: {DARK} !important; }}
+        .stRadio [role="radiogroup"] label {{
+            background: #eaf7ee !important;
+            border: 1px solid #cfe8d9 !important;
+            border-radius: 12px !important;
+            padding: 10px 12px !important;
+            margin-bottom: 8px !important;
+            width: 100% !important;
+        }}
+        .stRadio [role="radiogroup"] label:hover {{ background: #def2e6 !important; }}
+        .stTabs [data-baseweb="tab-list"] {{ gap: 8px; }}
+        .stTabs [data-baseweb="tab"] {{
+            background: #edf8f1;
+            border: 1px solid #d6eadc;
+            border-radius: 12px;
+            padding: 10px 14px;
+        }}
+        .stTabs [aria-selected="true"] {{ background: #dff3e7; border-color: #8fcaab; }}
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
 
 inject_css()
 
-# -----------------------------
-# Utilities
-# -----------------------------
-def clean_text(x) -> str:
+
+def clean_text(x):
     if x is None:
         return ""
     if isinstance(x, float) and np.isnan(x):
         return ""
     return str(x).replace("\n", " ").replace("\r", " ").replace("\xa0", " ").strip()
 
-def normalize_name(x: str) -> str:
+
+def normalize_name(x):
     s = clean_text(x).lower()
-    s = re.sub(r"[^a-z0-9]+", " ", s)
+    s = re.sub(r"[^a-z0-9 ]+", " ", s)
     s = re.sub(r"\s+", " ", s).strip()
     return s
+
+
+def normalize_email(x):
+    return clean_text(x).lower()
+
+
+def normalize_yes_no(x):
+    s = clean_text(x).lower()
+    return 1 if s in {"yes", "y", "1", "true", "present", "attended", "done", "in"} else 0
+
+
+def parse_date_safe(x):
+    try:
+        return pd.to_datetime(x, errors="coerce", dayfirst=True)
+    except Exception:
+        return pd.NaT
+
+
+def parse_event_date(val):
+    try:
+        ts = pd.to_datetime(val, errors="coerce", dayfirst=True)
+        if pd.notna(ts):
+            return ts.normalize()
+    except Exception:
+        pass
+    s = clean_text(val)
+    if not s:
+        return pd.NaT
+    m = re.search(r"(\d{1,2})\D+(\d{1,2})\D+(\d{4})", s)
+    if m:
+        try:
+            return pd.Timestamp(int(m.group(3)), int(m.group(2)), int(m.group(1)))
+        except Exception:
+            return pd.NaT
+    return pd.NaT
+
 
 def make_unique(cols):
     seen = {}
@@ -200,36 +192,6 @@ def make_unique(cols):
             out.append(f"{c}_{seen[c]}")
     return out
 
-def parse_date_safe(x):
-    if x is None:
-        return pd.NaT
-    if isinstance(x, pd.Timestamp):
-        return x
-    try:
-        if isinstance(x, (int, float)) and not pd.isna(x):
-            if 30000 <= float(x) <= 60000:
-                return pd.Timestamp("1899-12-30") + pd.to_timedelta(float(x), unit="D")
-        s = clean_text(x)
-        if not s:
-            return pd.NaT
-        # ranges like 28-01 to 30.01.2026 -> use start date
-        m = re.search(r"(\d{{1,2}})[\-.](\d{{1,2}}).*?(\d{{4}})", s)
-        if m:
-            dd, mm, yyyy = int(m.group(1)), int(m.group(2)), int(m.group(3))
-            return pd.Timestamp(year=yyyy, month=mm, day=dd)
-        return pd.to_datetime(s, errors="coerce", dayfirst=True)
-    except Exception:
-        return pd.NaT
-
-def normalize_yes_no(x) -> int:
-    s = clean_text(x).lower()
-    return 1 if s in {"yes", "y", "1", "true", "present", "attended", "done"} else 0
-
-def percent_series(s):
-    out = pd.to_numeric(s, errors="coerce").fillna(0)
-    if len(out) and out.max() <= 1.05:
-        out = out * 100
-    return out
 
 def best_matching_col(df: pd.DataFrame, candidates):
     lowered = {c: clean_text(c).lower() for c in df.columns}
@@ -239,35 +201,21 @@ def best_matching_col(df: pd.DataFrame, candidates):
                 return col
     return None
 
-def infer_program(sheet_name: str) -> str:
-    s = clean_text(sheet_name).lower()
-    return "UG" if "ug" in s else ("PG" if "pg" in s else "")
 
-def infer_batch_label(sheet_name: str) -> str:
-    s = clean_text(sheet_name).lower().replace("–", "-").replace("—", "-")
-    m = re.search(r"b\s*(\d+)\s*to\s*b\s*(\d+)", s)
-    if m:
-        return f"B{m.group(1)}–B{m.group(2)}"
-    m = re.search(r"b\s*(\d+)\s*&\s*b\s*(\d+)", s)
-    if m:
-        return f"B{m.group(1)}–B{m.group(2)}"
-    m = re.search(r"\bb\s*(\d+)\b", s)
-    if m:
-        return f"B{m.group(1)}"
+def infer_program_from_sheet(sheet_name):
+    s = sheet_name.lower()
+    if "ug" in s:
+        return "UG"
+    if "pg" in s:
+        return "PG"
     return ""
+
 
 def live_status_html(is_connected: bool, mode_label: str):
     if is_connected:
-        return f"""
-        <div class="live-pill">
-            <span class="heartbeat-wrap"><span class="heartbeat-ping"></span><span class="heartbeat-dot"></span></span>
-            LIVE · {mode_label}
-        </div>"""
-    return f"""
-    <div class="live-pill offline">
-        <span class="offline-dot"></span>
-        OFFLINE · {mode_label}
-    </div>"""
+        return f'''<div class="live-pill"><span class="heartbeat-wrap"><span class="heartbeat-ping"></span><span class="heartbeat-dot"></span></span>LIVE · {mode_label}</div>'''
+    return f'''<div class="live-pill offline"><span class="offline-dot"></span>OFFLINE · {mode_label}</div>'''
+
 
 def nice_layout(fig, height=360, x_tickangle=None):
     fig.update_layout(
@@ -282,420 +230,19 @@ def nice_layout(fig, height=360, x_tickangle=None):
     fig.update_yaxes(showgrid=True, gridcolor="#e7f2eb")
     return fig
 
-def chart_key(page, name):
-    return f"{page}__{name}"
 
-# -----------------------------
-# Data loading
-# -----------------------------
-def get_service_account_info():
-    if "GOOGLE_SERVICE_ACCOUNT" not in st.secrets:
-        raise ValueError("Missing GOOGLE_SERVICE_ACCOUNT in Streamlit secrets.")
-    return dict(st.secrets["GOOGLE_SERVICE_ACCOUNT"])
+def donut_chart(labels, values, title):
+    fig = go.Figure(go.Pie(
+        labels=labels,
+        values=values,
+        hole=0.62,
+        marker=dict(colors=[GREEN, GREEN_2, GREEN_3, GREEN_4, GREEN_5][:len(labels)]),
+        textinfo="label+percent",
+    ))
+    fig.update_layout(title=title)
+    return nice_layout(fig, height=340)
 
-def get_spreadsheet_id():
-    return st.secrets.get("GSHEET_SPREADSHEET_ID", "")
 
-def _get_gsheets_client():
-    info = get_service_account_info()
-    creds = Credentials.from_service_account_info(info, scopes=GSHEETS_SCOPES)
-    return gspread.authorize(creds)
-
-@st.cache_data(show_spinner=False, ttl=180)
-def gsheets_get_sheet_names(spreadsheet_id: str):
-    gc = _get_gsheets_client()
-    sh = gc.open_by_key(spreadsheet_id)
-    return [ws.title for ws in sh.worksheets()]
-
-@st.cache_data(show_spinner=False, ttl=180)
-def gsheets_read_raw_sheet(spreadsheet_id: str, sheet_name: str):
-    gc = _get_gsheets_client()
-    sh = gc.open_by_key(spreadsheet_id)
-    ws = sh.worksheet(sheet_name)
-    values = ws.get_all_values()
-    if not values:
-        return pd.DataFrame()
-    max_len = max(len(r) for r in values)
-    values = [r + [""] * (max_len - len(r)) for r in values]
-    df = pd.DataFrame(values)
-    df.replace("", np.nan, inplace=True)
-    return df
-
-# -----------------------------
-# Sheet parsers
-# -----------------------------
-def parse_master_sheet(raw: pd.DataFrame, sheet_name: str):
-    # Actual structure from workbook:
-    # row 0 = header, rows 1-2 = summary, rows 3+ = students
-    headers = make_unique(raw.iloc[0].tolist())
-    df = raw.iloc[3:].copy().reset_index(drop=True)
-    df.columns = headers
-    df = df.dropna(how="all")
-
-    name_col = best_matching_col(df, ["name"])
-    email_col = best_matching_col(df, ["email"])
-    batch_col = best_matching_col(df, ["batch"])
-    country_col = best_matching_col(df, ["country"])
-    income_col = best_matching_col(df, ["income"])
-    status_col = best_matching_col(df, ["status"])
-    payment_col = best_matching_col(df, ["payment"])
-    admitted_group_col = best_matching_col(df, ["admitted group"])
-    term_zero_col = best_matching_col(df, ["term zero"])
-    contact_col = best_matching_col(df, ["contact"])
-
-    if not name_col:
-        raise ValueError(f"Name column not found in {sheet_name}")
-
-    df = df[df[name_col].astype(str).str.strip().ne("")].copy()
-    df["Program"] = infer_program(sheet_name)
-    df["Sheet"] = sheet_name
-    df["Batch Label"] = df[batch_col].astype(str).str.strip() if batch_col else ""
-    df["_name_norm"] = df[name_col].apply(normalize_name)
-    df["_email_norm"] = df[email_col].astype(str).str.strip().str.lower() if email_col else ""
-
-    # aggregate engagement columns from master
-    score_col = best_matching_col(df, ["engagement", "score"])
-    pct_col = best_matching_col(df, ["engagement"])
-    overall_score_col = best_matching_col(df, ["engagement"])
-    if "Overall Engagement Score" in df.columns:
-        df["engagement_score"] = pd.to_numeric(df["Overall Engagement Score"], errors="coerce").fillna(0)
-    elif score_col:
-        df["engagement_score"] = pd.to_numeric(df[score_col], errors="coerce").fillna(0)
-    else:
-        df["engagement_score"] = 0
-
-    if "Overall Engagement %" in df.columns:
-        df["engagement_pct"] = percent_series(df["Overall Engagement %"])
-    elif pct_col:
-        df["engagement_pct"] = percent_series(df[pct_col])
-    else:
-        df["engagement_pct"] = 0
-
-    raw_payment = df[payment_col].astype(str).str.lower() if payment_col else pd.Series("", index=df.index)
-    raw_status = df[status_col].astype(str).str.lower() if status_col else pd.Series("", index=df.index)
-    raw_group = df[admitted_group_col].astype(str).str.lower() if admitted_group_col else pd.Series("", index=df.index)
-
-    df["raw_status_text"] = (
-        raw_payment.fillna("") + " | " + raw_status.fillna("") + " | " + raw_group.fillna("")
-    ).str.strip(" |")
-    df["raw_paid_flag"] = df["raw_status_text"].str.contains("paid|admitted", case=False, na=False)
-    df["raw_refunded_flag"] = df["raw_status_text"].str.contains("refund", case=False, na=False)
-    df["is_active"] = df["engagement_pct"] > 0
-
-    ctx = {
-        "name_col": name_col,
-        "email_col": email_col,
-        "batch_col": batch_col,
-        "country_col": country_col,
-        "income_col": income_col,
-        "status_col": status_col,
-        "payment_col": payment_col,
-        "admitted_group_col": admitted_group_col,
-        "term_zero_col": term_zero_col,
-        "contact_col": contact_col,
-    }
-    return df, ctx
-
-def parse_activity_sheet(raw: pd.DataFrame, sheet_name: str):
-    # Actual structure from workbook:
-    # row 0 type | row 1 event name | row 2 event date | row 3 day | row 4 done | row 5 header | row 6+ data
-    header_row = 5
-    data_start = 6
-    headers = [clean_text(x) for x in raw.iloc[header_row].tolist()]
-    headers = make_unique(headers)
-
-    # determine where metadata columns end
-    non_empty_header_idxs = [i for i, h in enumerate(headers) if clean_text(h)]
-    last_meta_idx = max(non_empty_header_idxs) if non_empty_header_idxs else 0
-
-    event_names = []
-    event_types = []
-    event_dates = []
-    for idx in range(last_meta_idx + 1, raw.shape[1]):
-        type_val = clean_text(raw.iloc[0, idx]) if idx < raw.shape[1] else ""
-        name_val = clean_text(raw.iloc[1, idx]) if idx < raw.shape[1] else ""
-        date_val = parse_date_safe(raw.iloc[2, idx]) if idx < raw.shape[1] else pd.NaT
-        done_val = clean_text(raw.iloc[4, idx]) if idx < raw.shape[1] else ""
-        if not (type_val or name_val or pd.notna(date_val) or done_val):
-            continue
-        event_name = name_val or f"Event {idx - last_meta_idx}"
-        event_names.append((idx, event_name))
-        event_types.append((idx, type_val or "Other"))
-        event_dates.append((idx, date_val))
-
-    col_names = []
-    event_info_rows = []
-    event_idx_to_name = {}
-    for idx in range(raw.shape[1]):
-        if idx <= last_meta_idx:
-            col_names.append(headers[idx] if idx < len(headers) else f"Col_{idx}")
-        else:
-            found = next((nm for j, nm in event_names if j == idx), None)
-            if found:
-                dt = next((d for j, d in event_dates if j == idx), pd.NaT)
-                unique_name = found
-                if sum(1 for _, n in event_names if n == found) > 1 and pd.notna(dt):
-                    unique_name = f"{found} ({pd.to_datetime(dt).strftime('%d %b %Y')})"
-                col_names.append(unique_name)
-                event_idx_to_name[idx] = unique_name
-                event_info_rows.append({
-                    "column_name": unique_name,
-                    "event_name": found,
-                    "event_type": next((t for j, t in event_types if j == idx), "Other"),
-                    "event_date": next((d for j, d in event_dates if j == idx), pd.NaT),
-                    "sheet": sheet_name,
-                })
-            else:
-                col_names.append(f"Unused_{idx}")
-
-    col_names = make_unique(col_names)
-    # sync unique names back to event info
-    for i, idx in enumerate(sorted(event_idx_to_name)):
-        event_info_rows[i]["column_name"] = col_names[idx]
-
-    df = raw.iloc[data_start:].copy().reset_index(drop=True)
-    df.columns = col_names
-    df = df.dropna(how="all")
-
-    name_col = best_matching_col(df, ["student name", "name"])
-    email_col = best_matching_col(df, ["email"])
-    batch_col = best_matching_col(df, ["batch"])
-    country_col = best_matching_col(df, ["country"])
-    income_col = best_matching_col(df, ["income"])
-    status_col = best_matching_col(df, ["status"])
-    payment_status_col = best_matching_col(df, ["payment status"])
-    payment_date_col = best_matching_col(df, ["payment date"])
-    comments_col = best_matching_col(df, ["comments"])
-
-    if not name_col:
-        raise ValueError(f"Name column not found in {sheet_name}")
-
-    df = df[df[name_col].astype(str).str.strip().ne("")].copy()
-    df["Program"] = infer_program(sheet_name)
-    df["Sheet"] = sheet_name
-    if batch_col:
-        df["Batch Label"] = df[batch_col].astype(str).str.strip()
-    else:
-        df["Batch Label"] = infer_batch_label(sheet_name)
-    df["_name_norm"] = df[name_col].apply(normalize_name)
-    df["_email_norm"] = df[email_col].astype(str).str.strip().str.lower() if email_col else ""
-
-    # Event columns
-    event_info = pd.DataFrame(
-        event_info_rows,
-        columns=["column_name", "event_name", "event_type", "event_date", "sheet"],
-    )
-    event_cols = event_info["column_name"].tolist() if not event_info.empty else []
-    event_cols = [c for c in event_cols if c in df.columns]
-    for c in event_cols:
-        df[c] = df[c].apply(normalize_yes_no).astype(int)
-
-    if "Overall Engagement Score" in df.columns:
-        df["engagement_score"] = pd.to_numeric(df["Overall Engagement Score"], errors="coerce").fillna(0)
-    else:
-        df["engagement_score"] = df[event_cols].sum(axis=1) if event_cols else 0
-
-    if "Overall Engagement %" in df.columns:
-        df["engagement_pct"] = percent_series(df["Overall Engagement %"])
-    else:
-        total_events = max(len(event_cols), 1)
-        df["engagement_pct"] = (df[event_cols].sum(axis=1) / total_events) * 100 if event_cols else 0
-
-    raw_status_parts = []
-    for c in [status_col, payment_status_col, comments_col]:
-        if c and c in df.columns:
-            raw_status_parts.append(df[c].astype(str).str.lower())
-    df["raw_status_text"] = " | ".join([]) if not raw_status_parts else raw_status_parts[0]
-    if len(raw_status_parts) > 1:
-        tmp = raw_status_parts[0]
-        for s in raw_status_parts[1:]:
-            tmp = tmp.fillna("") + " | " + s.fillna("")
-        df["raw_status_text"] = tmp
-    df["raw_paid_flag"] = df["raw_status_text"].str.contains("paid|admitted", case=False, na=False)
-    df["raw_refunded_flag"] = df["raw_status_text"].str.contains("refund", case=False, na=False)
-    df["is_active"] = df["engagement_pct"] > 0
-
-    if payment_date_col and payment_date_col in df.columns:
-        df["payment_date_local"] = df[payment_date_col].apply(parse_date_safe)
-    else:
-        df["payment_date_local"] = pd.NaT
-
-    df["participation_count"] = df[event_cols].sum(axis=1) if event_cols else 0
-
-    ctx = {
-        "name_col": name_col,
-        "email_col": email_col,
-        "batch_col": batch_col,
-        "country_col": country_col,
-        "income_col": income_col,
-        "status_col": status_col,
-        "payment_status_col": payment_status_col,
-        "payment_date_col": payment_date_col,
-        "comments_col": comments_col,
-        "event_cols": event_cols,
-        "event_info": event_info,
-    }
-    return df, ctx
-
-# -----------------------------
-# Reconciliation with Tetr-X
-# -----------------------------
-def build_lookup(df, name_col="Student Name", email_col="Email"):
-    email_map = {}
-    name_map = {}
-    for idx, row in df.iterrows():
-        e = clean_text(row.get("_email_norm", ""))
-        n = clean_text(row.get("_name_norm", ""))
-        if e and e not in email_map:
-            email_map[e] = idx
-        if n and n not in name_map:
-            name_map[n] = idx
-    return email_map, name_map
-
-def get_final_status_fields(row, matched_tetrx_row=None):
-    raw = clean_text(row.get("raw_status_text", "")).lower()
-    if matched_tetrx_row is not None:
-        tx_status = clean_text(matched_tetrx_row.get("Status", matched_tetrx_row.get("raw_status_text", ""))).lower()
-        tx_term = clean_text(matched_tetrx_row.get("Tetr X/Term 0 Status", "")).lower()
-        combined = " | ".join([t for t in [tx_status, tx_term, raw] if t]).strip(" |")
-        pay_dt = matched_tetrx_row.get("payment_date_final", pd.NaT)
-    else:
-        combined = raw
-        pay_dt = row.get("payment_date_local", pd.NaT)
-
-    refunded = "refund" in combined
-    paid = (("admitted" in combined) or ("paid" in combined) or pd.notna(pay_dt)) and not refunded
-
-    if refunded:
-        label = "Refunded"
-    elif paid:
-        label = "Paid / Admitted"
-    else:
-        label = "Not Paid"
-    return paid, refunded, label, pay_dt, combined
-
-def reconcile_with_tetrx(df, tetrx_df):
-    if df.empty:
-        return df
-    df = df.copy()
-    tx_email_map, tx_name_map = build_lookup(tetrx_df)
-    matched_indices = []
-    paid_flags = []
-    refunded_flags = []
-    labels = []
-    pay_dates = []
-    combined_status = []
-
-    for _, row in df.iterrows():
-        e = clean_text(row.get("_email_norm", ""))
-        n = clean_text(row.get("_name_norm", ""))
-        tx_idx = None
-        if e and e in tx_email_map:
-            tx_idx = tx_email_map[e]
-        elif n and n in tx_name_map:
-            tx_idx = tx_name_map[n]
-        matched_indices.append(tx_idx)
-        tx_row = tetrx_df.loc[tx_idx] if tx_idx is not None else None
-        paid, refunded, label, pay_dt, combo = get_final_status_fields(row, tx_row)
-        paid_flags.append(paid)
-        refunded_flags.append(refunded)
-        labels.append(label)
-        pay_dates.append(pay_dt)
-        combined_status.append(combo)
-
-    df["matched_tetrx_idx"] = matched_indices
-    df["is_paid"] = paid_flags
-    df["is_refunded"] = refunded_flags
-    df["paid_label"] = labels
-    df["payment_date_final"] = pay_dates
-    df["status_final"] = combined_status
-    return df
-
-# -----------------------------
-# Dashboard loading
-# -----------------------------
-@st.cache_data(show_spinner=False, ttl=180)
-def load_dashboard_data(spreadsheet_id: str):
-    sheet_names = gsheets_get_sheet_names(spreadsheet_id)
-    missing = [s for s in ALL_REQUIRED if s not in sheet_names]
-
-    masters = {}
-    master_contexts = {}
-    details = {}
-    detail_contexts = {}
-
-    for sheet in MASTER_SHEETS:
-        if sheet in sheet_names:
-            raw = gsheets_read_raw_sheet(spreadsheet_id, sheet)
-            masters[sheet], master_contexts[sheet] = parse_master_sheet(raw, sheet)
-
-    for sheet in DETAIL_SHEETS:
-        if sheet in sheet_names:
-            raw = gsheets_read_raw_sheet(spreadsheet_id, sheet)
-            details[sheet], detail_contexts[sheet] = parse_activity_sheet(raw, sheet)
-
-    # Tetr-X as source of truth for paid/admitted and payment date
-    tetrx_lookup = {
-        "UG": details.get("Tetr-X-UG", pd.DataFrame()),
-        "PG": details.get("Tetr-X-PG", pd.DataFrame()),
-    }
-
-    # payment date final on tetrx
-    for prog, tx in tetrx_lookup.items():
-        if not tx.empty:
-            if "payment_date_local" in tx.columns:
-                tx["payment_date_final"] = tx["payment_date_local"]
-            else:
-                tx["payment_date_final"] = pd.NaT
-            details[f"Tetr-X-{prog}"] = tx
-
-    # Reconcile
-    for sheet, df in list(masters.items()):
-        prog = "UG" if "UG" in sheet else "PG"
-        masters[sheet] = reconcile_with_tetrx(df, tetrx_lookup.get(prog, pd.DataFrame()))
-        # fallback if still unmatched
-        if "is_paid" not in masters[sheet].columns:
-            masters[sheet]["is_paid"] = masters[sheet]["raw_paid_flag"]
-            masters[sheet]["is_refunded"] = masters[sheet]["raw_refunded_flag"]
-            masters[sheet]["paid_label"] = np.where(masters[sheet]["is_refunded"], "Refunded", np.where(masters[sheet]["is_paid"], "Paid / Admitted", "Not Paid"))
-            masters[sheet]["payment_date_final"] = pd.NaT
-            masters[sheet]["status_final"] = masters[sheet]["raw_status_text"]
-
-    for sheet, df in list(details.items()):
-        prog = "UG" if "UG" in sheet else "PG"
-        details[sheet] = reconcile_with_tetrx(df, tetrx_lookup.get(prog, pd.DataFrame()))
-
-    overview_df = pd.concat([masters[s] for s in MASTER_SHEETS if s in masters], ignore_index=True) if masters else pd.DataFrame()
-
-    # unified student universe for profile
-    student_rows = []
-    for sheet, df in masters.items():
-        ctx = master_contexts[sheet]
-        for _, row in df.iterrows():
-            student_rows.append({
-                "name": row[ctx["name_col"]],
-                "email": row.get("_email_norm", ""),
-                "program": row["Program"],
-                "sheet": sheet,
-                "source_type": "master",
-                "name_norm": row["_name_norm"],
-            })
-    all_students = pd.DataFrame(student_rows).drop_duplicates(subset=["email", "name_norm", "program"])
-
-    return {
-        "sheet_names": sheet_names,
-        "missing": missing,
-        "masters": masters,
-        "master_contexts": master_contexts,
-        "details": details,
-        "detail_contexts": detail_contexts,
-        "overview_df": overview_df,
-        "all_students": all_students,
-    }
-
-# -----------------------------
-# Charts
-# -----------------------------
 def gauge_chart(value, title, maximum=None, suffix=""):
     maximum = maximum or max(value, 1)
     fig = go.Figure(go.Indicator(
@@ -716,100 +263,467 @@ def gauge_chart(value, title, maximum=None, suffix=""):
     ))
     return nice_layout(fig, height=300)
 
-def donut_chart(labels, values, title, color_map=None):
-    colors = None
-    if color_map:
-        colors = [color_map.get(lbl, GREEN_3) for lbl in labels]
-    else:
-        colors = [GREEN, GREEN_2, GREEN_3, GREEN_4, GREEN_5][:len(labels)]
-    fig = go.Figure(go.Pie(labels=labels, values=values, hole=0.62, marker=dict(colors=colors), textinfo="label+percent"))
-    fig.update_layout(title=title)
-    return nice_layout(fig, height=340)
 
-# -----------------------------
-# Rendering
-# -----------------------------
-def render_header(is_connected: bool):
-    col1, col2 = st.columns([8, 2])
-    with col1:
-        logo_path = None
-        for candidate in ["logo", "logo.png", "logo.jpg", "logo.jpeg", "logo.webp"]:
-            p = Path(candidate)
-            if p.exists():
-                logo_path = str(p)
-                break
-        logo_html = ""
-        if logo_path and Path(logo_path).suffix.lower() in {".png", ".jpg", ".jpeg", ".webp"}:
-            st.markdown('<div class="hero-card">', unsafe_allow_html=True)
-            c1, c2 = st.columns([1, 9])
-            with c1:
-                st.image(logo_path, width=70)
-            with c2:
-                st.markdown("## Tetr Analytics Dashboard")
-                st.caption("Live business-school engagement, admissions, payment and student profile analytics")
-            st.markdown('</div>', unsafe_allow_html=True)
+def find_logo_path():
+    base = Path(__file__).resolve().parent
+    for pat in ["logo.png", "logo.jpg", "logo.jpeg", "logo.webp", "logo.svg"]:
+        p = base / pat
+        if p.exists():
+            return p
+    return None
+
+
+# ---------------- Data source ----------------
+
+def get_secret_service_account():
+    if "GOOGLE_SERVICE_ACCOUNT" not in st.secrets:
+        raise ValueError("Missing GOOGLE_SERVICE_ACCOUNT in Streamlit secrets")
+    return dict(st.secrets["GOOGLE_SERVICE_ACCOUNT"])
+
+
+def _get_gsheets_client():
+    key_dict = get_secret_service_account()
+    creds = Credentials.from_service_account_info(key_dict, scopes=GSHEETS_SCOPES)
+    return gspread.authorize(creds)
+
+
+@st.cache_data(show_spinner=False, ttl=180)
+def gsheets_get_sheet_names(spreadsheet_id: str):
+    gc = _get_gsheets_client()
+    sh = gc.open_by_key(spreadsheet_id)
+    return [ws.title for ws in sh.worksheets()]
+
+
+@st.cache_data(show_spinner=False, ttl=180)
+def gsheets_read_raw_sheet(spreadsheet_id: str, sheet_name: str):
+    gc = _get_gsheets_client()
+    sh = gc.open_by_key(spreadsheet_id)
+    ws = sh.worksheet(sheet_name)
+    values = ws.get_all_values()
+    if not values:
+        return pd.DataFrame()
+    df = pd.DataFrame(values)
+    df.replace("", np.nan, inplace=True)
+    return df.dropna(how="all")
+
+
+@st.cache_data(show_spinner=False)
+def excel_get_sheet_names(file_bytes: bytes):
+    xls = pd.ExcelFile(BytesIO(file_bytes))
+    return xls.sheet_names
+
+
+@st.cache_data(show_spinner=False)
+def excel_read_raw_sheet(file_bytes: bytes, sheet_name: str):
+    xls = pd.ExcelFile(BytesIO(file_bytes))
+    return pd.read_excel(xls, sheet_name=sheet_name, header=None).dropna(how="all")
+
+
+def resolve_source():
+    spreadsheet_id = st.secrets.get("GSHEET_SPREADSHEET_ID", "") if hasattr(st, "secrets") else ""
+    file_bytes = None
+    source_mode = "excel"
+    connected_ok = False
+    connection_note = ""
+
+    with st.sidebar:
+        st.markdown("## 📡 Data Source")
+        options = ["Upload Excel (manual)"]
+        if GSPREAD_AVAILABLE and spreadsheet_id:
+            options.insert(0, "Google Sheets (live)")
+        source_choice = st.radio("Source", options, index=0, key="source_choice")
+
+        uploaded = st.file_uploader("Manual workbook (.xlsx)", type=["xlsx"], key="manual_upload")
+        if uploaded is not None:
+            file_bytes = uploaded.getvalue()
+
+    if source_choice == "Google Sheets (live)":
+        source_mode = "gsheets"
+        try:
+            _ = gsheets_get_sheet_names(spreadsheet_id)
+            connected_ok = True
+            connection_note = "Google Sheets"
+        except Exception as e:
+            connected_ok = False
+            connection_note = f"Google Sheets connection failed: {e}"
+            if file_bytes is not None:
+                source_mode = "excel"
+    else:
+        source_mode = "excel"
+        connected_ok = file_bytes is not None
+        connection_note = "Manual Workbook" if file_bytes is not None else "No workbook uploaded"
+
+    return {
+        "source_mode": source_mode,
+        "spreadsheet_id": spreadsheet_id,
+        "file_bytes": file_bytes,
+        "connected_ok": connected_ok,
+        "connection_note": connection_note,
+    }
+
+
+def get_sheet_names(source_mode: str, spreadsheet_id=None, file_bytes=None):
+    if source_mode == "gsheets":
+        return gsheets_get_sheet_names(spreadsheet_id)
+    if file_bytes is None:
+        return []
+    return excel_get_sheet_names(file_bytes)
+
+
+def load_raw_sheet(source_mode: str, sheet_name: str, spreadsheet_id=None, file_bytes=None):
+    if source_mode == "gsheets":
+        return gsheets_read_raw_sheet(spreadsheet_id, sheet_name)
+    return excel_read_raw_sheet(file_bytes, sheet_name)
+
+
+# ---------------- Parsing ----------------
+
+def parse_master_sheet(raw: pd.DataFrame, program: str, sheet_name: str):
+    header_row = 0
+    data_start = 3
+    header = make_unique(raw.iloc[header_row].tolist())
+    df = raw.iloc[data_start:].copy().reset_index(drop=True)
+    df.columns = header
+    df = df.dropna(how="all")
+
+    name_col = best_matching_col(df, ["name"])
+    email_col = best_matching_col(df, ["email"])
+    batch_col = best_matching_col(df, ["batch"])
+    country_col = best_matching_col(df, ["country"])
+    income_col = best_matching_col(df, ["income"])
+    status_col = best_matching_col(df, ["status"])
+    payment_col = best_matching_col(df, ["payment"])
+
+    if not name_col:
+        raise ValueError(f"Name column not found in {sheet_name}")
+
+    df = df[df[name_col].astype(str).str.strip().ne("")].copy()
+    df["Program"] = program
+    if batch_col:
+        df["Batch"] = df[batch_col].astype(str).str.strip()
+    else:
+        df["Batch"] = ""
+    df["source_sheet"] = sheet_name
+    df["student_name"] = df[name_col].map(clean_text)
+    df["student_key"] = df["student_name"].map(normalize_name)
+    df["email_key"] = df[email_col].map(normalize_email) if email_col else ""
+
+    pay_series = df[payment_col].astype(str).str.lower().str.strip() if payment_col else pd.Series("", index=df.index)
+    stat_series = df[status_col].astype(str).str.lower().str.strip() if status_col else pd.Series("", index=df.index)
+    df["master_is_paid"] = pay_series.eq("paid") | stat_series.str.contains("admitted", na=False)
+    df["master_status_value"] = df[status_col].map(clean_text) if status_col else ""
+    df["master_payment_value"] = df[payment_col].map(clean_text) if payment_col else ""
+
+    event_cols = []
+    for col in df.columns:
+        low = clean_text(col).lower()
+        if col in {name_col, email_col, batch_col, country_col, income_col, status_col, payment_col, "Program", "Batch", "source_sheet", "student_name", "student_key", "email_key", "master_is_paid", "master_status_value", "master_payment_value"}:
+            continue
+        s = df[col].fillna("").astype(str).str.strip().str.lower()
+        if len(s) and (s.isin({"yes", "no", "", "nan"}).mean() > 0.6):
+            event_cols.append(col)
+            df[col] = s.map(normalize_yes_no)
+
+    df["participation_count_master"] = df[event_cols].sum(axis=1) if event_cols else 0
+    df["active_master"] = df["participation_count_master"] > 0
+
+    ctx = {
+        "name_col": name_col,
+        "email_col": email_col,
+        "batch_col": batch_col,
+        "country_col": country_col,
+        "income_col": income_col,
+        "status_col": status_col,
+        "payment_col": payment_col,
+        "event_cols": event_cols,
+    }
+    return df, ctx
+
+
+def parse_activity_sheet(raw: pd.DataFrame, sheet_name: str):
+    header_row = 5
+    data_start = 6
+    if raw.shape[0] <= header_row:
+        raise ValueError(f"Sheet too short: {sheet_name}")
+
+    type_row = raw.iloc[0].tolist() if raw.shape[0] > 0 else []
+    event_row = raw.iloc[1].tolist() if raw.shape[0] > 1 else []
+    date_row = raw.iloc[2].tolist() if raw.shape[0] > 2 else []
+    header_cells = raw.iloc[header_row].tolist()
+
+    cols = []
+    event_rows = []
+    for idx, h in enumerate(header_cells):
+        header_name = clean_text(h)
+        event_name = clean_text(event_row[idx]) if idx < len(event_row) else ""
+        event_type = clean_text(type_row[idx]) if idx < len(type_row) else ""
+        event_date = parse_event_date(date_row[idx]) if idx < len(date_row) else pd.NaT
+        if header_name:
+            cols.append(header_name)
+        elif event_name or event_type or pd.notna(event_date):
+            synthetic = f"EVENT_{idx}"
+            cols.append(synthetic)
+            event_rows.append({
+                "column_name": synthetic,
+                "event_name": event_name or synthetic,
+                "event_type": event_type or "Other",
+                "event_date": event_date,
+                "sheet": sheet_name,
+            })
         else:
-            st.markdown(f"""
-            <div class="hero-card">
-                <div style="font-size:28px;font-weight:900;color:{GREEN};">Tetr Analytics Dashboard</div>
-                <div style="margin-top:4px;color:{GREEN_2};font-weight:600;">
-                    Live business-school engagement, admissions, payment and student profile analytics
-                </div>
-            </div>
-            """, unsafe_allow_html=True)
-    with col2:
-        st.markdown(live_status_html(is_connected, "Google Sheets"), unsafe_allow_html=True)
+            cols.append(f"Unnamed_{idx}")
+
+    cols = make_unique(cols)
+    # remap event rows to unique column names
+    for row in event_rows:
+        i = int(row["column_name"].split("_")[-1])
+        row["column_name"] = cols[i]
+
+    df = raw.iloc[data_start:].copy().reset_index(drop=True)
+    df.columns = cols
+    df = df.dropna(how="all")
+
+    name_col = best_matching_col(df, ["student name", "name"])
+    email_col = best_matching_col(df, ["email"])
+    batch_col = best_matching_col(df, ["batch"])
+    country_col = best_matching_col(df, ["country"])
+    income_col = best_matching_col(df, ["income"])
+    mobile_col = best_matching_col(df, ["mobile"])
+    community_status_col = best_matching_col(df, ["community status"])
+    payment_status_col = best_matching_col(df, ["payment status", "status"])
+    payment_date_col = best_matching_col(df, ["payment date"])
+    engagement_pct_col = best_matching_col(df, ["overall engagement %", "engagement %"])
+    engagement_score_col = best_matching_col(df, ["overall engagement score", "engagement score"])
+
+    if not name_col:
+        raise ValueError(f"Name column not found in {sheet_name}")
+
+    df = df[df[name_col].astype(str).str.strip().ne("")].copy()
+    df["Program"] = infer_program_from_sheet(sheet_name)
+    df["source_sheet"] = sheet_name
+    df["student_name"] = df[name_col].map(clean_text)
+    df["student_key"] = df["student_name"].map(normalize_name)
+    df["email_key"] = df[email_col].map(normalize_email) if email_col else ""
+    if batch_col:
+        df["Batch"] = df[batch_col].map(clean_text)
+    else:
+        df["Batch"] = ""
+
+    event_info = pd.DataFrame(event_rows, columns=["column_name", "event_name", "event_type", "event_date", "sheet"])
+    event_cols = event_info["column_name"].tolist() if not event_info.empty else []
+
+    for c in event_cols:
+        df[c] = df[c].apply(normalize_yes_no).astype(int)
+
+    df["participation_count"] = df[event_cols].sum(axis=1) if event_cols else 0
+    if engagement_score_col:
+        df["engagement_score"] = pd.to_numeric(df[engagement_score_col], errors="coerce").fillna(df["participation_count"])
+    else:
+        df["engagement_score"] = df["participation_count"]
+    if engagement_pct_col:
+        df["engagement_pct"] = pd.to_numeric(df[engagement_pct_col], errors="coerce").fillna(0)
+        if df["engagement_pct"].max() <= 1.05:
+            df["engagement_pct"] = df["engagement_pct"] * 100
+    else:
+        total_events = max(len(event_cols), 1)
+        df["engagement_pct"] = (df["participation_count"] / total_events) * 100
+
+    if payment_date_col:
+        df[payment_date_col] = df[payment_date_col].apply(parse_date_safe)
+        df["payment_date_parsed"] = df[payment_date_col]
+    else:
+        df["payment_date_parsed"] = pd.NaT
+
+    stat_series = df[payment_status_col].astype(str).str.lower().str.strip() if payment_status_col else pd.Series("", index=df.index)
+    df["sheet_status_raw"] = df[payment_status_col].map(clean_text) if payment_status_col else ""
+    df["sheet_is_paid"] = stat_series.str.contains("admitted|paid", na=False)
+    df["sheet_is_refunded"] = stat_series.str.contains("refund", na=False)
+    df["is_active"] = df["engagement_pct"] > 0
+
+    ctx = {
+        "name_col": name_col,
+        "email_col": email_col,
+        "batch_col": batch_col,
+        "country_col": country_col,
+        "income_col": income_col,
+        "mobile_col": mobile_col,
+        "community_status_col": community_status_col,
+        "payment_status_col": payment_status_col,
+        "payment_date_col": payment_date_col,
+        "engagement_score_col": engagement_score_col,
+        "engagement_pct_col": engagement_pct_col,
+        "event_info": event_info,
+        "event_cols": event_cols,
+    }
+    return df, ctx
+
+
+def reconcile_master_with_tx(master_df, tx_df):
+    tx_by_email = {}
+    tx_by_name = {}
+    for _, row in tx_df.iterrows():
+        email = row.get("email_key", "")
+        name = row.get("student_key", "")
+        if email and email not in tx_by_email:
+            tx_by_email[email] = row
+        if name and name not in tx_by_name:
+            tx_by_name[name] = row
+
+    resolved = []
+    resolved_payment = []
+    resolved_source = []
+    for _, row in master_df.iterrows():
+        match = None
+        email = row.get("email_key", "")
+        name = row.get("student_key", "")
+        if email and email in tx_by_email:
+            match = tx_by_email[email]
+        elif name and name in tx_by_name:
+            match = tx_by_name[name]
+        if match is not None:
+            status = clean_text(match.get("tx_status", "")) or clean_text(match.get("sheet_status_raw", ""))
+            pay_dt = match.get("tx_payment_date", pd.NaT)
+            resolved.append(status if status else ("Admitted" if match.get("sheet_is_paid", False) else row.get("master_status_value", "")))
+            resolved_payment.append(pay_dt if pd.notna(pay_dt) else pd.NaT)
+            resolved_source.append(match.get("source_sheet", ""))
+        else:
+            resolved.append("Admitted" if row.get("master_is_paid", False) else clean_text(row.get("master_status_value", "")))
+            resolved_payment.append(pd.NaT)
+            resolved_source.append("")
+
+    out = master_df.copy()
+    out["resolved_status"] = resolved
+    out["resolved_payment_date"] = resolved_payment
+    out["resolved_tx_source"] = resolved_source
+    out["is_paid"] = out["resolved_status"].astype(str).str.lower().str.contains("admitted", na=False)
+    out["is_refunded"] = out["resolved_status"].astype(str).str.lower().str.contains("refund", na=False)
+    out["paid_label"] = np.where(out["is_paid"], "Paid / Admitted", "Not Paid")
+    out["is_active"] = out["active_master"]
+    return out
+
+
+@st.cache_data(show_spinner=False, ttl=180)
+def load_dashboard_data(source_mode: str, spreadsheet_id=None, file_bytes=None):
+    sheet_names = get_sheet_names(source_mode, spreadsheet_id, file_bytes)
+    missing = [s for s in ALL_REQUIRED if s not in sheet_names]
+
+    masters, master_ctx = {}, {}
+    activities, activity_ctx = {}, {}
+
+    for sheet in MASTER_SHEETS:
+        if sheet in sheet_names:
+            raw = load_raw_sheet(source_mode, sheet, spreadsheet_id, file_bytes)
+            masters[sheet], master_ctx[sheet] = parse_master_sheet(raw, "UG" if sheet.endswith("UG") else "PG", sheet)
+
+    for sheet in UG_BATCH_SHEETS + PG_BATCH_SHEETS + TX_SHEETS:
+        if sheet in sheet_names:
+            raw = load_raw_sheet(source_mode, sheet, spreadsheet_id, file_bytes)
+            activities[sheet], activity_ctx[sheet] = parse_activity_sheet(raw, sheet)
+
+    tx_df = pd.concat([activities[s] for s in TX_SHEETS if s in activities], ignore_index=True) if any(s in activities for s in TX_SHEETS) else pd.DataFrame()
+    if not tx_df.empty:
+        tx_df = tx_df.copy()
+        tx_df["tx_status"] = tx_df.get("sheet_status_raw", "")
+        tx_df["tx_payment_date"] = tx_df.get("payment_date_parsed", pd.NaT)
+
+    overview_frames = []
+    for sheet in MASTER_SHEETS:
+        if sheet in masters:
+            prog = "UG" if sheet.endswith("UG") else "PG"
+            tx_prog = tx_df[tx_df["Program"] == prog] if not tx_df.empty else pd.DataFrame()
+            overview_frames.append(reconcile_master_with_tx(masters[sheet], tx_prog))
+
+    overview_df = pd.concat(overview_frames, ignore_index=True) if overview_frames else pd.DataFrame()
+
+    combined_profiles = []
+    if not overview_df.empty:
+        combined_profiles.append(overview_df.assign(profile_source="master"))
+    for s, df in activities.items():
+        combined_profiles.append(df.assign(profile_source=s))
+    profile_df = pd.concat(combined_profiles, ignore_index=True) if combined_profiles else pd.DataFrame()
+
+    return {
+        "sheet_names": sheet_names,
+        "missing": missing,
+        "masters": masters,
+        "master_ctx": master_ctx,
+        "activities": activities,
+        "activity_ctx": activity_ctx,
+        "overview_df": overview_df,
+        "profile_df": profile_df,
+        "tx_df": tx_df,
+    }
+
+
+# ---------------- Rendering ----------------
+
+def render_header(cfg):
+    c1, c2 = st.columns([6, 1.4])
+    with c1:
+        logo = find_logo_path()
+        if logo is not None:
+            a, b = st.columns([0.12, 0.88])
+            with a:
+                st.image(str(logo), width=72)
+            with b:
+                st.markdown('<div class="hero-card"><div style="font-size:30px; font-weight:900; color:#0b3d2e;">Tetr Analytics Dashboard</div><div style="margin-top:6px; color:#2e6b57; font-weight:600;">Live overview, batch analytics, and student-level tracking across Master, Batch, and Tetr-X sheets.</div></div>', unsafe_allow_html=True)
+        else:
+            st.markdown('<div class="hero-card"><div style="font-size:30px; font-weight:900; color:#0b3d2e;">Tetr Analytics Dashboard</div><div style="margin-top:6px; color:#2e6b57; font-weight:600;">Live overview, batch analytics, and student-level tracking across Master, Batch, and Tetr-X sheets.</div></div>', unsafe_allow_html=True)
+    with c2:
+        label = cfg["connection_note"] if cfg["connected_ok"] else cfg["connection_note"]
+        st.markdown(live_status_html(cfg["connected_ok"], label), unsafe_allow_html=True)
+
+
+def overview_metrics(overview_df):
+    total_students = int(len(overview_df))
+    total_active = int(overview_df["is_active"].sum()) if not overview_df.empty else 0
+    total_paid = int(overview_df["is_paid"].sum()) if not overview_df.empty else 0
+    ug_students = int((overview_df["Program"] == "UG").sum()) if not overview_df.empty else 0
+    pg_students = int((overview_df["Program"] == "PG").sum()) if not overview_df.empty else 0
+    ug_paid = int(((overview_df["Program"] == "UG") & (overview_df["is_paid"])).sum()) if not overview_df.empty else 0
+    pg_paid = int(((overview_df["Program"] == "PG") & (overview_df["is_paid"])).sum()) if not overview_df.empty else 0
+    return total_students, total_active, total_paid, ug_students, pg_students, ug_paid, pg_paid
+
 
 def render_overview(data):
     st.subheader("Overview")
     overview_df = data["overview_df"]
-    ctx = data["master_contexts"]["Master UG"] if "Master UG" in data["master_contexts"] else list(data["master_contexts"].values())[0]
     if overview_df.empty:
-        st.warning("Overview data unavailable.")
+        st.warning("Master UG / Master PG could not be loaded.")
         return
 
-    name_col = ctx["name_col"]
-    country_col = ctx["country_col"]
-    batch_col = "Batch Label"
-    income_col = ctx["income_col"]
+    name_col = "student_name"
+    country_col = data["master_ctx"]["Master UG"]["country_col"] if "Master UG" in data["master_ctx"] else None
+    income_col = data["master_ctx"]["Master UG"]["income_col"] if "Master UG" in data["master_ctx"] else None
 
-    total_students = int(overview_df[name_col].count())
-    total_active = int(overview_df["is_active"].sum())
-    total_paid = int((overview_df["paid_label"] == "Paid / Admitted").sum())
-    total_refunded = int((overview_df["paid_label"] == "Refunded").sum())
-    ug_students = int((overview_df["Program"] == "UG").sum())
-    pg_students = int((overview_df["Program"] == "PG").sum())
-    ug_paid = int(((overview_df["Program"] == "UG") & (overview_df["paid_label"] == "Paid / Admitted")).sum())
-    pg_paid = int(((overview_df["Program"] == "PG") & (overview_df["paid_label"] == "Paid / Admitted")).sum())
+    total_students, total_active, total_paid, ug_students, pg_students, ug_paid, pg_paid = overview_metrics(overview_df)
+    active_rate = round((total_active / total_students * 100), 1) if total_students else 0
+    paid_rate = round((total_paid / total_students * 100), 1) if total_students else 0
 
-    c1, c2, c3, c4, c5 = st.columns(5)
-    c1.metric("Total Students", f"{total_students:,}")
-    c2.metric("Active Students", f"{total_active:,}", delta=f"{(total_active/total_students*100 if total_students else 0):.1f}%")
-    c3.metric("Paid / Admitted", f"{total_paid:,}", delta=f"{(total_paid/total_students*100 if total_students else 0):.1f}%")
-    c4.metric("Refunded", f"{total_refunded:,}")
-    c5.metric("Avg Engagement", f"{overview_df['engagement_pct'].mean():.1f}%")
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("Total Students", f"{total_students:,}")
+    m2.metric("Active Students", f"{total_active:,}", delta=f"{active_rate}% active")
+    m3.metric("Paid / Admitted", f"{total_paid:,}", delta=f"{paid_rate}% paid")
+    m4.metric("UG vs PG", f"{ug_students:,} / {pg_students:,}")
 
     g1, g2, g3 = st.columns([1.2, 1, 1])
     with g1:
-        st.plotly_chart(gauge_chart(total_students, "Total Students", max(total_students, 1)), use_container_width=True, key=chart_key("overview", "gauge_total"))
+        st.plotly_chart(gauge_chart(total_students, "Total Students", maximum=max(total_students, 1)), use_container_width=True, key="overview_gauge")
     with g2:
-        st.plotly_chart(donut_chart(["UG", "PG"], [ug_students, pg_students], "UG / PG Distribution"), use_container_width=True, key=chart_key("overview", "ugpg_donut"))
+        st.plotly_chart(donut_chart(["UG", "PG"], [ug_students, pg_students], "UG / PG Distribution"), use_container_width=True, key="overview_program_donut")
     with g3:
-        st.plotly_chart(donut_chart(["UG Paid", "PG Paid"], [ug_paid, pg_paid], "Paid Distribution"), use_container_width=True, key=chart_key("overview", "paid_donut"))
+        st.plotly_chart(donut_chart(["UG Paid", "PG Paid"], [ug_paid, pg_paid], "Paid Distribution"), use_container_width=True, key="overview_paid_donut")
 
     a1, a2 = st.columns(2)
     with a1:
-        batch_plot = (overview_df.groupby(batch_col)[name_col].count().reset_index(name="Students").sort_values("Students", ascending=False))
-        fig = px.bar(batch_plot, x=batch_col, y="Students", title="Students by Batch")
-        fig.update_traces(marker_color=GREEN_2)
-        st.plotly_chart(nice_layout(fig, height=380, x_tickangle=-25), use_container_width=True, key=chart_key("overview", "batch_bar"))
+        batch_plot = overview_df.groupby(["Program", "Batch"], dropna=False)[name_col].count().reset_index(name="Students")
+        batch_plot["Batch"] = batch_plot["Batch"].replace("", "Unknown")
+        fig = px.bar(batch_plot, x="Batch", y="Students", color="Program", barmode="group", title="Students by Batch", color_discrete_map={"UG": GREEN, "PG": GREEN_3})
+        st.plotly_chart(nice_layout(fig, height=380, x_tickangle=-25), use_container_width=True, key="overview_batch_bar")
     with a2:
         status_plot = overview_df.groupby(["Program", "paid_label"])[name_col].count().reset_index(name="Students")
-        fig = px.bar(
-            status_plot, x="Program", y="Students", color="paid_label", barmode="group", title="Paid vs Refunded vs Not Paid",
-            color_discrete_map={"Paid / Admitted": GREEN, "Refunded": AMBER, "Not Paid": GREEN_4}
-        )
-        st.plotly_chart(nice_layout(fig, height=380), use_container_width=True, key=chart_key("overview", "status_bar"))
+        fig = px.bar(status_plot, x="Program", y="Students", color="paid_label", barmode="group", title="Paid vs Not Paid by Program", color_discrete_map={"Paid / Admitted": GREEN, "Not Paid": GREEN_4})
+        st.plotly_chart(nice_layout(fig, height=380), use_container_width=True, key="overview_status_bar")
 
     b1, b2 = st.columns(2)
     with b1:
@@ -817,326 +731,275 @@ def render_overview(data):
             country_plot = overview_df.groupby(country_col)[name_col].count().reset_index(name="Students").sort_values("Students", ascending=False).head(12)
             fig = px.bar(country_plot, x=country_col, y="Students", title="Top Countries")
             fig.update_traces(marker_color=GREEN_3)
-            st.plotly_chart(nice_layout(fig, height=400, x_tickangle=-30), use_container_width=True, key=chart_key("overview", "country_bar"))
+            st.plotly_chart(nice_layout(fig, height=400, x_tickangle=-30), use_container_width=True, key="overview_country_bar")
     with b2:
         if income_col and income_col in overview_df.columns:
             income_plot = overview_df.groupby(income_col)[name_col].count().reset_index(name="Students").sort_values("Students", ascending=False)
             fig = px.bar(income_plot, x=income_col, y="Students", title="Income Distribution")
             fig.update_traces(marker_color=GREEN)
-            st.plotly_chart(nice_layout(fig, height=400, x_tickangle=-25), use_container_width=True, key=chart_key("overview", "income_bar"))
+            st.plotly_chart(nice_layout(fig, height=400, x_tickangle=-25), use_container_width=True, key="overview_income_bar")
 
-    st.markdown("#### Student Table")
-    preview_cols = [c for c in [name_col, "Program", batch_col, country_col, income_col, "engagement_pct", "engagement_score", "paid_label", "payment_date_final"] if c in overview_df.columns]
-    st.dataframe(overview_df[preview_cols].sort_values(["engagement_pct", "engagement_score"], ascending=False), use_container_width=True, height=420, key=chart_key("overview", "df"))
+    display_cols = [c for c in ["student_name", "Program", "Batch", country_col, income_col, "resolved_status", "resolved_payment_date", "paid_label"] if c and c in overview_df.columns]
+    st.markdown("#### Overview Table")
+    st.dataframe(overview_df[display_cols].sort_values(["Program", "Batch", "student_name"]), use_container_width=True, height=420, key="overview_table")
 
-def render_sheet_page(sheet_name, df, ctx):
-    st.subheader(sheet_name)
+
+def render_sheet_detail(sheet_name, df, ctx, prefix):
+    st.markdown(f"#### {sheet_name}")
     if df.empty:
-        st.warning("No data available.")
+        st.warning(f"No data available for {sheet_name}.")
         return
 
-    name_col = ctx["name_col"]
-    country_col = ctx["country_col"]
-    event_cols = ctx["event_cols"] if "event_cols" in ctx else []
-    event_info = ctx.get("event_info", pd.DataFrame())
-
-    total_students = int(df[name_col].count())
-    active_students = int(df["is_active"].sum())
-    paid_students = int((df["paid_label"] == "Paid / Admitted").sum())
-    refunded_students = int((df["paid_label"] == "Refunded").sum())
+    total_students = int(len(df))
+    active_students = int(df["is_active"].sum()) if "is_active" in df else int((df["engagement_pct"] > 0).sum())
+    paid_students = int(df["sheet_is_paid"].sum()) if "sheet_is_paid" in df else 0
     avg_engagement = round(float(df["engagement_pct"].mean()), 1) if len(df) else 0
 
-    k1, k2, k3, k4, k5 = st.columns(5)
+    k1, k2, k3, k4 = st.columns(4)
     k1.metric("Students", f"{total_students:,}")
     k2.metric("Active", f"{active_students:,}", delta=f"{(active_students/total_students*100 if total_students else 0):.1f}%")
-    k3.metric("Paid / Admitted", f"{paid_students:,}")
-    k4.metric("Refunded", f"{refunded_students:,}")
-    k5.metric("Avg Engagement", f"{avg_engagement:.1f}%")
+    k3.metric("Admitted / Paid", f"{paid_students:,}", delta=f"{(paid_students/total_students*100 if total_students else 0):.1f}%")
+    k4.metric("Avg Engagement", f"{avg_engagement:.1f}%")
 
     c1, c2 = st.columns(2)
     with c1:
         fig = px.histogram(df, x="engagement_pct", nbins=12, title="Engagement Distribution")
         fig.update_traces(marker_color=GREEN_2)
-        st.plotly_chart(nice_layout(fig, height=360), use_container_width=True, key=chart_key(sheet_name, "engagement_hist"))
+        st.plotly_chart(nice_layout(fig, height=360), use_container_width=True, key=f"{prefix}_hist")
     with c2:
-        status = df["paid_label"].value_counts().reset_index()
-        status.columns = ["Status", "Students"]
-        fig = px.pie(
-            status, names="Status", values="Students", hole=0.58, title="Student Status",
-            color="Status", color_discrete_map={"Paid / Admitted": GREEN, "Refunded": AMBER, "Not Paid": GREEN_4}
-        )
-        st.plotly_chart(nice_layout(fig, height=360), use_container_width=True, key=chart_key(sheet_name, "status_pie"))
+        status = pd.DataFrame({"Status": ["Admitted / Paid", "Other"], "Students": [paid_students, max(total_students - paid_students, 0)]})
+        fig = px.pie(status, names="Status", values="Students", hole=0.58, color="Status", color_discrete_map={"Admitted / Paid": GREEN, "Other": GREEN_4})
+        fig.update_layout(title="Paid Status")
+        st.plotly_chart(nice_layout(fig, height=360), use_container_width=True, key=f"{prefix}_pie")
 
     d1, d2 = st.columns(2)
     with d1:
-        if event_cols:
-            event_counts = []
-            for c in event_cols:
-                count = int(pd.to_numeric(df[c], errors="coerce").fillna(0).sum())
-                meta = event_info[event_info["column_name"] == c]
-                ev_type = meta["event_type"].iloc[0] if len(meta) else "Other"
-                event_counts.append({"Event": c, "Participants": count, "Type": ev_type})
-            event_counts = pd.DataFrame(event_counts).sort_values("Participants", ascending=False).head(12)
-            fig = px.bar(event_counts, x="Participants", y="Event", orientation="h", color="Type", title="Top Events by Participation")
-            st.plotly_chart(nice_layout(fig, height=460), use_container_width=True, key=chart_key(sheet_name, "event_bar"))
+        event_info = ctx["event_info"]
+        if not event_info.empty:
+            participants = []
+            for _, r in event_info.iterrows():
+                col = r["column_name"]
+                participants.append(int(pd.to_numeric(df[col], errors="coerce").fillna(0).sum()))
+            event_counts = event_info.assign(Participants=participants).sort_values("Participants", ascending=False).head(12)
+            fig = px.bar(event_counts, x="Participants", y="event_name", orientation="h", color="event_type", title="Top Events by Participation")
+            st.plotly_chart(nice_layout(fig, height=460), use_container_width=True, key=f"{prefix}_events")
     with d2:
+        country_col = ctx.get("country_col")
         if country_col and country_col in df.columns:
-            country_plot = df.groupby(country_col)[name_col].count().reset_index(name="Students").sort_values("Students", ascending=False).head(10)
-            fig = px.bar(country_plot, x=country_col, y="Students", title="Country Split")
+            top_country = df.groupby(country_col)["student_name"].count().reset_index(name="Students").sort_values("Students", ascending=False).head(10)
+            fig = px.bar(top_country, x=country_col, y="Students", title="Country Split")
             fig.update_traces(marker_color=GREEN_3)
-            st.plotly_chart(nice_layout(fig, height=430, x_tickangle=-30), use_container_width=True, key=chart_key(sheet_name, "country_bar"))
+            st.plotly_chart(nice_layout(fig, height=430, x_tickangle=-30), use_container_width=True, key=f"{prefix}_country")
 
-    e1, e2 = st.columns(2)
-    with e1:
-        if event_cols and not event_info.empty:
-            type_counts = []
-            for ev_type, sub in event_info.groupby("event_type"):
-                cols = [c for c in sub["column_name"].tolist() if c in df.columns]
-                type_counts.append({"Event Type": ev_type or "Other", "Participations": int(df[cols].sum().sum()) if cols else 0})
-            type_df = pd.DataFrame(type_counts).sort_values("Participations", ascending=False)
-            fig = px.bar(type_df, x="Event Type", y="Participations", title="Participation by Event Type")
-            fig.update_traces(marker_color=GREEN)
-            st.plotly_chart(nice_layout(fig, height=360, x_tickangle=-20), use_container_width=True, key=chart_key(sheet_name, "type_bar"))
-    with e2:
-        if event_cols and not event_info.empty:
-            timeline_rows = []
-            for _, meta in event_info.iterrows():
-                c = meta["column_name"]
-                if c in df.columns and pd.notna(meta["event_date"]):
-                    timeline_rows.append({"Date": pd.to_datetime(meta["event_date"]), "Participants": int(df[c].sum())})
-            timeline = pd.DataFrame(timeline_rows).groupby("Date", as_index=False)["Participants"].sum().sort_values("Date") if timeline_rows else pd.DataFrame()
-            if not timeline.empty:
-                fig = px.line(timeline, x="Date", y="Participants", markers=True, title="Participation Timeline")
-                fig.update_traces(line_color=GREEN, marker_color=GREEN)
-                st.plotly_chart(nice_layout(fig, height=360), use_container_width=True, key=chart_key(sheet_name, "timeline"))
+    t1, t2 = st.columns(2)
+    with t1:
+        students = df[["student_name", "engagement_pct", "engagement_score"]].sort_values(["engagement_pct", "engagement_score"], ascending=False).head(20)
+        st.markdown("#### Top Students")
+        st.dataframe(students, use_container_width=True, height=380, key=f"{prefix}_top")
+    with t2:
+        target = df[(~df["sheet_is_paid"]) & (df["engagement_pct"] > 0)][["student_name", "engagement_pct", "engagement_score"]].sort_values(["engagement_pct", "engagement_score"], ascending=False).head(20)
+        st.markdown("#### Best Upgrade Targets")
+        st.dataframe(target, use_container_width=True, height=380, key=f"{prefix}_upgrade")
 
-    st.markdown("#### Top Students")
-    top_cols = [c for c in [name_col, "Batch Label", "engagement_pct", "engagement_score", "paid_label", "payment_date_final"] if c in df.columns]
-    st.dataframe(df[top_cols].sort_values(["engagement_pct", "engagement_score"], ascending=False).head(30), use_container_width=True, height=360, key=chart_key(sheet_name, "top_df"))
+    event_info = ctx["event_info"]
+    if not event_info.empty and event_info["event_date"].notna().any():
+        participants = []
+        for _, r in event_info.iterrows():
+            col = r["column_name"]
+            participants.append(int(pd.to_numeric(df[col], errors="coerce").fillna(0).sum()))
+        timeline = event_info.assign(Participants=participants).dropna(subset=["event_date"]).sort_values("event_date")
+        fig = px.line(timeline, x="event_date", y="Participants", markers=True, title="Participation Timeline")
+        fig.update_traces(line_color=GREEN, marker_color=GREEN)
+        st.plotly_chart(nice_layout(fig, height=360), use_container_width=True, key=f"{prefix}_timeline")
 
-    st.markdown("#### Full Student Table")
-    display_cols = [c for c in [name_col, "Batch Label", country_col, "engagement_pct", "engagement_score", "paid_label", "payment_date_final"] if c in df.columns]
-    preview_events = event_cols[:8] if event_cols else []
-    display_cols += [c for c in preview_events if c in df.columns]
-    st.dataframe(df[display_cols].sort_values(["engagement_pct", "engagement_score"], ascending=False), use_container_width=True, height=420, key=chart_key(sheet_name, "full_df"))
-
-def gather_student_matches(data, query_names, program_filter="All"):
-    wanted = {normalize_name(n) for n in query_names if normalize_name(n)}
-    if not wanted:
-        return []
-    out = []
-    seen = set()
-    for sheet, df in data["masters"].items():
-        ctx = data["master_contexts"][sheet]
-        for _, row in df.iterrows():
-            nm = row["_name_norm"]
-            if nm in wanted and (program_filter == "All" or row["Program"] == program_filter):
-                key = (row.get("_email_norm", ""), row["_name_norm"], row["Program"])
-                if key not in seen:
-                    out.append(key)
-                    seen.add(key)
-    return out
-
-def render_profile_card(title, info_dict):
-    st.markdown(f"""
-    <div class="section-card">
-      <div style="font-size:18px;font-weight:800;color:{GREEN};margin-bottom:8px;">{title}</div>
-    """, unsafe_allow_html=True)
-    cols = st.columns(3)
-    items = list(info_dict.items())
-    for i, (k, v) in enumerate(items):
-        with cols[i % 3]:
-            st.markdown(f"**{k}**  \n{v if clean_text(v) else '-'}")
-    st.markdown("</div>", unsafe_allow_html=True)
 
 def render_student_profile(data):
     st.subheader("Student Profile")
-    all_students = data["all_students"]
-    master_names = sorted(all_students["name"].dropna().astype(str).unique().tolist())
-
-    st.caption("Search one or more students. The dashboard will combine Master, Batch and Tetr-X records, then show participation, event types and timeline.")
-
-    c1, c2 = st.columns([2, 1])
-    with c1:
-        text_input = st.text_area("Paste student names", placeholder="One name per line or comma-separated", height=100)
-    with c2:
-        chosen_names = st.multiselect("Or select students", options=master_names)
-
-    program_filter = st.selectbox("Program", ["All", "UG", "PG"], index=0)
-
-    parsed_text_names = []
-    for part in re.split(r"[\n,;]+", text_input or ""):
-        if clean_text(part):
-            parsed_text_names.append(clean_text(part))
-    queries = list(dict.fromkeys(chosen_names + parsed_text_names))
-
-    if not queries:
-        st.info("Select or paste one or more student names to view profiles.")
+    overview_df = data["overview_df"]
+    if overview_df.empty:
+        st.warning("Master sheets not available.")
         return
 
-    matched_keys = gather_student_matches(data, queries, program_filter)
-    if not matched_keys:
-        st.warning("No matching students found in Master sheets.")
+    students = overview_df[["student_name", "email_key", "student_key", "Program"]].drop_duplicates().sort_values("student_name")
+    search = st.text_input("Search student names", placeholder="Type a name...")
+    options = students[students["student_name"].str.contains(search, case=False, na=False)]["student_name"].tolist() if search else students["student_name"].tolist()
+    selected = st.multiselect("Select one or more students", options=options)
+    pasted = st.text_area("Or paste multiple student names (one per line)")
+    pasted_names = [clean_text(x) for x in pasted.splitlines() if clean_text(x)]
+    final_names = list(dict.fromkeys(selected + pasted_names))
+
+    if not final_names:
+        st.info("Search and select a student to view the profile.")
         return
 
-    for email_norm, name_norm, prog in matched_keys:
-        master_df = data["masters"]["Master UG" if prog == "UG" else "Master PG"]
-        master_row = master_df[(master_df["_name_norm"] == name_norm)]
-        if email_norm:
-            master_row = master_row[(master_row["_email_norm"] == email_norm)] if not master_row.empty else master_df[(master_df["_email_norm"] == email_norm)]
-        if master_row.empty:
+    for i, student_name in enumerate(final_names):
+        matches = overview_df[overview_df["student_name"].str.lower() == student_name.lower()]
+        if matches.empty:
+            matches = overview_df[overview_df["student_key"] == normalize_name(student_name)]
+        if matches.empty:
+            st.warning(f"No master profile found for {student_name}")
             continue
-        master_row = master_row.iloc[0]
-        master_ctx = data["master_contexts"]["Master UG" if prog == "UG" else "Master PG"]
 
-        display_name = master_row[master_ctx["name_col"]]
-        st.markdown(f"### {display_name}")
+        master = matches.iloc[0]
+        email_key = master.get("email_key", "")
+        name_key = master.get("student_key", "")
 
-        # profile summary
-        summary = {
-            "Program": prog,
-            "Email": master_row.get(master_ctx["email_col"], ""),
-            "Batch": master_row.get("Batch Label", ""),
-            "Country": master_row.get(master_ctx["country_col"], ""),
-            "Income": master_row.get(master_ctx["income_col"], ""),
-            "Paid Status": master_row.get("paid_label", ""),
-            "Payment Date": master_row.get("payment_date_final", ""),
-            "Engagement %": f"{master_row.get('engagement_pct', 0):.1f}%",
-            "Engagement Score": int(master_row.get("engagement_score", 0)),
-        }
-        render_profile_card("Master Profile", summary)
-
-        # collect matches across detail sheets
-        detail_rows = []
-        event_records = []
-        type_counter = Counter()
-        sheet_summary = []
-        total_events = 0
-
-        for sheet in DETAIL_SHEETS:
-            if sheet not in data["details"]:
-                continue
-            df = data["details"][sheet]
-            ctx = data["detail_contexts"][sheet]
-            sub = df[df["_name_norm"] == name_norm]
-            if email_norm:
-                sub = sub[(sub["_email_norm"] == email_norm)] if not sub.empty else df[df["_email_norm"] == email_norm]
-            if sub.empty:
-                continue
-            row = sub.iloc[0]
-            detail_rows.append((sheet, row, ctx))
-            sheet_summary.append({
-                "Sheet": sheet,
-                "Batch": row.get("Batch Label", ""),
-                "Paid Status": row.get("paid_label", ""),
-                "Engagement %": row.get("engagement_pct", 0),
-                "Events Attended": int(row.get("participation_count", 0)),
-                "Payment Date": row.get("payment_date_final", pd.NaT),
-            })
-
-            event_info = ctx.get("event_info", pd.DataFrame())
-            for _, meta in event_info.iterrows():
-                col = meta["column_name"]
-                if col in sub.columns and int(row.get(col, 0)) == 1:
-                    total_events += 1
-                    ev_type = clean_text(meta["event_type"]) or "Other"
-                    type_counter[ev_type] += 1
-                    event_records.append({
-                        "Date": pd.to_datetime(meta["event_date"]) if pd.notna(meta["event_date"]) else pd.NaT,
-                        "Event": clean_text(meta["event_name"]) or col,
-                        "Type": ev_type,
-                        "Sheet": sheet,
-                    })
-
-        k1, k2, k3, k4 = st.columns(4)
-        k1.metric("Total Participations", total_events)
-        k2.metric("Matched Sheets", len(detail_rows))
-        k3.metric("Current Paid Status", master_row.get("paid_label", ""))
-        k4.metric("Master Engagement", f"{master_row.get('engagement_pct', 0):.1f}%")
-
-        if sheet_summary:
-            st.markdown("#### Sheet Matches")
-            st.dataframe(pd.DataFrame(sheet_summary).sort_values(["Sheet"]), use_container_width=True, height=220, key=chart_key(display_name, "sheet_matches"))
-
-        if event_records:
-            event_df = pd.DataFrame(event_records).sort_values(["Date", "Event"])
-            type_df = pd.DataFrame([
-                {"Event Type": t, "Count": c, "Percent": round(c / total_events * 100, 1) if total_events else 0}
-                for t, c in type_counter.items()
-            ]).sort_values("Count", ascending=False)
-
-            c1, c2 = st.columns(2)
-            with c1:
-                fig = px.bar(type_df, x="Event Type", y="Count", text="Percent", title="Event Types Attended")
-                fig.update_traces(marker_color=GREEN)
-                st.plotly_chart(nice_layout(fig, height=360, x_tickangle=-20), use_container_width=True, key=chart_key(display_name, "type_counts"))
-            with c2:
-                event_date_counts = event_df.dropna(subset=["Date"]).groupby("Date", as_index=False).size().rename(columns={"size": "Participations"})
-                fig = px.line(event_date_counts, x="Date", y="Participations", markers=True, title="Engagement Timeline")
-                fig.update_traces(line_color=GREEN, marker_color=GREEN)
-                pay_dt = master_row.get("payment_date_final", pd.NaT)
-                if pd.notna(pay_dt):
-                    xdt = pd.to_datetime(pay_dt)
-                    fig.add_shape(
-                        type="line",
-                        x0=xdt, x1=xdt, y0=0, y1=1, yref="paper",
-                        line=dict(color=RED, dash="dash", width=2)
-                    )
-                    fig.add_annotation(x=xdt, y=1, yref="paper", text="Payment Date", showarrow=False, yshift=10, font=dict(color=RED))
-                st.plotly_chart(nice_layout(fig, height=360), use_container_width=True, key=chart_key(display_name, "timeline"))
-
-            st.markdown("#### Event Type Breakdown")
-            st.dataframe(type_df, use_container_width=True, height=220, key=chart_key(display_name, "type_df"))
-
-            st.markdown("#### Event History")
-            st.dataframe(event_df, use_container_width=True, height=320, key=chart_key(display_name, "event_df"))
-        else:
-            st.info("No batch or Tetr-X participation records found for this student.")
+        related = []
+        for sheet, df in data["activities"].items():
+            part = df[(df["email_key"] == email_key) | (df["student_key"] == name_key)].copy()
+            if not part.empty:
+                related.append(part)
+        related_df = pd.concat(related, ignore_index=True) if related else pd.DataFrame()
 
         st.markdown("---")
+        st.markdown(f"### {master['student_name']}")
+        p1, p2, p3, p4 = st.columns(4)
+        p1.metric("Program", clean_text(master.get("Program", "")))
+        p2.metric("Batch", clean_text(master.get("Batch", "")))
+        p3.metric("Paid Status", clean_text(master.get("resolved_status", "Not Paid")))
+        pay_dt = master.get("resolved_payment_date", pd.NaT)
+        p4.metric("Payment Date", pay_dt.strftime("%Y-%m-%d") if pd.notna(pay_dt) else "—")
 
-# -----------------------------
-# Sidebar / main
-# -----------------------------
-def sidebar_navigation():
-    nav_options = ["Overview", "Student Profile"] + UG_BATCH_SHEETS + PG_BATCH_SHEETS + TETRX_SHEETS
-    with st.sidebar:
-        st.markdown("### Navigation")
-        page = st.radio("Go to", nav_options, label_visibility="collapsed")
-        st.markdown("---")
-        st.caption("Live Google Sheets dashboard")
-    return page
+        info_cols = [c for c in ["student_name", "Email", "email_key"] if c in overview_df.columns]
+        c1, c2 = st.columns([1.2, 1])
+        with c1:
+            master_display = {
+                "Name": master.get("student_name", ""),
+                "Email": clean_text(master.get("email_key", "")),
+                "Program": clean_text(master.get("Program", "")),
+                "Batch": clean_text(master.get("Batch", "")),
+                "Country": clean_text(master.get(data["master_ctx"]["Master UG"]["country_col"] if master.get("Program") == "UG" and "Master UG" in data["master_ctx"] else data["master_ctx"].get("Master PG", {}).get("country_col", ""), "")),
+                "Income": clean_text(master.get(data["master_ctx"]["Master UG"]["income_col"] if master.get("Program") == "UG" and "Master UG" in data["master_ctx"] else data["master_ctx"].get("Master PG", {}).get("income_col", ""), "")),
+                "Status": clean_text(master.get("resolved_status", "")),
+                "Payment": clean_text(master.get("master_payment_value", "")),
+            }
+            st.dataframe(pd.DataFrame(master_display.items(), columns=["Field", "Value"]), use_container_width=True, hide_index=True, key=f"profile_info_{i}")
+        with c2:
+            if related_df.empty:
+                st.info("No matching batch / Tetr-X records found.")
+            else:
+                total_events = int(related_df["participation_count"].sum()) if "participation_count" in related_df else 0
+                distinct_sheets = related_df["source_sheet"].nunique()
+                active_records = int((related_df["engagement_pct"] > 0).sum()) if "engagement_pct" in related_df else 0
+                st.metric("Total Event Participations", total_events)
+                st.metric("Matched Sheets", distinct_sheets)
+                st.metric("Active Records", active_records)
+
+        if not related_df.empty:
+            # event type summary
+            event_rows = []
+            for sheet, ctx in data["activity_ctx"].items():
+                part = data["activities"][sheet][(data["activities"][sheet]["email_key"] == email_key) | (data["activities"][sheet]["student_key"] == name_key)]
+                if part.empty or ctx["event_info"].empty:
+                    continue
+                row = part.iloc[0]
+                for _, ev in ctx["event_info"].iterrows():
+                    count = int(row.get(ev["column_name"], 0))
+                    if count > 0:
+                        event_rows.append({
+                            "sheet": sheet,
+                            "event_name": ev["event_name"],
+                            "event_type": ev["event_type"],
+                            "event_date": ev["event_date"],
+                            "count": count,
+                        })
+            ev_df = pd.DataFrame(event_rows)
+            if not ev_df.empty:
+                type_df = ev_df.groupby("event_type")["count"].sum().reset_index().sort_values("count", ascending=False)
+                total = type_df["count"].sum()
+                type_df["percentage"] = np.where(total > 0, type_df["count"] / total * 100, 0)
+
+                x1, x2 = st.columns(2)
+                with x1:
+                    fig = px.bar(type_df, x="event_type", y="count", title="Event Type Participation")
+                    fig.update_traces(marker_color=GREEN_2)
+                    st.plotly_chart(nice_layout(fig, height=340, x_tickangle=-25), use_container_width=True, key=f"profile_type_bar_{i}")
+                with x2:
+                    fig = px.pie(type_df, names="event_type", values="count", hole=0.58, title="Event Type % Share")
+                    st.plotly_chart(nice_layout(fig, height=340), use_container_width=True, key=f"profile_type_pie_{i}")
+
+                timeline = ev_df.dropna(subset=["event_date"]).sort_values("event_date")
+                if not timeline.empty:
+                    timeline = timeline.groupby(["event_date", "event_name"], as_index=False)["count"].sum()
+                    fig = px.line(timeline, x="event_date", y="count", markers=True, title="Engagement Timeline")
+                    fig.update_traces(line_color=GREEN, marker_color=GREEN)
+                    if pd.notna(pay_dt):
+                        x = pd.Timestamp(pay_dt)
+                        fig.add_shape(type="line", x0=x, x1=x, y0=0, y1=1, xref="x", yref="paper", line=dict(color=RED, width=2, dash="dash"))
+                        fig.add_annotation(x=x, y=1, yref="paper", text="Payment Date", showarrow=False, font=dict(color=RED), bgcolor="white")
+                    st.plotly_chart(nice_layout(fig, height=360), use_container_width=True, key=f"profile_timeline_{i}")
+
+                st.markdown("#### Event Details")
+                show = ev_df.sort_values(["event_date", "event_type", "event_name"], ascending=[True, True, True]).copy()
+                st.dataframe(show, use_container_width=True, height=320, key=f"profile_events_{i}")
+            else:
+                st.info("Matched records found, but no attended events were recorded for this student.")
+
+            st.markdown("#### Matched Batch / Tetr-X Records")
+            record_cols = [c for c in ["source_sheet", "Batch", "engagement_pct", "engagement_score", "sheet_status_raw", "payment_date_parsed"] if c in related_df.columns]
+            st.dataframe(related_df[record_cols].sort_values(["source_sheet", "Batch"]), use_container_width=True, height=250, key=f"profile_records_{i}")
+
+
+def render_program_page(title, sheets, data, page_prefix):
+    st.subheader(title)
+    available = [s for s in sheets if s in data["activities"]]
+    if not available:
+        st.warning("No sheets available for this section.")
+        return
+    tabs = st.tabs(available)
+    for tab, sheet in zip(tabs, available):
+        with tab:
+            render_sheet_detail(sheet, data["activities"][sheet], data["activity_ctx"][sheet], f"{page_prefix}_{sheet}")
+
+
+def render_tetrx_page(data):
+    st.subheader("Tetr-X")
+    available = [s for s in TX_SHEETS if s in data["activities"]]
+    if not available:
+        st.warning("Tetr-X sheets not available.")
+        return
+    tabs = st.tabs(available)
+    for tab, sheet in zip(tabs, available):
+        with tab:
+            render_sheet_detail(sheet, data["activities"][sheet], data["activity_ctx"][sheet], f"tx_{sheet}")
+
 
 def main():
-    if not GSPREAD_AVAILABLE:
-        st.error("Missing gspread/google-auth in environment.")
-        st.stop()
+    cfg = resolve_source()
+    render_header(cfg)
 
-    spreadsheet_id = get_spreadsheet_id()
-    if not spreadsheet_id:
-        st.error("Missing GSHEET_SPREADSHEET_ID in Streamlit secrets.")
-        st.stop()
+    with st.sidebar:
+        st.markdown("## 🧭 Navigation")
+        page = st.radio("Go to", ["Overview", "Student Profile", "UG", "PG", "Tetr-X"], label_visibility="collapsed", key="nav")
+        if cfg["source_mode"] == "excel" and cfg["file_bytes"] is None:
+            st.info("Upload the workbook to use manual mode.")
+        if not cfg["connected_ok"] and cfg["source_mode"] == "gsheets":
+            st.error(cfg["connection_note"])
 
-    connected_ok = False
+    if cfg["source_mode"] == "excel" and cfg["file_bytes"] is None:
+        st.warning("Connect the Google Sheet or upload the workbook to load the dashboard.")
+        return
+
     try:
-        data = load_dashboard_data(spreadsheet_id)
-        connected_ok = True
+        data = load_dashboard_data(cfg["source_mode"], spreadsheet_id=cfg["spreadsheet_id"], file_bytes=cfg["file_bytes"])
     except Exception as e:
-        render_header(False)
-        st.error(f"Google Sheets connection failed: {e}")
-        st.stop()
+        st.error(f"Dashboard load failed: {e}")
+        return
 
-    render_header(connected_ok)
-    page = sidebar_navigation()
+    if data["missing"]:
+        st.warning("Missing sheets: " + ", ".join(data["missing"]))
 
     if page == "Overview":
         render_overview(data)
     elif page == "Student Profile":
         render_student_profile(data)
-    elif page in data["details"]:
-        render_sheet_page(page, data["details"][page], data["detail_contexts"][page])
-    else:
-        st.warning(f"{page} not found in live sheet.")
+    elif page == "UG":
+        render_program_page("UG Batch Sheets", UG_BATCH_SHEETS, data, "ug")
+    elif page == "PG":
+        render_program_page("PG Batch Sheets", PG_BATCH_SHEETS, data, "pg")
+    elif page == "Tetr-X":
+        render_tetrx_page(data)
+
 
 if __name__ == "__main__":
     main()
