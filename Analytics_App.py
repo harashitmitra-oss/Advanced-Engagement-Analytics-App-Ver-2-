@@ -112,6 +112,8 @@ def inject_css():
             width: 100% !important;
         }}
         .stRadio [role="radiogroup"] label:hover {{ background: #def2e6 !important; }}
+        .stRadio [role="radiogroup"] label p { color: #0b3d2e !important; font-weight: 700 !important; width:100% !important; }
+        .stRadio [role="radiogroup"] > label, .stRadio [role="radiogroup"] div[role="radiogroup"] > label { width:100% !important; display:flex !important; }
         .stTabs [data-baseweb="tab-list"] {{ gap: 8px; }}
         .stTabs [data-baseweb="tab"] {{
             background: #edf8f1;
@@ -209,6 +211,11 @@ def infer_program_from_sheet(sheet_name):
     if "pg" in s:
         return "PG"
     return ""
+
+
+def infer_batch_group_from_sheet_name(sheet_name: str) -> str:
+    s = clean_text(sheet_name)
+    return s
 
 
 def live_status_html(is_connected: bool, mode_label: str):
@@ -378,6 +385,7 @@ def load_raw_sheet(source_mode: str, sheet_name: str, spreadsheet_id=None, file_
 
 # ---------------- Parsing ----------------
 
+
 def parse_master_sheet(raw: pd.DataFrame, program: str, sheet_name: str):
     header_row = 0
     data_start = 3
@@ -393,31 +401,33 @@ def parse_master_sheet(raw: pd.DataFrame, program: str, sheet_name: str):
     income_col = best_matching_col(df, ["income"])
     status_col = best_matching_col(df, ["status"])
     payment_col = best_matching_col(df, ["payment"])
+    community_status_col = best_matching_col(df, ["community status", "admitted group"])
 
     if not name_col:
         raise ValueError(f"Name column not found in {sheet_name}")
 
     df = df[df[name_col].astype(str).str.strip().ne("")].copy()
     df["Program"] = program
-    if batch_col:
-        df["Batch"] = df[batch_col].astype(str).str.strip()
-    else:
-        df["Batch"] = ""
+    df["Batch"] = df[batch_col].astype(str).str.strip() if batch_col else ""
     df["source_sheet"] = sheet_name
     df["student_name"] = df[name_col].map(clean_text)
     df["student_key"] = df["student_name"].map(normalize_name)
     df["email_key"] = df[email_col].map(normalize_email) if email_col else ""
+    df["community_status_value"] = df[community_status_col].map(clean_text) if community_status_col else ""
 
     pay_series = df[payment_col].astype(str).str.lower().str.strip() if payment_col else pd.Series("", index=df.index)
     stat_series = df[status_col].astype(str).str.lower().str.strip() if status_col else pd.Series("", index=df.index)
     df["master_is_paid"] = pay_series.eq("paid") | stat_series.str.contains("admitted", na=False)
+    df["master_is_refunded"] = pay_series.str.contains("refund", na=False) | stat_series.str.contains("refund", na=False)
     df["master_status_value"] = df[status_col].map(clean_text) if status_col else ""
     df["master_payment_value"] = df[payment_col].map(clean_text) if payment_col else ""
 
     event_cols = []
+    protected = {name_col, email_col, batch_col, country_col, income_col, status_col, payment_col, community_status_col,
+                 "Program", "Batch", "source_sheet", "student_name", "student_key", "email_key", "community_status_value",
+                 "master_is_paid", "master_is_refunded", "master_status_value", "master_payment_value"}
     for col in df.columns:
-        low = clean_text(col).lower()
-        if col in {name_col, email_col, batch_col, country_col, income_col, status_col, payment_col, "Program", "Batch", "source_sheet", "student_name", "student_key", "email_key", "master_is_paid", "master_status_value", "master_payment_value"}:
+        if col in protected:
             continue
         s = df[col].fillna("").astype(str).str.strip().str.lower()
         if len(s) and (s.isin({"yes", "no", "", "nan"}).mean() > 0.6):
@@ -435,9 +445,11 @@ def parse_master_sheet(raw: pd.DataFrame, program: str, sheet_name: str):
         "income_col": income_col,
         "status_col": status_col,
         "payment_col": payment_col,
+        "community_status_col": community_status_col,
         "event_cols": event_cols,
     }
     return df, ctx
+
 
 
 def parse_activity_sheet(raw: pd.DataFrame, sheet_name: str):
@@ -460,6 +472,14 @@ def parse_activity_sheet(raw: pd.DataFrame, sheet_name: str):
         event_date = parse_event_date(date_row[idx]) if idx < len(date_row) else pd.NaT
         if header_name:
             cols.append(header_name)
+            if idx >= 19 and (event_name or event_type or pd.notna(event_date)):
+                event_rows.append({
+                    "column_name": header_name,
+                    "event_name": event_name or header_name,
+                    "event_type": event_type or "Other",
+                    "event_date": event_date,
+                    "sheet": sheet_name,
+                })
         elif event_name or event_type or pd.notna(event_date):
             synthetic = f"EVENT_{idx}"
             cols.append(synthetic)
@@ -474,10 +494,10 @@ def parse_activity_sheet(raw: pd.DataFrame, sheet_name: str):
             cols.append(f"Unnamed_{idx}")
 
     cols = make_unique(cols)
-    # remap event rows to unique column names
     for row in event_rows:
-        i = int(row["column_name"].split("_")[-1])
-        row["column_name"] = cols[i]
+        if row["column_name"].startswith("EVENT_"):
+            i = int(row["column_name"].split("_")[-1])
+            row["column_name"] = cols[i]
 
     df = raw.iloc[data_start:].copy().reset_index(drop=True)
     df.columns = cols
@@ -489,7 +509,7 @@ def parse_activity_sheet(raw: pd.DataFrame, sheet_name: str):
     country_col = best_matching_col(df, ["country"])
     income_col = best_matching_col(df, ["income"])
     mobile_col = best_matching_col(df, ["mobile"])
-    community_status_col = best_matching_col(df, ["community status"])
+    community_status_col = best_matching_col(df, ["community status", "admitted group"])
     payment_status_col = best_matching_col(df, ["payment status", "status"])
     payment_date_col = best_matching_col(df, ["payment date"])
     engagement_pct_col = best_matching_col(df, ["overall engagement %", "engagement %"])
@@ -499,27 +519,27 @@ def parse_activity_sheet(raw: pd.DataFrame, sheet_name: str):
         raise ValueError(f"Name column not found in {sheet_name}")
 
     df = df[df[name_col].astype(str).str.strip().ne("")].copy()
+    df = df[df[name_col].astype(str).str.contains(r"[A-Za-z]", na=False)].copy()
     df["Program"] = infer_program_from_sheet(sheet_name)
     df["source_sheet"] = sheet_name
     df["student_name"] = df[name_col].map(clean_text)
     df["student_key"] = df["student_name"].map(normalize_name)
     df["email_key"] = df[email_col].map(normalize_email) if email_col else ""
-    if batch_col:
-        df["Batch"] = df[batch_col].map(clean_text)
-    else:
-        df["Batch"] = ""
+    df["Batch"] = df[batch_col].map(clean_text) if batch_col else infer_batch_group_from_sheet_name(sheet_name)
+    df["community_status_value"] = df[community_status_col].map(clean_text) if community_status_col else ""
 
     event_info = pd.DataFrame(event_rows, columns=["column_name", "event_name", "event_type", "event_date", "sheet"])
-    event_cols = event_info["column_name"].tolist() if not event_info.empty else []
+    event_cols = [c for c in event_info["column_name"].tolist() if c in df.columns] if not event_info.empty else []
 
     for c in event_cols:
         df[c] = df[c].apply(normalize_yes_no).astype(int)
 
     df["participation_count"] = df[event_cols].sum(axis=1) if event_cols else 0
     if engagement_score_col:
-        df["engagement_score"] = pd.to_numeric(df[engagement_score_col], errors="coerce").fillna(df["participation_count"])
+        df["engagement_score"] = pd.to_numeric(df[engagement_score_col], errors="coerce").fillna(0)
     else:
-        df["engagement_score"] = df["participation_count"]
+        first_col = df.columns[0]
+        df["engagement_score"] = pd.to_numeric(df[first_col], errors="coerce").fillna(df["participation_count"])
     if engagement_pct_col:
         df["engagement_pct"] = pd.to_numeric(df[engagement_pct_col], errors="coerce").fillna(0)
         if df["engagement_pct"].max() <= 1.05:
@@ -536,9 +556,11 @@ def parse_activity_sheet(raw: pd.DataFrame, sheet_name: str):
 
     stat_series = df[payment_status_col].astype(str).str.lower().str.strip() if payment_status_col else pd.Series("", index=df.index)
     df["sheet_status_raw"] = df[payment_status_col].map(clean_text) if payment_status_col else ""
-    df["sheet_is_paid"] = stat_series.str.contains("admitted|paid", na=False)
     df["sheet_is_refunded"] = stat_series.str.contains("refund", na=False)
-    df["is_active"] = df["engagement_pct"] > 0
+    df["sheet_is_paid"] = stat_series.str.contains("admitted|paid", na=False) | (
+        stat_series.ne("") & ~df["sheet_is_refunded"]
+    )
+    df["is_active"] = pd.to_numeric(df["engagement_score"], errors="coerce").fillna(0) > 0
 
     ctx = {
         "name_col": name_col,
@@ -558,6 +580,7 @@ def parse_activity_sheet(raw: pd.DataFrame, sheet_name: str):
     return df, ctx
 
 
+
 def reconcile_master_with_tx(master_df, tx_df):
     tx_by_email = {}
     tx_by_name = {}
@@ -569,9 +592,7 @@ def reconcile_master_with_tx(master_df, tx_df):
         if name and name not in tx_by_name:
             tx_by_name[name] = row
 
-    resolved = []
-    resolved_payment = []
-    resolved_source = []
+    resolved_status, resolved_payment, resolved_source = [], [], []
     for _, row in master_df.iterrows():
         match = None
         email = row.get("email_key", "")
@@ -580,26 +601,37 @@ def reconcile_master_with_tx(master_df, tx_df):
             match = tx_by_email[email]
         elif name and name in tx_by_name:
             match = tx_by_name[name]
+
         if match is not None:
             status = clean_text(match.get("tx_status", "")) or clean_text(match.get("sheet_status_raw", ""))
             pay_dt = match.get("tx_payment_date", pd.NaT)
-            resolved.append(status if status else ("Admitted" if match.get("sheet_is_paid", False) else row.get("master_status_value", "")))
+            resolved_status.append(status)
             resolved_payment.append(pay_dt if pd.notna(pay_dt) else pd.NaT)
             resolved_source.append(match.get("source_sheet", ""))
         else:
-            resolved.append("Admitted" if row.get("master_is_paid", False) else clean_text(row.get("master_status_value", "")))
+            if row.get("master_is_refunded", False):
+                status = "Refunded"
+            elif row.get("master_is_paid", False):
+                status = "Admitted"
+            else:
+                status = clean_text(row.get("master_status_value", ""))
+            resolved_status.append(status)
             resolved_payment.append(pd.NaT)
             resolved_source.append("")
 
     out = master_df.copy()
-    out["resolved_status"] = resolved
+    out["resolved_status"] = resolved_status
     out["resolved_payment_date"] = resolved_payment
     out["resolved_tx_source"] = resolved_source
-    out["is_paid"] = out["resolved_status"].astype(str).str.lower().str.contains("admitted", na=False)
-    out["is_refunded"] = out["resolved_status"].astype(str).str.lower().str.contains("refund", na=False)
+
+    status_lower = out["resolved_status"].astype(str).str.lower().str.strip()
+    out["is_refunded"] = status_lower.str.contains("refund", na=False)
+    out["is_paid"] = status_lower.ne("") & ~out["is_refunded"] & (
+        status_lower.str.contains("admitted|paid|deferral|withdrawn", na=False) | out["resolved_tx_source"].ne("")
+    )
     out["status_bucket"] = np.select(
-        [out["is_paid"], out["is_refunded"]],
-        ["Paid / Admitted", "Refunded"],
+        [out["is_refunded"], out["is_paid"]],
+        ["Refunded", "Paid / Admitted"],
         default="Not Paid",
     )
     out["paid_label"] = out["status_bucket"]
@@ -693,6 +725,7 @@ def overview_metrics(overview_df):
     return total_students, total_active, total_paid, total_refunded, ug_students, pg_students, ug_paid, pg_paid, ug_refunded, pg_refunded
 
 
+
 def render_overview(data):
     st.subheader("Overview")
     overview_df = data["overview_df"]
@@ -701,8 +734,10 @@ def render_overview(data):
         return
 
     name_col = "student_name"
-    country_col = data["master_ctx"]["Master UG"]["country_col"] if "Master UG" in data["master_ctx"] else None
-    income_col = data["master_ctx"]["Master UG"]["income_col"] if "Master UG" in data["master_ctx"] else None
+    master_ug_ctx = data["master_ctx"].get("Master UG", {})
+    master_pg_ctx = data["master_ctx"].get("Master PG", {})
+    country_col = master_ug_ctx.get("country_col") or master_pg_ctx.get("country_col")
+    income_col = master_ug_ctx.get("income_col") or master_pg_ctx.get("income_col")
 
     total_students, total_active, total_paid, total_refunded, ug_students, pg_students, ug_paid, pg_paid, ug_refunded, pg_refunded = overview_metrics(overview_df)
     active_rate = round((total_active / total_students * 100), 1) if total_students else 0
@@ -732,34 +767,45 @@ def render_overview(data):
         st.plotly_chart(nice_layout(fig, height=380, x_tickangle=-25), use_container_width=True, key="overview_batch_bar")
     with a2:
         status_plot = overview_df.groupby(["Program", "status_bucket"])[name_col].count().reset_index(name="Students")
-        fig = px.bar(
-            status_plot,
-            x="Program",
-            y="Students",
-            color="status_bucket",
-            barmode="group",
-            title="Status Distribution by Program",
-            color_discrete_map={"Paid / Admitted": GREEN, "Refunded": RED, "Not Paid": GREEN_4},
-        )
+        fig = px.bar(status_plot, x="Program", y="Students", color="status_bucket", barmode="group", title="Status Distribution by Program",
+                     color_discrete_map={"Paid / Admitted": GREEN, "Refunded": RED, "Not Paid": GREEN_4})
         st.plotly_chart(nice_layout(fig, height=380), use_container_width=True, key="overview_status_bar")
 
     b1, b2 = st.columns(2)
     with b1:
+        comm = overview_df["community_status_value"].replace("", np.nan).dropna()
+        if not comm.empty:
+            community_plot = comm.value_counts().reset_index()
+            community_plot.columns = ["Community Status", "Students"]
+            fig = px.pie(community_plot, names="Community Status", values="Students", hole=0.6, title="Community Status Overview")
+            st.plotly_chart(nice_layout(fig, height=400), use_container_width=True, key="overview_comm_donut")
+    with b2:
         if country_col and country_col in overview_df.columns:
             country_plot = overview_df.groupby(country_col)[name_col].count().reset_index(name="Students").sort_values("Students", ascending=False).head(12)
             fig = px.bar(country_plot, x=country_col, y="Students", title="Top Countries")
             fig.update_traces(marker_color=GREEN_3)
             st.plotly_chart(nice_layout(fig, height=400, x_tickangle=-30), use_container_width=True, key="overview_country_bar")
-    with b2:
+
+    c1, c2 = st.columns(2)
+    with c1:
         if income_col and income_col in overview_df.columns:
             income_plot = overview_df.groupby(income_col)[name_col].count().reset_index(name="Students").sort_values("Students", ascending=False)
             fig = px.bar(income_plot, x=income_col, y="Students", title="Income Distribution")
             fig.update_traces(marker_color=GREEN)
             st.plotly_chart(nice_layout(fig, height=400, x_tickangle=-25), use_container_width=True, key="overview_income_bar")
+    with c2:
+        status_circle = pd.DataFrame({
+            "Metric": ["Active", "Paid", "Refunded"],
+            "Count": [total_active, total_paid, total_refunded]
+        })
+        fig = px.bar_polar(status_circle, r="Count", theta="Metric", line_close=True, title="Overview Activity Circle")
+        fig.update_traces(fill='toself')
+        st.plotly_chart(nice_layout(fig, height=400), use_container_width=True, key="overview_circle_bar")
 
-    display_cols = [c for c in ["student_name", "Program", "Batch", country_col, income_col, "resolved_status", "resolved_payment_date", "status_bucket"] if c and c in overview_df.columns]
+    display_cols = [c for c in ["student_name", "Program", "Batch", country_col, income_col, "community_status_value", "resolved_status", "resolved_payment_date", "status_bucket"] if c and c in overview_df.columns]
     st.markdown("#### Overview Table")
     st.dataframe(overview_df[display_cols].sort_values(["Program", "Batch", "student_name"]), use_container_width=True, height=420, key="overview_table")
+
 
 
 def render_sheet_detail(sheet_name, df, ctx, prefix):
@@ -769,7 +815,7 @@ def render_sheet_detail(sheet_name, df, ctx, prefix):
         return
 
     total_students = int(len(df))
-    active_students = int(df["is_active"].sum()) if "is_active" in df else int((df["engagement_pct"] > 0).sum())
+    active_students = int(df["is_active"].sum()) if "is_active" in df else int((pd.to_numeric(df["engagement_score"], errors="coerce").fillna(0) > 0).sum())
     paid_students = int(df["sheet_is_paid"].sum()) if "sheet_is_paid" in df else 0
     refunded_students = int(df["sheet_is_refunded"].sum()) if "sheet_is_refunded" in df else 0
     avg_engagement = round(float(df["engagement_pct"].mean()), 1) if len(df) else 0
@@ -781,27 +827,30 @@ def render_sheet_detail(sheet_name, df, ctx, prefix):
     k4.metric("Refunded", f"{refunded_students:,}", delta=f"{(refunded_students/total_students*100 if total_students else 0):.1f}%")
     k5.metric("Avg Engagement", f"{avg_engagement:.1f}%")
 
-    c1, c2 = st.columns(2)
+    c1, c2, c3 = st.columns(3)
     with c1:
         fig = px.histogram(df, x="engagement_pct", nbins=12, title="Engagement Distribution")
         fig.update_traces(marker_color=GREEN_2)
-        st.plotly_chart(nice_layout(fig, height=360), use_container_width=True, key=f"{prefix}_hist")
+        st.plotly_chart(nice_layout(fig, height=340), use_container_width=True, key=f"{prefix}_hist")
     with c2:
-        status = pd.DataFrame({
-            "Status": ["Admitted / Paid", "Refunded", "Other"],
-            "Students": [paid_students, refunded_students, max(total_students - paid_students - refunded_students, 0)],
-        })
+        status = pd.DataFrame({"Status": ["Admitted / Paid", "Refunded", "Other"], "Students": [paid_students, refunded_students, max(total_students - paid_students - refunded_students, 0)]})
         status = status[status["Students"] > 0]
-        fig = px.pie(
-            status,
-            names="Status",
-            values="Students",
-            hole=0.58,
-            color="Status",
-            color_discrete_map={"Admitted / Paid": GREEN, "Refunded": RED, "Other": GREEN_4},
-        )
+        fig = px.pie(status, names="Status", values="Students", hole=0.58, color="Status",
+                     color_discrete_map={"Admitted / Paid": GREEN, "Refunded": RED, "Other": GREEN_4})
         fig.update_layout(title="Status Breakdown")
-        st.plotly_chart(nice_layout(fig, height=360), use_container_width=True, key=f"{prefix}_pie")
+        st.plotly_chart(nice_layout(fig, height=340), use_container_width=True, key=f"{prefix}_pie")
+    with c3:
+        comm = df["community_status_value"].replace("", np.nan).dropna() if "community_status_value" in df.columns else pd.Series(dtype=object)
+        if not comm.empty:
+            community_plot = comm.value_counts().reset_index()
+            community_plot.columns = ["Community Status", "Students"]
+            fig = px.pie(community_plot, names="Community Status", values="Students", hole=0.58, title="Community Status")
+            st.plotly_chart(nice_layout(fig, height=340), use_container_width=True, key=f"{prefix}_community")
+        else:
+            circle_df = pd.DataFrame({"Metric": ["Active", "Paid", "Refunded"], "Count": [active_students, paid_students, refunded_students]})
+            fig = px.bar_polar(circle_df, r="Count", theta="Metric", line_close=True, title="Activity Circle")
+            fig.update_traces(fill='toself')
+            st.plotly_chart(nice_layout(fig, height=340), use_container_width=True, key=f"{prefix}_circle")
 
     d1, d2 = st.columns(2)
     with d1:
@@ -824,11 +873,11 @@ def render_sheet_detail(sheet_name, df, ctx, prefix):
 
     t1, t2 = st.columns(2)
     with t1:
-        students = df[["student_name", "engagement_pct", "engagement_score"]].sort_values(["engagement_pct", "engagement_score"], ascending=False).head(20)
+        students = df[["student_name", "engagement_pct", "engagement_score", "community_status_value"]].sort_values(["engagement_pct", "engagement_score"], ascending=False).head(20)
         st.markdown("#### Top Students")
         st.dataframe(students, use_container_width=True, height=380, key=f"{prefix}_top")
     with t2:
-        target = df[(~df["sheet_is_paid"]) & (df["engagement_pct"] > 0)][["student_name", "engagement_pct", "engagement_score"]].sort_values(["engagement_pct", "engagement_score"], ascending=False).head(20)
+        target = df[(~df["sheet_is_paid"]) & (~df["sheet_is_refunded"]) & (df["is_active"])][["student_name", "engagement_pct", "engagement_score", "community_status_value"]].sort_values(["engagement_pct", "engagement_score"], ascending=False).head(20)
         st.markdown("#### Best Upgrade Targets")
         st.dataframe(target, use_container_width=True, height=380, key=f"{prefix}_upgrade")
 
@@ -983,6 +1032,76 @@ def render_program_page(title, sheets, data, page_prefix):
             render_sheet_detail(sheet, data["activities"][sheet], data["activity_ctx"][sheet], f"{page_prefix}_{sheet}")
 
 
+
+def render_ug_vs_pg_page(data):
+    st.subheader("UG vs PG")
+    ug_frames = [data["activities"][s] for s in UG_BATCH_SHEETS if s in data["activities"]]
+    pg_frames = [data["activities"][s] for s in PG_BATCH_SHEETS if s in data["activities"]]
+    if not ug_frames or not pg_frames:
+        st.warning("UG or PG batch sheets are missing.")
+        return
+
+    ug = pd.concat(ug_frames, ignore_index=True)
+    pg = pd.concat(pg_frames, ignore_index=True)
+    comp = pd.DataFrame({
+        "Program": ["UG", "PG"],
+        "Students": [len(ug), len(pg)],
+        "Active": [int(ug["is_active"].sum()), int(pg["is_active"].sum())],
+        "Paid": [int(ug["sheet_is_paid"].sum()), int(pg["sheet_is_paid"].sum())],
+        "Refunded": [int(ug["sheet_is_refunded"].sum()), int(pg["sheet_is_refunded"].sum())],
+        "Avg Engagement %": [round(float(ug["engagement_pct"].mean()),1), round(float(pg["engagement_pct"].mean()),1)],
+    })
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        fig = px.bar(comp, x="Program", y=["Students", "Active", "Paid", "Refunded"], barmode="group", title="Core Comparison")
+        st.plotly_chart(nice_layout(fig, height=380), use_container_width=True, key="uvspg_core")
+    with c2:
+        fig = px.bar(comp, x="Program", y="Avg Engagement %", color="Program", title="Average Engagement %", color_discrete_map={"UG":GREEN, "PG":GREEN_3})
+        st.plotly_chart(nice_layout(fig, height=380), use_container_width=True, key="uvspg_avg")
+    with c3:
+        circle_df = pd.DataFrame({
+            "Program": ["UG"]*3 + ["PG"]*3,
+            "Metric": ["Active","Paid","Refunded"]*2,
+            "Count": [int(ug["is_active"].sum()), int(ug["sheet_is_paid"].sum()), int(ug["sheet_is_refunded"].sum()),
+                      int(pg["is_active"].sum()), int(pg["sheet_is_paid"].sum()), int(pg["sheet_is_refunded"].sum())]
+        })
+        fig = px.line_polar(circle_df, r="Count", theta="Metric", color="Program", line_close=True, title="Activity Circle")
+        fig.update_traces(fill='toself')
+        st.plotly_chart(nice_layout(fig, height=380), use_container_width=True, key="uvspg_circle")
+
+    t1, t2 = st.columns(2)
+    with t1:
+        comm_rows=[]
+        for label, df in [("UG", ug), ("PG", pg)]:
+            if "community_status_value" in df.columns:
+                vc=df["community_status_value"].replace("", np.nan).dropna().value_counts()
+                for k,v in vc.items():
+                    comm_rows.append({"Program":label,"Community Status":k,"Students":int(v)})
+        if comm_rows:
+            comm_df=pd.DataFrame(comm_rows)
+            fig=px.bar(comm_df, x="Community Status", y="Students", color="Program", barmode="group", title="Community Status Comparison", color_discrete_map={"UG":GREEN,"PG":GREEN_3})
+            st.plotly_chart(nice_layout(fig, height=420, x_tickangle=-25), use_container_width=True, key="uvspg_comm")
+    with t2:
+        def top_event_types(df,label):
+            rows=[]
+            for sheet in [s for s in (UG_BATCH_SHEETS if label=="UG" else PG_BATCH_SHEETS) if s in data["activity_ctx"]]:
+                info=data["activity_ctx"][sheet]["event_info"]
+                sdf=data["activities"][sheet]
+                if info.empty: continue
+                for _,r in info.iterrows():
+                    rows.append({"Program":label,"Event Type":r["event_type"],"Count":int(pd.to_numeric(sdf[r["column_name"]],errors="coerce").fillna(0).sum())})
+            if not rows: return pd.DataFrame()
+            out=pd.DataFrame(rows).groupby(["Program","Event Type"],as_index=False)["Count"].sum()
+            return out
+        evt=pd.concat([top_event_types(ug,"UG"), top_event_types(pg,"PG")], ignore_index=True)
+        if not evt.empty:
+            fig=px.bar(evt, x="Event Type", y="Count", color="Program", barmode="group", title="Event Type Comparison", color_discrete_map={"UG":GREEN,"PG":GREEN_3})
+            st.plotly_chart(nice_layout(fig, height=420, x_tickangle=-25), use_container_width=True, key="uvspg_evt")
+
+    st.markdown("#### Comparison Table")
+    st.dataframe(comp, use_container_width=True, hide_index=True, key="uvspg_table")
+
+
 def render_tetrx_page(data):
     st.subheader("Tetr-X")
     available = [s for s in TX_SHEETS if s in data["activities"]]
@@ -1011,7 +1130,7 @@ def main():
 
     with st.sidebar:
         st.markdown("## 🧭 Navigation")
-        page = st.radio("Go to", ["Overview", "Student Profile", "UG", "PG", "Tetr-X"], label_visibility="collapsed", key="nav")
+        page = st.radio("Go to", ["Overview", "Student Profile", "UG", "PG", "UG vs PG", "Tetr-X"], label_visibility="collapsed", key="nav")
         if cfg["source_mode"] == "excel" and cfg["file_bytes"] is None:
             st.info("Upload the workbook to use manual mode.")
         if not cfg["connected_ok"] and cfg["source_mode"] == "gsheets":
@@ -1038,6 +1157,8 @@ def main():
         render_program_page("UG Batch Sheets", UG_BATCH_SHEETS, data, "ug")
     elif page == "PG":
         render_program_page("PG Batch Sheets", PG_BATCH_SHEETS, data, "pg")
+    elif page == "UG vs PG":
+        render_ug_vs_pg_page(data)
     elif page == "Tetr-X":
         render_tetrx_page(data)
 
