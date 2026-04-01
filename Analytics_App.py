@@ -112,8 +112,8 @@ def inject_css():
             width: 100% !important;
         }}
         .stRadio [role="radiogroup"] label:hover {{ background: #def2e6 !important; }}
-        .stRadio [role="radiogroup"] label p { color: #0b3d2e !important; font-weight: 700 !important; width:100% !important; }
-        .stRadio [role="radiogroup"] > label, .stRadio [role="radiogroup"] div[role="radiogroup"] > label { width:100% !important; display:flex !important; }
+        .stRadio [role="radiogroup"] label p {{ color: #0b3d2e !important; font-weight: 700 !important; width:100% !important; }}
+        .stRadio [role="radiogroup"] > label, .stRadio [role="radiogroup"] div[role="radiogroup"] > label {{ width:100% !important; display:flex !important; }}
         .stTabs [data-baseweb="tab-list"] {{ gap: 8px; }}
         .stTabs [data-baseweb="tab"] {{
             background: #edf8f1;
