@@ -152,7 +152,16 @@ def normalize_email(x):
 
 def normalize_yes_no(x):
     s = clean_text(x).lower()
-    return 1 if s in {"yes", "y", "1", "true", "present", "attended", "done", "in"} else 0
+    return 1 if s in {"yes", "y", "1", "true", "present", "attended", "done"} else 0
+
+
+def normalize_community_status(x):
+    s = clean_text(x).strip().lower()
+    if s in {"tetr x", "tetrx", "added to term 0"}:
+        return "Tetr X"
+    if s == "in":
+        return "In"
+    return "Out"
 
 
 def parse_date_safe(x):
@@ -402,6 +411,7 @@ def parse_master_sheet(raw: pd.DataFrame, program: str, sheet_name: str):
     status_col = best_matching_col(df, ["status"])
     payment_col = best_matching_col(df, ["payment"])
     community_status_col = best_matching_col(df, ["community status", "admitted group"])
+    term_zero_col = best_matching_col(df, ["term zero group"])
 
     if not name_col:
         raise ValueError(f"Name column not found in {sheet_name}")
@@ -413,11 +423,15 @@ def parse_master_sheet(raw: pd.DataFrame, program: str, sheet_name: str):
     df["student_name"] = df[name_col].map(clean_text)
     df["student_key"] = df["student_name"].map(normalize_name)
     df["email_key"] = df[email_col].map(normalize_email) if email_col else ""
-    df["community_status_value"] = df[community_status_col].map(clean_text) if community_status_col else ""
+    community_base = df[community_status_col].map(clean_text) if community_status_col else pd.Series("", index=df.index)
+    if term_zero_col:
+        term_zero_series = df[term_zero_col].map(clean_text)
+        community_base = community_base.where(term_zero_series.eq(""), term_zero_series)
+    df["community_status_value"] = community_base.map(normalize_community_status)
 
     pay_series = df[payment_col].astype(str).str.lower().str.strip() if payment_col else pd.Series("", index=df.index)
     stat_series = df[status_col].astype(str).str.lower().str.strip() if status_col else pd.Series("", index=df.index)
-    df["master_is_paid"] = pay_series.eq("paid") | stat_series.str.contains("admitted", na=False)
+    df["master_is_paid"] = stat_series.eq("admitted")
     df["master_is_refunded"] = pay_series.str.contains("refund", na=False) | stat_series.str.contains("refund", na=False)
     df["master_status_value"] = df[status_col].map(clean_text) if status_col else ""
     df["master_payment_value"] = df[payment_col].map(clean_text) if payment_col else ""
@@ -510,6 +524,7 @@ def parse_activity_sheet(raw: pd.DataFrame, sheet_name: str):
     income_col = best_matching_col(df, ["income"])
     mobile_col = best_matching_col(df, ["mobile"])
     community_status_col = best_matching_col(df, ["community status", "admitted group"])
+    term_zero_col = best_matching_col(df, ["term zero group"])
     payment_status_col = best_matching_col(df, ["payment status", "status"])
     payment_date_col = best_matching_col(df, ["payment date"])
     engagement_pct_col = best_matching_col(df, ["overall engagement %", "engagement %"])
@@ -526,7 +541,11 @@ def parse_activity_sheet(raw: pd.DataFrame, sheet_name: str):
     df["student_key"] = df["student_name"].map(normalize_name)
     df["email_key"] = df[email_col].map(normalize_email) if email_col else ""
     df["Batch"] = df[batch_col].map(clean_text) if batch_col else infer_batch_group_from_sheet_name(sheet_name)
-    df["community_status_value"] = df[community_status_col].map(clean_text) if community_status_col else ""
+    community_base = df[community_status_col].map(clean_text) if community_status_col else pd.Series("", index=df.index)
+    if term_zero_col:
+        term_zero_series = df[term_zero_col].map(clean_text)
+        community_base = community_base.where(term_zero_series.eq(""), term_zero_series)
+    df["community_status_value"] = community_base.map(normalize_community_status)
 
     event_info = pd.DataFrame(event_rows, columns=["column_name", "event_name", "event_type", "event_date", "sheet"])
     event_cols = [c for c in event_info["column_name"].tolist() if c in df.columns] if not event_info.empty else []
@@ -557,10 +576,8 @@ def parse_activity_sheet(raw: pd.DataFrame, sheet_name: str):
     stat_series = df[payment_status_col].astype(str).str.lower().str.strip() if payment_status_col else pd.Series("", index=df.index)
     df["sheet_status_raw"] = df[payment_status_col].map(clean_text) if payment_status_col else ""
     df["sheet_is_refunded"] = stat_series.str.contains("refund", na=False)
-    df["sheet_is_paid"] = stat_series.str.contains("admitted|paid", na=False) | (
-        stat_series.ne("") & ~df["sheet_is_refunded"]
-    )
-    df["is_active"] = pd.to_numeric(df["engagement_score"], errors="coerce").fillna(0) > 0
+    df["sheet_is_paid"] = stat_series.eq("admitted")
+    df["is_active"] = df["participation_count"] > 0
 
     ctx = {
         "name_col": name_col,
@@ -626,9 +643,7 @@ def reconcile_master_with_tx(master_df, tx_df):
 
     status_lower = out["resolved_status"].astype(str).str.lower().str.strip()
     out["is_refunded"] = status_lower.str.contains("refund", na=False)
-    out["is_paid"] = status_lower.ne("") & ~out["is_refunded"] & (
-        status_lower.str.contains("admitted|paid|deferral|withdrawn", na=False) | out["resolved_tx_source"].ne("")
-    )
+    out["is_paid"] = status_lower.eq("admitted")
     out["status_bucket"] = np.select(
         [out["is_refunded"], out["is_paid"]],
         ["Refunded", "Paid / Admitted"],
@@ -840,17 +855,18 @@ def render_sheet_detail(sheet_name, df, ctx, prefix):
         fig.update_layout(title="Status Breakdown")
         st.plotly_chart(nice_layout(fig, height=340), use_container_width=True, key=f"{prefix}_pie")
     with c3:
-        comm = df["community_status_value"].replace("", np.nan).dropna() if "community_status_value" in df.columns else pd.Series(dtype=object)
-        if not comm.empty:
-            community_plot = comm.value_counts().reset_index()
-            community_plot.columns = ["Community Status", "Students"]
-            fig = px.pie(community_plot, names="Community Status", values="Students", hole=0.58, title="Community Status")
-            st.plotly_chart(nice_layout(fig, height=340), use_container_width=True, key=f"{prefix}_community")
-        else:
-            circle_df = pd.DataFrame({"Metric": ["Active", "Paid", "Refunded"], "Count": [active_students, paid_students, refunded_students]})
-            fig = px.bar_polar(circle_df, r="Count", theta="Metric", line_close=True, title="Activity Circle")
-            fig.update_traces(fill='toself')
-            st.plotly_chart(nice_layout(fig, height=340), use_container_width=True, key=f"{prefix}_circle")
+        active_circle = pd.DataFrame({"Status": ["Active", "Non-Active"], "Students": [active_students, max(total_students - active_students, 0)]})
+        fig = px.pie(active_circle, names="Status", values="Students", hole=0.58, title="Active vs Non-Active",
+                     color="Status", color_discrete_map={"Active": GREEN, "Non-Active": GREEN_4})
+        st.plotly_chart(nice_layout(fig, height=340), use_container_width=True, key=f"{prefix}_active_circle")
+
+    comm = df["community_status_value"].replace("", np.nan).dropna() if "community_status_value" in df.columns else pd.Series(dtype=object)
+    if not comm.empty:
+        community_plot = comm.value_counts().reset_index()
+        community_plot.columns = ["Community Status", "Students"]
+        fig = px.pie(community_plot, names="Community Status", values="Students", hole=0.58, title="Community Status",
+                     color="Community Status", color_discrete_map={"Tetr X": GREEN, "In": GREEN_3, "Out": GREEN_4})
+        st.plotly_chart(nice_layout(fig, height=340), use_container_width=True, key=f"{prefix}_community")
 
     d1, d2 = st.columns(2)
     with d1:
