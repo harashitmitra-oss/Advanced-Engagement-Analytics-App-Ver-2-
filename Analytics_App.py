@@ -741,6 +741,52 @@ def overview_metrics(overview_df):
 
 
 
+def build_status_breakdown(df, status_col="sheet_status_raw"):
+    if status_col not in df.columns:
+        return pd.DataFrame(columns=["Status", "Students"])
+    s = df[status_col].map(clean_text).replace("", "Unspecified")
+    out = s.value_counts(dropna=False).reset_index()
+    out.columns = ["Status", "Students"]
+    return out
+
+
+def payment_percentage_by_country(overview_df, country_col):
+    if not country_col or country_col not in overview_df.columns:
+        return pd.DataFrame(columns=[country_col or "Country", "Students", "Paid", "Payment %"])
+    grp = overview_df.groupby(country_col, dropna=False).agg(Students=("student_name", "count"), Paid=("is_paid", "sum")).reset_index()
+    grp[country_col] = grp[country_col].replace("", "Unknown")
+    grp["Payment %"] = np.where(grp["Students"] > 0, grp["Paid"] / grp["Students"] * 100, 0.0)
+    return grp.sort_values(["Payment %", "Paid", "Students"], ascending=[False, False, False])
+
+
+def quick_profile_link(student_name, key):
+    if st.button(student_name, key=key, use_container_width=True):
+        st.session_state["nav_page"] = "Student Profile"
+        st.session_state["profile_quick_names"] = [student_name]
+        st.rerun()
+
+
+def render_student_list_with_quick_open(df, title, key_prefix, max_rows=20):
+    st.markdown(f"#### {title}")
+    if df.empty:
+        st.info("No students to show.")
+        return
+    show = df.head(max_rows).copy()
+    for idx, row in show.iterrows():
+        cols = st.columns([2.4, 1, 1, 1.2])
+        with cols[0]:
+            quick_profile_link(clean_text(row.get("student_name", "Unnamed")), f"{key_prefix}_name_{idx}")
+        with cols[1]:
+            if "engagement_pct" in show.columns:
+                st.caption(f"{float(row.get('engagement_pct', 0)):.1f}%")
+        with cols[2]:
+            if "engagement_score" in show.columns:
+                st.caption(f"Score {float(row.get('engagement_score', 0)):.0f}")
+        with cols[3]:
+            if "community_status_value" in show.columns:
+                st.caption(clean_text(row.get("community_status_value", "")) or "—")
+
+
 def render_overview(data):
     st.subheader("Overview")
     overview_df = data["overview_df"]
@@ -792,14 +838,15 @@ def render_overview(data):
         if not comm.empty:
             community_plot = comm.value_counts().reset_index()
             community_plot.columns = ["Community Status", "Students"]
-            fig = px.pie(community_plot, names="Community Status", values="Students", hole=0.6, title="Community Status Overview")
+            fig = px.pie(community_plot, names="Community Status", values="Students", hole=0.6, title="Community Status Overview",
+                         color="Community Status", color_discrete_map={"Tetr X": GREEN, "In": GREEN_3, "Out": GREEN_4})
             st.plotly_chart(nice_layout(fig, height=400), use_container_width=True, key="overview_comm_donut")
     with b2:
-        if country_col and country_col in overview_df.columns:
-            country_plot = overview_df.groupby(country_col)[name_col].count().reset_index(name="Students").sort_values("Students", ascending=False).head(12)
-            fig = px.bar(country_plot, x=country_col, y="Students", title="Top Countries")
+        country_pay = payment_percentage_by_country(overview_df, country_col)
+        if not country_pay.empty:
+            fig = px.bar(country_pay.head(15), x=country_col, y="Payment %", hover_data=["Students", "Paid"], title="Country-wise Payment %")
             fig.update_traces(marker_color=GREEN_3)
-            st.plotly_chart(nice_layout(fig, height=400, x_tickangle=-30), use_container_width=True, key="overview_country_bar")
+            st.plotly_chart(nice_layout(fig, height=400, x_tickangle=-30), use_container_width=True, key="overview_country_payment_bar")
 
     c1, c2 = st.columns(2)
     with c1:
@@ -813,11 +860,12 @@ def render_overview(data):
             "Metric": ["Active", "Paid", "Refunded"],
             "Count": [total_active, total_paid, total_refunded]
         })
-        fig = px.bar_polar(status_circle, r="Count", theta="Metric", line_close=True, title="Overview Activity Circle")
-        fig.update_traces(fill='toself')
+        fig = px.line_polar(status_circle, r="Count", theta="Metric", line_close=True, title="Overview Activity Circle")
+        fig.update_traces(fill='toself', line_color=GREEN, marker_color=GREEN)
         st.plotly_chart(nice_layout(fig, height=400), use_container_width=True, key="overview_circle_bar")
 
     display_cols = [c for c in ["student_name", "Program", "Batch", country_col, income_col, "community_status_value", "resolved_status", "resolved_payment_date", "status_bucket"] if c and c in overview_df.columns]
+    render_student_list_with_quick_open(overview_df[display_cols].sort_values(["Program", "Batch", "student_name"]), "Overview Quick Open", "overview_quick", max_rows=25)
     st.markdown("#### Overview Table")
     st.dataframe(overview_df[display_cols].sort_values(["Program", "Batch", "student_name"]), use_container_width=True, height=420, key="overview_table")
 
@@ -833,14 +881,12 @@ def render_sheet_detail(sheet_name, df, ctx, prefix):
     active_students = int(df["is_active"].sum()) if "is_active" in df else int((pd.to_numeric(df["engagement_score"], errors="coerce").fillna(0) > 0).sum())
     paid_students = int(df["sheet_is_paid"].sum()) if "sheet_is_paid" in df else 0
     refunded_students = int(df["sheet_is_refunded"].sum()) if "sheet_is_refunded" in df else 0
-    avg_engagement = round(float(df["engagement_pct"].mean()), 1) if len(df) else 0
 
-    k1, k2, k3, k4, k5 = st.columns(5)
+    k1, k2, k3, k4 = st.columns(4)
     k1.metric("Students", f"{total_students:,}")
     k2.metric("Active", f"{active_students:,}", delta=f"{(active_students/total_students*100 if total_students else 0):.1f}%")
     k3.metric("Admitted / Paid", f"{paid_students:,}", delta=f"{(paid_students/total_students*100 if total_students else 0):.1f}%")
     k4.metric("Refunded", f"{refunded_students:,}", delta=f"{(refunded_students/total_students*100 if total_students else 0):.1f}%")
-    k5.metric("Avg Engagement", f"{avg_engagement:.1f}%")
 
     c1, c2, c3 = st.columns(3)
     with c1:
@@ -848,11 +894,8 @@ def render_sheet_detail(sheet_name, df, ctx, prefix):
         fig.update_traces(marker_color=GREEN_2)
         st.plotly_chart(nice_layout(fig, height=340), use_container_width=True, key=f"{prefix}_hist")
     with c2:
-        status = pd.DataFrame({"Status": ["Admitted / Paid", "Refunded", "Other"], "Students": [paid_students, refunded_students, max(total_students - paid_students - refunded_students, 0)]})
-        status = status[status["Students"] > 0]
-        fig = px.pie(status, names="Status", values="Students", hole=0.58, color="Status",
-                     color_discrete_map={"Admitted / Paid": GREEN, "Refunded": RED, "Other": GREEN_4})
-        fig.update_layout(title="Status Breakdown")
+        status = build_status_breakdown(df)
+        fig = px.pie(status, names="Status", values="Students", hole=0.58, title="Status Breakdown")
         st.plotly_chart(nice_layout(fig, height=340), use_container_width=True, key=f"{prefix}_pie")
     with c3:
         active_circle = pd.DataFrame({"Status": ["Active", "Non-Active"], "Students": [active_students, max(total_students - active_students, 0)]})
@@ -890,12 +933,10 @@ def render_sheet_detail(sheet_name, df, ctx, prefix):
     t1, t2 = st.columns(2)
     with t1:
         students = df[["student_name", "engagement_pct", "engagement_score", "community_status_value"]].sort_values(["engagement_pct", "engagement_score"], ascending=False).head(20)
-        st.markdown("#### Top Students")
-        st.dataframe(students, use_container_width=True, height=380, key=f"{prefix}_top")
+        render_student_list_with_quick_open(students, "Top Students", f"{prefix}_top")
     with t2:
         target = df[(~df["sheet_is_paid"]) & (~df["sheet_is_refunded"]) & (df["is_active"])][["student_name", "engagement_pct", "engagement_score", "community_status_value"]].sort_values(["engagement_pct", "engagement_score"], ascending=False).head(20)
-        st.markdown("#### Best Upgrade Targets")
-        st.dataframe(target, use_container_width=True, height=380, key=f"{prefix}_upgrade")
+        render_student_list_with_quick_open(target, "Best Upgrade Targets", f"{prefix}_upgrade")
 
     event_info = ctx["event_info"]
     if not event_info.empty and event_info["event_date"].notna().any():
@@ -917,9 +958,10 @@ def render_student_profile(data):
         return
 
     students = overview_df[["student_name", "email_key", "student_key", "Program"]].drop_duplicates().sort_values("student_name")
-    search = st.text_input("Search student names", placeholder="Type a name...")
+    default_quick = st.session_state.pop("profile_quick_names", []) if "profile_quick_names" in st.session_state else []
+    search = st.text_input("Search student names", value=default_quick[0] if len(default_quick)==1 else "", placeholder="Type a name...")
     options = students[students["student_name"].str.contains(search, case=False, na=False)]["student_name"].tolist() if search else students["student_name"].tolist()
-    selected = st.multiselect("Select one or more students", options=options)
+    selected = st.multiselect("Select one or more students", options=options, default=[n for n in default_quick if n in students["student_name"].tolist()])
     pasted = st.text_area("Or paste multiple student names (one per line)")
     pasted_names = [clean_text(x) for x in pasted.splitlines() if clean_text(x)]
     final_names = list(dict.fromkeys(selected + pasted_names))
@@ -1059,62 +1101,73 @@ def render_ug_vs_pg_page(data):
 
     ug = pd.concat(ug_frames, ignore_index=True)
     pg = pd.concat(pg_frames, ignore_index=True)
+
+    def pct(n, d):
+        return round((float(n) / float(d) * 100), 1) if d else 0.0
+
     comp = pd.DataFrame({
         "Program": ["UG", "PG"],
         "Students": [len(ug), len(pg)],
-        "Active": [int(ug["is_active"].sum()), int(pg["is_active"].sum())],
-        "Paid": [int(ug["sheet_is_paid"].sum()), int(pg["sheet_is_paid"].sum())],
-        "Refunded": [int(ug["sheet_is_refunded"].sum()), int(pg["sheet_is_refunded"].sum())],
-        "Avg Engagement %": [round(float(ug["engagement_pct"].mean()),1), round(float(pg["engagement_pct"].mean()),1)],
+        "Active %": [pct(ug["is_active"].sum(), len(ug)), pct(pg["is_active"].sum(), len(pg))],
+        "Paid %": [pct(ug["sheet_is_paid"].sum(), len(ug)), pct(pg["sheet_is_paid"].sum(), len(pg))],
+        "Refunded %": [pct(ug["sheet_is_refunded"].sum(), len(ug)), pct(pg["sheet_is_refunded"].sum(), len(pg))],
+        "Tetr X %": [pct((ug.get("community_status_value", pd.Series(dtype=object)) == "Tetr X").sum(), len(ug)), pct((pg.get("community_status_value", pd.Series(dtype=object)) == "Tetr X").sum(), len(pg))],
+        "In %": [pct((ug.get("community_status_value", pd.Series(dtype=object)) == "In").sum(), len(ug)), pct((pg.get("community_status_value", pd.Series(dtype=object)) == "In").sum(), len(pg))],
+        "Out %": [pct((ug.get("community_status_value", pd.Series(dtype=object)) == "Out").sum(), len(ug)), pct((pg.get("community_status_value", pd.Series(dtype=object)) == "Out").sum(), len(pg))],
     })
+
     c1, c2, c3 = st.columns(3)
     with c1:
-        fig = px.bar(comp, x="Program", y=["Students", "Active", "Paid", "Refunded"], barmode="group", title="Core Comparison")
-        st.plotly_chart(nice_layout(fig, height=380), use_container_width=True, key="uvspg_core")
+        melt = comp.melt(id_vars=["Program", "Students"], value_vars=["Active %", "Paid %", "Refunded %"], var_name="Metric", value_name="Percentage")
+        fig = px.bar(melt, x="Metric", y="Percentage", color="Program", barmode="group", title="Core Percentage Comparison", color_discrete_map={"UG": GREEN, "PG": GREEN_3})
+        st.plotly_chart(nice_layout(fig, height=380, x_tickangle=-20), use_container_width=True, key="uvspg_core")
     with c2:
-        fig = px.bar(comp, x="Program", y="Avg Engagement %", color="Program", title="Average Engagement %", color_discrete_map={"UG":GREEN, "PG":GREEN_3})
-        st.plotly_chart(nice_layout(fig, height=380), use_container_width=True, key="uvspg_avg")
+        comm = comp.melt(id_vars=["Program"], value_vars=["Tetr X %", "In %", "Out %"], var_name="Metric", value_name="Percentage")
+        fig = px.bar(comm, x="Metric", y="Percentage", color="Program", barmode="group", title="Community Status % Comparison", color_discrete_map={"UG": GREEN, "PG": GREEN_3})
+        st.plotly_chart(nice_layout(fig, height=380, x_tickangle=-20), use_container_width=True, key="uvspg_commpct")
     with c3:
         circle_df = pd.DataFrame({
             "Program": ["UG"]*3 + ["PG"]*3,
-            "Metric": ["Active","Paid","Refunded"]*2,
-            "Count": [int(ug["is_active"].sum()), int(ug["sheet_is_paid"].sum()), int(ug["sheet_is_refunded"].sum()),
-                      int(pg["is_active"].sum()), int(pg["sheet_is_paid"].sum()), int(pg["sheet_is_refunded"].sum())]
+            "Metric": ["Active %","Paid %","Refunded %"]*2,
+            "Value": [comp.loc[0, "Active %"], comp.loc[0, "Paid %"], comp.loc[0, "Refunded %"], comp.loc[1, "Active %"], comp.loc[1, "Paid %"], comp.loc[1, "Refunded %"]]
         })
-        fig = px.line_polar(circle_df, r="Count", theta="Metric", color="Program", line_close=True, title="Activity Circle")
+        fig = px.line_polar(circle_df, r="Value", theta="Metric", color="Program", line_close=True, title="Percentage Circle Comparison", color_discrete_map={"UG": GREEN, "PG": GREEN_3})
         fig.update_traces(fill='toself')
         st.plotly_chart(nice_layout(fig, height=380), use_container_width=True, key="uvspg_circle")
 
     t1, t2 = st.columns(2)
     with t1:
-        comm_rows=[]
+        pay_country_rows = []
         for label, df in [("UG", ug), ("PG", pg)]:
-            if "community_status_value" in df.columns:
-                vc=df["community_status_value"].replace("", np.nan).dropna().value_counts()
-                for k,v in vc.items():
-                    comm_rows.append({"Program":label,"Community Status":k,"Students":int(v)})
-        if comm_rows:
-            comm_df=pd.DataFrame(comm_rows)
-            fig=px.bar(comm_df, x="Community Status", y="Students", color="Program", barmode="group", title="Community Status Comparison", color_discrete_map={"UG":GREEN,"PG":GREEN_3})
-            st.plotly_chart(nice_layout(fig, height=420, x_tickangle=-25), use_container_width=True, key="uvspg_comm")
+            country_col = next((c for c in ["Country", "country", "Country of Residence"] if c in df.columns), None)
+            if country_col:
+                grp = df.groupby(country_col, dropna=False).agg(Students=("student_name", "count"), Paid=("sheet_is_paid", "sum")).reset_index()
+                grp["Payment %"] = np.where(grp["Students"] > 0, grp["Paid"] / grp["Students"] * 100, 0.0)
+                grp["Program"] = label
+                grp[country_col] = grp[country_col].replace("", "Unknown")
+                pay_country_rows.append(grp.head(10))
+        if pay_country_rows:
+            pc = pd.concat(pay_country_rows, ignore_index=True)
+            country_name_col = [c for c in pc.columns if c not in ["Students","Paid","Payment %","Program"]][0]
+            fig = px.bar(pc, x=country_name_col, y="Payment %", color="Program", barmode="group", title="Country-wise Payment %", color_discrete_map={"UG": GREEN, "PG": GREEN_3})
+            st.plotly_chart(nice_layout(fig, height=420, x_tickangle=-25), use_container_width=True, key="uvspg_countrypay")
     with t2:
-        def top_event_types(df,label):
-            rows=[]
-            for sheet in [s for s in (UG_BATCH_SHEETS if label=="UG" else PG_BATCH_SHEETS) if s in data["activity_ctx"]]:
-                info=data["activity_ctx"][sheet]["event_info"]
-                sdf=data["activities"][sheet]
-                if info.empty: continue
-                for _,r in info.iterrows():
-                    rows.append({"Program":label,"Event Type":r["event_type"],"Count":int(pd.to_numeric(sdf[r["column_name"]],errors="coerce").fillna(0).sum())})
-            if not rows: return pd.DataFrame()
-            out=pd.DataFrame(rows).groupby(["Program","Event Type"],as_index=False)["Count"].sum()
-            return out
-        evt=pd.concat([top_event_types(ug,"UG"), top_event_types(pg,"PG")], ignore_index=True)
-        if not evt.empty:
-            fig=px.bar(evt, x="Event Type", y="Count", color="Program", barmode="group", title="Event Type Comparison", color_discrete_map={"UG":GREEN,"PG":GREEN_3})
+        rows=[]
+        for label, sheets in [("UG", UG_BATCH_SHEETS), ("PG", PG_BATCH_SHEETS)]:
+            for sheet in [s for s in sheets if s in data["activity_ctx"]]:
+                info = data["activity_ctx"][sheet]["event_info"]
+                sdf = data["activities"][sheet]
+                if info.empty or sdf.empty:
+                    continue
+                for _, r in info.iterrows():
+                    denom = len(sdf) if len(sdf) else 1
+                    rows.append({"Program": label, "Event Type": r["event_type"], "Participation %": round(pd.to_numeric(sdf[r["column_name"]], errors="coerce").fillna(0).sum() / denom * 100, 1)})
+        if rows:
+            evt = pd.DataFrame(rows).groupby(["Program", "Event Type"], as_index=False)["Participation %"].mean()
+            fig = px.bar(evt, x="Event Type", y="Participation %", color="Program", barmode="group", title="Average Event Participation % by Type", color_discrete_map={"UG": GREEN, "PG": GREEN_3})
             st.plotly_chart(nice_layout(fig, height=420, x_tickangle=-25), use_container_width=True, key="uvspg_evt")
 
-    st.markdown("#### Comparison Table")
+    st.markdown("#### Percentage Comparison Table")
     st.dataframe(comp, use_container_width=True, hide_index=True, key="uvspg_table")
 
 
@@ -1146,7 +1199,10 @@ def main():
 
     with st.sidebar:
         st.markdown("## 🧭 Navigation")
-        page = st.radio("Go to", ["Overview", "Student Profile", "UG", "PG", "UG vs PG", "Tetr-X"], label_visibility="collapsed", key="nav")
+        default_pages = ["Overview", "Student Profile", "UG", "PG", "UG vs PG", "Tetr-X"]
+        default_index = default_pages.index(st.session_state.get("nav_page", "Overview")) if st.session_state.get("nav_page", "Overview") in default_pages else 0
+        page = st.radio("Go to", default_pages, index=default_index, label_visibility="collapsed", key="nav")
+        st.session_state["nav_page"] = page
         if cfg["source_mode"] == "excel" and cfg["file_bytes"] is None:
             st.info("Upload the workbook to use manual mode.")
         if not cfg["connected_ok"] and cfg["source_mode"] == "gsheets":
