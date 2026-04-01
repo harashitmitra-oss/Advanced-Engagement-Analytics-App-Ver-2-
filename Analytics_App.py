@@ -597,7 +597,12 @@ def reconcile_master_with_tx(master_df, tx_df):
     out["resolved_tx_source"] = resolved_source
     out["is_paid"] = out["resolved_status"].astype(str).str.lower().str.contains("admitted", na=False)
     out["is_refunded"] = out["resolved_status"].astype(str).str.lower().str.contains("refund", na=False)
-    out["paid_label"] = np.where(out["is_paid"], "Paid / Admitted", "Not Paid")
+    out["status_bucket"] = np.select(
+        [out["is_paid"], out["is_refunded"]],
+        ["Paid / Admitted", "Refunded"],
+        default="Not Paid",
+    )
+    out["paid_label"] = out["status_bucket"]
     out["is_active"] = out["active_master"]
     return out
 
@@ -678,11 +683,14 @@ def overview_metrics(overview_df):
     total_students = int(len(overview_df))
     total_active = int(overview_df["is_active"].sum()) if not overview_df.empty else 0
     total_paid = int(overview_df["is_paid"].sum()) if not overview_df.empty else 0
+    total_refunded = int(overview_df["is_refunded"].sum()) if not overview_df.empty else 0
     ug_students = int((overview_df["Program"] == "UG").sum()) if not overview_df.empty else 0
     pg_students = int((overview_df["Program"] == "PG").sum()) if not overview_df.empty else 0
     ug_paid = int(((overview_df["Program"] == "UG") & (overview_df["is_paid"])).sum()) if not overview_df.empty else 0
     pg_paid = int(((overview_df["Program"] == "PG") & (overview_df["is_paid"])).sum()) if not overview_df.empty else 0
-    return total_students, total_active, total_paid, ug_students, pg_students, ug_paid, pg_paid
+    ug_refunded = int(((overview_df["Program"] == "UG") & (overview_df["is_refunded"])).sum()) if not overview_df.empty else 0
+    pg_refunded = int(((overview_df["Program"] == "PG") & (overview_df["is_refunded"])).sum()) if not overview_df.empty else 0
+    return total_students, total_active, total_paid, total_refunded, ug_students, pg_students, ug_paid, pg_paid, ug_refunded, pg_refunded
 
 
 def render_overview(data):
@@ -696,15 +704,17 @@ def render_overview(data):
     country_col = data["master_ctx"]["Master UG"]["country_col"] if "Master UG" in data["master_ctx"] else None
     income_col = data["master_ctx"]["Master UG"]["income_col"] if "Master UG" in data["master_ctx"] else None
 
-    total_students, total_active, total_paid, ug_students, pg_students, ug_paid, pg_paid = overview_metrics(overview_df)
+    total_students, total_active, total_paid, total_refunded, ug_students, pg_students, ug_paid, pg_paid, ug_refunded, pg_refunded = overview_metrics(overview_df)
     active_rate = round((total_active / total_students * 100), 1) if total_students else 0
     paid_rate = round((total_paid / total_students * 100), 1) if total_students else 0
+    refunded_rate = round((total_refunded / total_students * 100), 1) if total_students else 0
 
-    m1, m2, m3, m4 = st.columns(4)
+    m1, m2, m3, m4, m5 = st.columns(5)
     m1.metric("Total Students", f"{total_students:,}")
     m2.metric("Active Students", f"{total_active:,}", delta=f"{active_rate}% active")
     m3.metric("Paid / Admitted", f"{total_paid:,}", delta=f"{paid_rate}% paid")
-    m4.metric("UG vs PG", f"{ug_students:,} / {pg_students:,}")
+    m4.metric("Refunded", f"{total_refunded:,}", delta=f"{refunded_rate}% refunded")
+    m5.metric("UG vs PG", f"{ug_students:,} / {pg_students:,}")
 
     g1, g2, g3 = st.columns([1.2, 1, 1])
     with g1:
@@ -712,7 +722,7 @@ def render_overview(data):
     with g2:
         st.plotly_chart(donut_chart(["UG", "PG"], [ug_students, pg_students], "UG / PG Distribution"), use_container_width=True, key="overview_program_donut")
     with g3:
-        st.plotly_chart(donut_chart(["UG Paid", "PG Paid"], [ug_paid, pg_paid], "Paid Distribution"), use_container_width=True, key="overview_paid_donut")
+        st.plotly_chart(donut_chart(["Paid / Admitted", "Refunded", "Not Paid"], [total_paid, total_refunded, max(total_students - total_paid - total_refunded, 0)], "Overall Status Distribution"), use_container_width=True, key="overview_paid_donut")
 
     a1, a2 = st.columns(2)
     with a1:
@@ -721,8 +731,16 @@ def render_overview(data):
         fig = px.bar(batch_plot, x="Batch", y="Students", color="Program", barmode="group", title="Students by Batch", color_discrete_map={"UG": GREEN, "PG": GREEN_3})
         st.plotly_chart(nice_layout(fig, height=380, x_tickangle=-25), use_container_width=True, key="overview_batch_bar")
     with a2:
-        status_plot = overview_df.groupby(["Program", "paid_label"])[name_col].count().reset_index(name="Students")
-        fig = px.bar(status_plot, x="Program", y="Students", color="paid_label", barmode="group", title="Paid vs Not Paid by Program", color_discrete_map={"Paid / Admitted": GREEN, "Not Paid": GREEN_4})
+        status_plot = overview_df.groupby(["Program", "status_bucket"])[name_col].count().reset_index(name="Students")
+        fig = px.bar(
+            status_plot,
+            x="Program",
+            y="Students",
+            color="status_bucket",
+            barmode="group",
+            title="Status Distribution by Program",
+            color_discrete_map={"Paid / Admitted": GREEN, "Refunded": RED, "Not Paid": GREEN_4},
+        )
         st.plotly_chart(nice_layout(fig, height=380), use_container_width=True, key="overview_status_bar")
 
     b1, b2 = st.columns(2)
@@ -739,7 +757,7 @@ def render_overview(data):
             fig.update_traces(marker_color=GREEN)
             st.plotly_chart(nice_layout(fig, height=400, x_tickangle=-25), use_container_width=True, key="overview_income_bar")
 
-    display_cols = [c for c in ["student_name", "Program", "Batch", country_col, income_col, "resolved_status", "resolved_payment_date", "paid_label"] if c and c in overview_df.columns]
+    display_cols = [c for c in ["student_name", "Program", "Batch", country_col, income_col, "resolved_status", "resolved_payment_date", "status_bucket"] if c and c in overview_df.columns]
     st.markdown("#### Overview Table")
     st.dataframe(overview_df[display_cols].sort_values(["Program", "Batch", "student_name"]), use_container_width=True, height=420, key="overview_table")
 
@@ -753,13 +771,15 @@ def render_sheet_detail(sheet_name, df, ctx, prefix):
     total_students = int(len(df))
     active_students = int(df["is_active"].sum()) if "is_active" in df else int((df["engagement_pct"] > 0).sum())
     paid_students = int(df["sheet_is_paid"].sum()) if "sheet_is_paid" in df else 0
+    refunded_students = int(df["sheet_is_refunded"].sum()) if "sheet_is_refunded" in df else 0
     avg_engagement = round(float(df["engagement_pct"].mean()), 1) if len(df) else 0
 
-    k1, k2, k3, k4 = st.columns(4)
+    k1, k2, k3, k4, k5 = st.columns(5)
     k1.metric("Students", f"{total_students:,}")
     k2.metric("Active", f"{active_students:,}", delta=f"{(active_students/total_students*100 if total_students else 0):.1f}%")
     k3.metric("Admitted / Paid", f"{paid_students:,}", delta=f"{(paid_students/total_students*100 if total_students else 0):.1f}%")
-    k4.metric("Avg Engagement", f"{avg_engagement:.1f}%")
+    k4.metric("Refunded", f"{refunded_students:,}", delta=f"{(refunded_students/total_students*100 if total_students else 0):.1f}%")
+    k5.metric("Avg Engagement", f"{avg_engagement:.1f}%")
 
     c1, c2 = st.columns(2)
     with c1:
@@ -767,9 +787,20 @@ def render_sheet_detail(sheet_name, df, ctx, prefix):
         fig.update_traces(marker_color=GREEN_2)
         st.plotly_chart(nice_layout(fig, height=360), use_container_width=True, key=f"{prefix}_hist")
     with c2:
-        status = pd.DataFrame({"Status": ["Admitted / Paid", "Other"], "Students": [paid_students, max(total_students - paid_students, 0)]})
-        fig = px.pie(status, names="Status", values="Students", hole=0.58, color="Status", color_discrete_map={"Admitted / Paid": GREEN, "Other": GREEN_4})
-        fig.update_layout(title="Paid Status")
+        status = pd.DataFrame({
+            "Status": ["Admitted / Paid", "Refunded", "Other"],
+            "Students": [paid_students, refunded_students, max(total_students - paid_students - refunded_students, 0)],
+        })
+        status = status[status["Students"] > 0]
+        fig = px.pie(
+            status,
+            names="Status",
+            values="Students",
+            hole=0.58,
+            color="Status",
+            color_discrete_map={"Admitted / Paid": GREEN, "Refunded": RED, "Other": GREEN_4},
+        )
+        fig.update_layout(title="Status Breakdown")
         st.plotly_chart(nice_layout(fig, height=360), use_container_width=True, key=f"{prefix}_pie")
 
     d1, d2 = st.columns(2)
@@ -958,6 +989,16 @@ def render_tetrx_page(data):
     if not available:
         st.warning("Tetr-X sheets not available.")
         return
+    tx_all = pd.concat([data["activities"][s] for s in available], ignore_index=True)
+    tx_students = int(len(tx_all))
+    tx_active = int(tx_all["is_active"].sum()) if "is_active" in tx_all else 0
+    tx_paid = int(tx_all["sheet_is_paid"].sum()) if "sheet_is_paid" in tx_all else 0
+    tx_refunded = int(tx_all["sheet_is_refunded"].sum()) if "sheet_is_refunded" in tx_all else 0
+    k1, k2, k3, k4 = st.columns(4)
+    k1.metric("Tetr-X Students", f"{tx_students:,}")
+    k2.metric("Active Students", f"{tx_active:,}", delta=f"{(tx_active/tx_students*100 if tx_students else 0):.1f}%")
+    k3.metric("Admitted / Paid", f"{tx_paid:,}", delta=f"{(tx_paid/tx_students*100 if tx_students else 0):.1f}%")
+    k4.metric("Refunded", f"{tx_refunded:,}", delta=f"{(tx_refunded/tx_students*100 if tx_students else 0):.1f}%")
     tabs = st.tabs(available)
     for tab, sheet in zip(tabs, available):
         with tab:
