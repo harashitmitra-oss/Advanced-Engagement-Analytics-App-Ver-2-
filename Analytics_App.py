@@ -150,6 +150,25 @@ def normalize_email(x):
     return clean_text(x).lower()
 
 
+def is_numeric_or_percent_text(x):
+    s = clean_text(x).replace(",", "")
+    if not s:
+        return False
+    return bool(re.fullmatch(r"[-+]?\d+(?:\.\d+)?%?", s))
+
+
+def is_valid_student_name(x):
+    s = clean_text(x)
+    if not s:
+        return False
+    lower = s.lower().strip()
+    if is_numeric_or_percent_text(s):
+        return False
+    if lower in {"total", "totals", "average", "avg", "mean", "median", "sum", "count", "percentage", "%"}:
+        return False
+    return bool(re.search(r"[A-Za-z]", s))
+
+
 def normalize_yes_no(x):
     s = clean_text(x).lower()
     return 1 if s in {"yes", "y", "1", "true", "present", "attended", "done"} else 0
@@ -416,7 +435,7 @@ def parse_master_sheet(raw: pd.DataFrame, program: str, sheet_name: str):
     if not name_col:
         raise ValueError(f"Name column not found in {sheet_name}")
 
-    df = df[df[name_col].astype(str).str.strip().ne("")].copy()
+    df = df[df[name_col].apply(is_valid_student_name)].copy()
     df["Program"] = program
     df["Batch"] = df[batch_col].astype(str).str.strip() if batch_col else ""
     df["source_sheet"] = sheet_name
@@ -533,8 +552,7 @@ def parse_activity_sheet(raw: pd.DataFrame, sheet_name: str):
     if not name_col:
         raise ValueError(f"Name column not found in {sheet_name}")
 
-    df = df[df[name_col].astype(str).str.strip().ne("")].copy()
-    df = df[df[name_col].astype(str).str.contains(r"[A-Za-z]", na=False)].copy()
+    df = df[df[name_col].apply(is_valid_student_name)].copy()
     df["Program"] = infer_program_from_sheet(sheet_name)
     df["source_sheet"] = sheet_name
     df["student_name"] = df[name_col].map(clean_text)
@@ -744,7 +762,11 @@ def overview_metrics(overview_df):
 def build_status_breakdown(df, status_col="sheet_status_raw"):
     if status_col not in df.columns:
         return pd.DataFrame(columns=["Status", "Students"])
-    s = df[status_col].map(clean_text).replace("", "Unspecified")
+    s = df[status_col].map(clean_text)
+    s = s[~s.map(is_numeric_or_percent_text)]
+    s = s.replace("", "Unspecified")
+    if s.empty:
+        return pd.DataFrame(columns=["Status", "Students"])
     out = s.value_counts(dropna=False).reset_index()
     out.columns = ["Status", "Students"]
     return out
@@ -757,34 +779,6 @@ def payment_percentage_by_country(overview_df, country_col):
     grp[country_col] = grp[country_col].replace("", "Unknown")
     grp["Payment %"] = np.where(grp["Students"] > 0, grp["Paid"] / grp["Students"] * 100, 0.0)
     return grp.sort_values(["Payment %", "Paid", "Students"], ascending=[False, False, False])
-
-
-def quick_profile_link(student_name, key):
-    if st.button(student_name, key=key, use_container_width=True):
-        st.session_state["nav_page"] = "Student Profile"
-        st.session_state["profile_quick_names"] = [student_name]
-        st.rerun()
-
-
-def render_student_list_with_quick_open(df, title, key_prefix, max_rows=20):
-    st.markdown(f"#### {title}")
-    if df.empty:
-        st.info("No students to show.")
-        return
-    show = df.head(max_rows).copy()
-    for idx, row in show.iterrows():
-        cols = st.columns([2.4, 1, 1, 1.2])
-        with cols[0]:
-            quick_profile_link(clean_text(row.get("student_name", "Unnamed")), f"{key_prefix}_name_{idx}")
-        with cols[1]:
-            if "engagement_pct" in show.columns:
-                st.caption(f"{float(row.get('engagement_pct', 0)):.1f}%")
-        with cols[2]:
-            if "engagement_score" in show.columns:
-                st.caption(f"Score {float(row.get('engagement_score', 0)):.0f}")
-        with cols[3]:
-            if "community_status_value" in show.columns:
-                st.caption(clean_text(row.get("community_status_value", "")) or "—")
 
 
 def render_overview(data):
@@ -834,6 +828,13 @@ def render_overview(data):
 
     b1, b2 = st.columns(2)
     with b1:
+        if country_col and country_col in overview_df.columns:
+            country_students = overview_df.groupby(country_col)[name_col].count().reset_index(name="Students").sort_values("Students", ascending=False).head(15)
+            country_students[country_col] = country_students[country_col].replace("", "Unknown")
+            fig = px.bar(country_students, x=country_col, y="Students", title="Country Distribution of Students")
+            fig.update_traces(marker_color=GREEN_3)
+            st.plotly_chart(nice_layout(fig, height=400, x_tickangle=-30), use_container_width=True, key="overview_country_students_bar")
+    with b2:
         comm = overview_df["community_status_value"].replace("", np.nan).dropna()
         if not comm.empty:
             community_plot = comm.value_counts().reset_index()
@@ -841,12 +842,6 @@ def render_overview(data):
             fig = px.pie(community_plot, names="Community Status", values="Students", hole=0.6, title="Community Status Overview",
                          color="Community Status", color_discrete_map={"Tetr X": GREEN, "In": GREEN_3, "Out": GREEN_4})
             st.plotly_chart(nice_layout(fig, height=400), use_container_width=True, key="overview_comm_donut")
-    with b2:
-        country_pay = payment_percentage_by_country(overview_df, country_col)
-        if not country_pay.empty:
-            fig = px.bar(country_pay.head(15), x=country_col, y="Payment %", hover_data=["Students", "Paid"], title="Country-wise Payment %")
-            fig.update_traces(marker_color=GREEN_3)
-            st.plotly_chart(nice_layout(fig, height=400, x_tickangle=-30), use_container_width=True, key="overview_country_payment_bar")
 
     c1, c2 = st.columns(2)
     with c1:
@@ -856,6 +851,14 @@ def render_overview(data):
             fig.update_traces(marker_color=GREEN)
             st.plotly_chart(nice_layout(fig, height=400, x_tickangle=-25), use_container_width=True, key="overview_income_bar")
     with c2:
+        country_pay = payment_percentage_by_country(overview_df, country_col)
+        if not country_pay.empty:
+            fig = px.bar(country_pay.head(15), x=country_col, y="Payment %", hover_data=["Students", "Paid"], title="Paid Students % by Country")
+            fig.update_traces(marker_color=GREEN_2)
+            st.plotly_chart(nice_layout(fig, height=400, x_tickangle=-30), use_container_width=True, key="overview_country_payment_bar")
+
+    d1, d2 = st.columns(2)
+    with d1:
         status_circle = pd.DataFrame({
             "Metric": ["Active", "Paid", "Refunded"],
             "Count": [total_active, total_paid, total_refunded]
@@ -863,9 +866,13 @@ def render_overview(data):
         fig = px.line_polar(status_circle, r="Count", theta="Metric", line_close=True, title="Overview Activity Circle")
         fig.update_traces(fill='toself', line_color=GREEN, marker_color=GREEN)
         st.plotly_chart(nice_layout(fig, height=400), use_container_width=True, key="overview_circle_bar")
+    with d2:
+        active_circle = pd.DataFrame({"Status": ["Active", "Non-Active"], "Students": [total_active, max(total_students - total_active, 0)]})
+        fig = px.pie(active_circle, names="Status", values="Students", hole=0.58, title="Active vs Non-Active",
+                     color="Status", color_discrete_map={"Active": GREEN, "Non-Active": GREEN_4})
+        st.plotly_chart(nice_layout(fig, height=400), use_container_width=True, key="overview_active_circle")
 
     display_cols = [c for c in ["student_name", "Program", "Batch", country_col, income_col, "community_status_value", "resolved_status", "resolved_payment_date", "status_bucket"] if c and c in overview_df.columns]
-    render_student_list_with_quick_open(overview_df[display_cols].sort_values(["Program", "Batch", "student_name"]), "Overview Quick Open", "overview_quick", max_rows=25)
     st.markdown("#### Overview Table")
     st.dataframe(overview_df[display_cols].sort_values(["Program", "Batch", "student_name"]), use_container_width=True, height=420, key="overview_table")
 
@@ -933,10 +940,12 @@ def render_sheet_detail(sheet_name, df, ctx, prefix):
     t1, t2 = st.columns(2)
     with t1:
         students = df[["student_name", "engagement_pct", "engagement_score", "community_status_value"]].sort_values(["engagement_pct", "engagement_score"], ascending=False).head(20)
-        render_student_list_with_quick_open(students, "Top Students", f"{prefix}_top")
+        st.markdown("#### Top Students")
+        st.dataframe(students, use_container_width=True, height=390, key=f"{prefix}_top_df")
     with t2:
         target = df[(~df["sheet_is_paid"]) & (~df["sheet_is_refunded"]) & (df["is_active"])][["student_name", "engagement_pct", "engagement_score", "community_status_value"]].sort_values(["engagement_pct", "engagement_score"], ascending=False).head(20)
-        render_student_list_with_quick_open(target, "Best Upgrade Targets", f"{prefix}_upgrade")
+        st.markdown("#### Best Upgrade Targets")
+        st.dataframe(target, use_container_width=True, height=390, key=f"{prefix}_upgrade_df")
 
     event_info = ctx["event_info"]
     if not event_info.empty and event_info["event_date"].notna().any():
@@ -958,10 +967,9 @@ def render_student_profile(data):
         return
 
     students = overview_df[["student_name", "email_key", "student_key", "Program"]].drop_duplicates().sort_values("student_name")
-    default_quick = st.session_state.pop("profile_quick_names", []) if "profile_quick_names" in st.session_state else []
-    search = st.text_input("Search student names", value=default_quick[0] if len(default_quick)==1 else "", placeholder="Type a name...")
+    search = st.text_input("Search student names", value="", placeholder="Type a name...")
     options = students[students["student_name"].str.contains(search, case=False, na=False)]["student_name"].tolist() if search else students["student_name"].tolist()
-    selected = st.multiselect("Select one or more students", options=options, default=[n for n in default_quick if n in students["student_name"].tolist()])
+    selected = st.multiselect("Select one or more students", options=options, default=[])
     pasted = st.text_area("Or paste multiple student names (one per line)")
     pasted_names = [clean_text(x) for x in pasted.splitlines() if clean_text(x)]
     final_names = list(dict.fromkeys(selected + pasted_names))
