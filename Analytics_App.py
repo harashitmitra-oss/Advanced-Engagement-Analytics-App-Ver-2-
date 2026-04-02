@@ -431,6 +431,7 @@ def parse_master_sheet(raw: pd.DataFrame, program: str, sheet_name: str):
     income_col = best_matching_col(df, ["income"])
     status_col = best_matching_col(df, ["status"])
     payment_col = best_matching_col(df, ["payment"])
+    payment_date_col = best_matching_col(df, ["payment date", "date of payment", "paid date"])
     community_status_col = best_matching_col(df, ["community status", "admitted group"])
     term_zero_col = best_matching_col(df, ["term zero group"])
 
@@ -456,6 +457,10 @@ def parse_master_sheet(raw: pd.DataFrame, program: str, sheet_name: str):
     df["master_is_refunded"] = pay_series.str.contains("refund", na=False) | stat_series.str.contains("refund", na=False)
     df["master_status_value"] = df[status_col].map(clean_text) if status_col else ""
     df["master_payment_value"] = df[payment_col].map(clean_text) if payment_col else ""
+    if payment_date_col:
+        df["master_payment_date_parsed"] = df[payment_date_col].apply(parse_date_safe)
+    else:
+        df["master_payment_date_parsed"] = df["master_payment_value"].apply(parse_date_safe)
 
     event_cols = []
     protected = {name_col, email_col, batch_col, country_col, income_col, status_col, payment_col, community_status_col,
@@ -480,7 +485,7 @@ def parse_master_sheet(raw: pd.DataFrame, program: str, sheet_name: str):
     )
     df["paid_label"] = df["status_bucket"]
     df["resolved_status"] = df["master_status_value"]
-    df["resolved_payment_date"] = pd.NaT
+    df["resolved_payment_date"] = df["master_payment_date_parsed"]
     df["is_active"] = df["active_master"]
 
     ctx = {
@@ -491,6 +496,7 @@ def parse_master_sheet(raw: pd.DataFrame, program: str, sheet_name: str):
         "income_col": income_col,
         "status_col": status_col,
         "payment_col": payment_col,
+        "payment_date_col": payment_date_col,
         "community_status_col": community_status_col,
         "event_cols": event_cols,
     }
@@ -1166,16 +1172,27 @@ def render_student_profile(data):
                 related.append(part)
         related_df = pd.concat(related, ignore_index=True) if related else pd.DataFrame()
 
+        batch_only_df = related_df[~related_df["source_sheet"].isin(TX_SHEETS)].copy() if not related_df.empty and "source_sheet" in related_df.columns else pd.DataFrame()
+        batch_comm = ""
+        if not batch_only_df.empty and "community_status_value" in batch_only_df.columns:
+            comm_series = batch_only_df["community_status_value"].replace("", np.nan).dropna()
+            if not comm_series.empty:
+                batch_comm = comm_series.mode().iat[0] if not comm_series.mode().empty else comm_series.iloc[0]
+
         st.markdown("---")
         st.markdown(f"### {master['student_name']}")
-        p1, p2, p3, p4 = st.columns(4)
+        p1, p2, p3, p4, p5 = st.columns(5)
         p1.metric("Program", clean_text(master.get("Program", "")))
         p2.metric("Batch", clean_text(master.get("Batch", "")))
         p3.metric("Paid Status", clean_text(master.get("resolved_status", "Not Paid")))
-        pay_dt = master.get("resolved_payment_date", pd.NaT)
+        pay_dt = pd.to_datetime(master.get("resolved_payment_date", pd.NaT), errors="coerce")
+        if pd.isna(pay_dt) and not related_df.empty and "payment_date_parsed" in related_df.columns:
+            rel_pay = pd.to_datetime(related_df["payment_date_parsed"], errors="coerce").dropna()
+            if not rel_pay.empty:
+                pay_dt = rel_pay.iloc[0]
         p4.metric("Payment Date", pay_dt.strftime("%Y-%m-%d") if pd.notna(pay_dt) else "—")
+        p5.metric("Community Status", batch_comm if batch_comm else "—")
 
-        info_cols = [c for c in ["student_name", "Email", "email_key"] if c in overview_df.columns]
         c1, c2 = st.columns([1.2, 1])
         with c1:
             master_display = {
@@ -1187,6 +1204,8 @@ def render_student_profile(data):
                 "Income": clean_text(master.get(data["master_ctx"]["Master UG"]["income_col"] if master.get("Program") == "UG" and "Master UG" in data["master_ctx"] else data["master_ctx"].get("Master PG", {}).get("income_col", ""), "")),
                 "Status": clean_text(master.get("resolved_status", "")),
                 "Payment": clean_text(master.get("master_payment_value", "")),
+                "Payment Date": pay_dt.strftime("%Y-%m-%d") if pd.notna(pay_dt) else "",
+                "Community Status (Batch)": batch_comm,
             }
             st.dataframe(pd.DataFrame(master_display.items(), columns=["Field", "Value"]), use_container_width=True, hide_index=True, key=f"profile_info_{i}")
         with c2:
