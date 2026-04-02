@@ -9,6 +9,7 @@ import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
+import streamlit.components.v1 as components
 
 try:
     import gspread
@@ -742,10 +743,7 @@ def render_header(cfg):
         else:
             st.markdown(hero_html, unsafe_allow_html=True)
     with c2:
-        now = datetime.now()
-        status_html = live_status_html(cfg["connected_ok"], cfg["connection_note"] if cfg["connection_note"] else "Google Sheets")
-        side_html = f'<div class="hero-card" style="padding:18px 18px; text-align:right; min-height:120px; display:flex; flex-direction:column; justify-content:space-between;"><div>{status_html}</div><div><div style="font-size:24px; font-weight:900; color:#0b3d2e;">{now.strftime("%H:%M:%S")}</div><div style="margin-top:4px; color:#2e6b57; font-weight:700;">{now.strftime("%d %b %Y")}</div></div></div>'
-        st.markdown(side_html, unsafe_allow_html=True)
+        render_live_ist_clock(cfg["connected_ok"], cfg["connection_note"])
 
 
 def overview_metrics(overview_df):
@@ -886,7 +884,7 @@ def render_overview(data):
 
 
 
-def render_sheet_detail(sheet_name, df, ctx, prefix):
+def render_sheet_detail(sheet_name, df, ctx, prefix, data=None):
     st.markdown(f"#### {sheet_name}")
     if df.empty:
         st.warning(f"No data available for {sheet_name}.")
@@ -952,19 +950,18 @@ def render_sheet_detail(sheet_name, df, ctx, prefix):
         st.markdown("#### Top Students")
         st.dataframe(students, use_container_width=True, height=390, key=f"{prefix}_top_df")
     with t2:
-        if prefix.startswith("tx_") and not event_info.empty:
-            attended = []
-            for _, r in event_info.iterrows():
-                col = r["column_name"]
-                attended.append(int(pd.to_numeric(df[col], errors="coerce").fillna(0).sum()))
-            type_counts = event_info.assign(Attended=attended).groupby("event_type", as_index=False)["Attended"].sum().sort_values("Attended", ascending=False)
-            total_students_for_pct = len(df) if len(df) else 1
-            type_counts["Attended %"] = np.where(total_students_for_pct > 0, type_counts["Attended"] / total_students_for_pct * 100, 0.0)
+        if prefix.startswith("tx_") and data is not None:
+            tx_program = infer_program_from_sheet(sheet_name)
+            type_counts = compute_tx_prepayment_event_type_summary(df, tx_program, data)
             st.markdown("#### Event Type Attendance Summary")
-            fig = px.bar(type_counts, x="event_type", y="Attended %", text="Attended", title="Tetr-X Event Type Attendance %", hover_data=["Attended"], color="event_type")
-            fig.update_traces(texttemplate="%{text}", textposition="outside")
-            st.plotly_chart(nice_layout(fig, height=390, x_tickangle=-25), use_container_width=True, key=f"{prefix}_event_type_attendance")
-            st.dataframe(type_counts.rename(columns={"event_type": "Event Type", "Attended": "Students Attended"}), use_container_width=True, height=190, key=f"{prefix}_event_type_df")
+            st.caption("Based on each Tetr-X student's attended events in their respective batch sheet before their payment date.")
+            if not type_counts.empty:
+                fig = px.bar(type_counts, x="event_type", y="Attended %", text="Students Attended", title="Pre-Payment Batch Attendance by Event Type", hover_data=["Students Attended"], color="event_type")
+                fig.update_traces(textposition="outside")
+                st.plotly_chart(nice_layout(fig, height=390, x_tickangle=-25), use_container_width=True, key=f"{prefix}_event_type_attendance")
+                st.dataframe(type_counts.rename(columns={"event_type": "Event Type"}), use_container_width=True, height=190, key=f"{prefix}_event_type_df")
+            else:
+                st.info("No pre-payment batch attendance was found for the students in this Tetr-X sheet.")
         else:
             target = df[(~df["sheet_is_paid"]) & (~df["sheet_is_refunded"]) & (df["is_active"])][["student_name", "engagement_pct", "engagement_score", "community_status_value"]].sort_values(["engagement_pct", "engagement_score"], ascending=False).head(20)
             st.markdown("#### Best Upgrade Targets")
@@ -1117,7 +1114,7 @@ def render_program_page(title, sheets, data, page_prefix):
     tabs = st.tabs(available)
     for tab, sheet in zip(tabs, available):
         with tab:
-            render_sheet_detail(sheet, data["activities"][sheet], data["activity_ctx"][sheet], f"{page_prefix}_{sheet}")
+            render_sheet_detail(sheet, data["activities"][sheet], data["activity_ctx"][sheet], f"{page_prefix}_{sheet}", data=data)
 
 
 
@@ -1220,7 +1217,7 @@ def render_tetrx_page(data):
     tabs = st.tabs(available)
     for tab, sheet in zip(tabs, available):
         with tab:
-            render_sheet_detail(sheet, data["activities"][sheet], data["activity_ctx"][sheet], f"tx_{sheet}")
+            render_sheet_detail(sheet, data["activities"][sheet], data["activity_ctx"][sheet], f"tx_{sheet}", data=data)
 
 
 def main():
