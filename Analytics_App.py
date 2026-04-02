@@ -733,20 +733,20 @@ def load_dashboard_data(source_mode: str, spreadsheet_id=None, file_bytes=None):
 
 def render_live_ist_clock(connected_ok: bool, connection_note: str):
     status_html = live_status_html(connected_ok, connection_note or "Google Sheets")
-    st.markdown(f"""
+    html = f"""
     <div style="display:flex; justify-content:flex-end; align-items:center; gap:14px; margin-bottom:10px;">
         {status_html}
-        <div id="ist-live-clock" style="padding:10px 14px; border-radius:999px; border:1px solid #dbeee0; background:#ffffff; color:#0b3d2e; font-weight:700; min-width: 260px; text-align:center; box-shadow: 0 2px 10px rgba(11, 61, 46, 0.05);">
+        <div id="ist-live-clock" style="padding:10px 14px; border-radius:999px; border:1px solid #dbeee0; background:#ffffff; color:#0b3d2e; font-weight:700; min-width:260px; text-align:center; box-shadow:0 2px 10px rgba(11, 61, 46, 0.05);">
             IST · --
         </div>
     </div>
     <script>
-    (function() {
-        function updateISTClock() {
+    (function() {{
+        function updateISTClock() {{
             const el = window.parent.document.getElementById('ist-live-clock') || document.getElementById('ist-live-clock');
             if (!el) return;
             const now = new Date();
-            const fmt = new Intl.DateTimeFormat('en-IN', {
+            const fmt = new Intl.DateTimeFormat('en-IN', {{
                 timeZone: 'Asia/Kolkata',
                 weekday: 'short',
                 day: '2-digit',
@@ -756,15 +756,16 @@ def render_live_ist_clock(connected_ok: bool, connection_note: str):
                 minute: '2-digit',
                 second: '2-digit',
                 hour12: true
-            });
+            }});
             el.textContent = 'IST · ' + fmt.format(now);
-        }
+        }}
         updateISTClock();
         if (window.__istClockInterval) clearInterval(window.__istClockInterval);
         window.__istClockInterval = setInterval(updateISTClock, 1000);
-    })();
+    }})();
     </script>
-    """, unsafe_allow_html=True)
+    """
+    st.markdown(html, unsafe_allow_html=True)
 
 def render_header(cfg):
     c1, c2 = st.columns([5.5, 1.9])
