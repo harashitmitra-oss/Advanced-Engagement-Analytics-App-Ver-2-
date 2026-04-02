@@ -471,6 +471,17 @@ def parse_master_sheet(raw: pd.DataFrame, program: str, sheet_name: str):
 
     df["participation_count_master"] = df[event_cols].sum(axis=1) if event_cols else 0
     df["active_master"] = df["participation_count_master"] > 0
+    df["is_paid"] = df["master_is_paid"]
+    df["is_refunded"] = df["master_is_refunded"]
+    df["status_bucket"] = np.select(
+        [df["is_refunded"], df["is_paid"]],
+        ["Refunded", "Paid / Admitted"],
+        default="Not Paid",
+    )
+    df["paid_label"] = df["status_bucket"]
+    df["resolved_status"] = df["master_status_value"]
+    df["resolved_payment_date"] = pd.NaT
+    df["is_active"] = df["active_master"]
 
     ctx = {
         "name_col": name_col,
@@ -698,13 +709,8 @@ def load_dashboard_data(source_mode: str, spreadsheet_id=None, file_bytes=None):
         tx_df["tx_status"] = tx_df.get("sheet_status_raw", "")
         tx_df["tx_payment_date"] = tx_df.get("payment_date_parsed", pd.NaT)
 
-    overview_frames = []
-    for sheet in MASTER_SHEETS:
-        if sheet in masters:
-            prog = "UG" if sheet.endswith("UG") else "PG"
-            tx_prog = tx_df[tx_df["Program"] == prog] if not tx_df.empty else pd.DataFrame()
-            overview_frames.append(reconcile_master_with_tx(masters[sheet], tx_prog))
-
+    # Overview must come only from Master UG and Master PG.
+    overview_frames = [masters[sheet].copy() for sheet in MASTER_SHEETS if sheet in masters]
     overview_df = pd.concat(overview_frames, ignore_index=True) if overview_frames else pd.DataFrame()
 
     combined_profiles = []
@@ -732,8 +738,14 @@ def load_dashboard_data(source_mode: str, spreadsheet_id=None, file_bytes=None):
 
 
 def compute_tx_prepayment_event_type_summary(tx_df, tx_program, data):
-    columns = ["event_type", "Students Attended", "Attended %", "Event Occurrences"]
+    columns = ["event_type", "Students Attended", "Attended %", "Event Occurrences", "Attendance Hits"]
     if tx_df is None or tx_df.empty:
+        return pd.DataFrame(columns=columns)
+
+    # Use only paid/admitted Tetr-X students for the pre-payment batch attendance summary.
+    if "sheet_is_paid" in tx_df.columns:
+        tx_df = tx_df[tx_df["sheet_is_paid"]].copy()
+    if tx_df.empty:
         return pd.DataFrame(columns=columns)
 
     batch_sheets = UG_BATCH_SHEETS if tx_program == "UG" else PG_BATCH_SHEETS
@@ -819,6 +831,7 @@ def compute_tx_prepayment_event_type_summary(tx_df, tx_program, data):
             "Students Attended": students_attended,
             "Attended %": pct,
             "Event Occurrences": occ,
+            "Attendance Hits": hits,
         })
 
     return pd.DataFrame(rows).sort_values(["Attended %", "Students Attended", "event_type"], ascending=[False, False, True]) if rows else pd.DataFrame(columns=columns)
@@ -1091,9 +1104,9 @@ def render_sheet_detail(sheet_name, df, ctx, prefix, data=None):
             tx_program = infer_program_from_sheet(sheet_name)
             type_counts = compute_tx_prepayment_event_type_summary(df, tx_program, data)
             st.markdown("#### Event Type Attendance Summary")
-            st.caption("Based on each Tetr-X student's attended events in their respective batch sheet before their payment date.")
+            st.caption("Based on paid/admitted Tetr-X students only, using their attended batch-sheet events before payment date.")
             if not type_counts.empty:
-                fig = px.bar(type_counts, x="event_type", y="Attended %", text="Students Attended", title="Pre-Payment Batch Attendance by Event Type", hover_data=["Students Attended", "Event Occurrences"], color="event_type")
+                fig = px.bar(type_counts, x="event_type", y="Attended %", text="Students Attended", title="Pre-Payment Batch Attendance by Event Type", hover_data=["Students Attended", "Event Occurrences", "Attendance Hits"], color="event_type")
                 fig.update_traces(textposition="outside")
                 st.plotly_chart(nice_layout(fig, height=390, x_tickangle=-25), use_container_width=True, key=f"{prefix}_event_type_attendance")
                 st.dataframe(type_counts.rename(columns={"event_type": "Event Type"}), use_container_width=True, height=190, key=f"{prefix}_event_type_df")
