@@ -731,41 +731,105 @@ def load_dashboard_data(source_mode: str, spreadsheet_id=None, file_bytes=None):
 
 
 
+def compute_tx_prepayment_event_type_summary(tx_df, tx_program, data):
+    if tx_df is None or tx_df.empty:
+        return pd.DataFrame(columns=["event_type", "Students Attended", "Attended %"])
+
+    batch_sheets = UG_BATCH_SHEETS if tx_program == "UG" else PG_BATCH_SHEETS
+    available_batch_sheets = [s for s in batch_sheets if s in data.get("activities", {})]
+    if not available_batch_sheets:
+        return pd.DataFrame(columns=["event_type", "Students Attended", "Attended %"])
+
+    type_to_students = {}
+    total_students = int(len(tx_df))
+
+    for _, tx_row in tx_df.iterrows():
+        email_key = clean_text(tx_row.get("email_key", ""))
+        student_key = clean_text(tx_row.get("student_key", ""))
+        pay_dt = tx_row.get("payment_date_parsed", pd.NaT)
+        pay_dt = pd.to_datetime(pay_dt, errors="coerce")
+
+        matched_batch_row = None
+        matched_ctx = None
+        for sheet in available_batch_sheets:
+            batch_df = data["activities"].get(sheet, pd.DataFrame())
+            if batch_df.empty:
+                continue
+            part = batch_df[(batch_df.get("email_key", "") == email_key) | (batch_df.get("student_key", "") == student_key)]
+            if not part.empty:
+                matched_batch_row = part.iloc[0]
+                matched_ctx = data["activity_ctx"].get(sheet, {})
+                break
+
+        if matched_batch_row is None or matched_ctx is None:
+            continue
+
+        event_info = matched_ctx.get("event_info", pd.DataFrame())
+        if event_info is None or event_info.empty:
+            continue
+
+        student_types = set()
+        for _, ev in event_info.iterrows():
+            col = ev.get("column_name")
+            if not col or col not in matched_batch_row.index:
+                continue
+            attended = pd.to_numeric(pd.Series([matched_batch_row.get(col, 0)]), errors="coerce").fillna(0).iloc[0]
+            if attended <= 0:
+                continue
+            ev_date = pd.to_datetime(ev.get("event_date", pd.NaT), errors="coerce")
+            if pd.notna(pay_dt) and pd.notna(ev_date) and ev_date >= pay_dt:
+                continue
+            ev_type = clean_text(ev.get("event_type", "Other")) or "Other"
+            student_types.add(ev_type)
+
+        for ev_type in student_types:
+            type_to_students.setdefault(ev_type, set()).add(student_key or email_key or clean_text(tx_row.get("student_name", "")))
+
+    rows = []
+    for ev_type, students in type_to_students.items():
+        cnt = len([s for s in students if clean_text(s)])
+        rows.append({
+            "event_type": ev_type,
+            "Students Attended": cnt,
+            "Attended %": round((cnt / total_students * 100), 2) if total_students else 0.0,
+        })
+    return pd.DataFrame(rows).sort_values(["Attended %", "Students Attended", "event_type"], ascending=[False, False, True]) if rows else pd.DataFrame(columns=["event_type", "Students Attended", "Attended %"])
+
+
 def render_live_ist_clock(connected_ok: bool, connection_note: str):
     status_html = live_status_html(connected_ok, connection_note or "Google Sheets")
     html = f"""
-    <div style="display:flex; justify-content:flex-end; align-items:center; gap:14px; margin-bottom:10px;">
+    <div style="display:flex; justify-content:flex-end; align-items:center; gap:14px; margin-bottom:10px; font-family: Arial, sans-serif;">
         {status_html}
-        <div id="ist-live-clock" style="padding:10px 14px; border-radius:999px; border:1px solid #dbeee0; background:#ffffff; color:#0b3d2e; font-weight:700; min-width:260px; text-align:center; box-shadow:0 2px 10px rgba(11, 61, 46, 0.05);">
-            IST · --
-        </div>
+        <div id="ist-live-clock" style="padding:10px 14px; border-radius:999px; border:1px solid #dbeee0; background:#ffffff; color:#0b3d2e; font-weight:700; min-width:300px; text-align:center; box-shadow:0 2px 10px rgba(11, 61, 46, 0.05);">IST · --</div>
     </div>
     <script>
-    (function() {{
-        function updateISTClock() {{
-            const el = window.parent.document.getElementById('ist-live-clock') || document.getElementById('ist-live-clock');
-            if (!el) return;
-            const now = new Date();
-            const fmt = new Intl.DateTimeFormat('en-IN', {{
-                timeZone: 'Asia/Kolkata',
-                weekday: 'short',
-                day: '2-digit',
-                month: 'short',
-                year: 'numeric',
-                hour: '2-digit',
-                minute: '2-digit',
-                second: '2-digit',
-                hour12: true
-            }});
-            el.textContent = 'IST · ' + fmt.format(now);
-        }}
-        updateISTClock();
-        if (window.__istClockInterval) clearInterval(window.__istClockInterval);
-        window.__istClockInterval = setInterval(updateISTClock, 1000);
-    }})();
+    const pad=(n)=>String(n).padStart(2,'0');
+    function formatIST() {{
+        const now = new Date();
+        const parts = new Intl.DateTimeFormat('en-IN', {{
+            timeZone: 'Asia/Kolkata',
+            weekday: 'short',
+            day: '2-digit',
+            month: 'short',
+            year: 'numeric',
+            hour: '2-digit',
+            minute: '2-digit',
+            second: '2-digit',
+            hour12: true
+        }}).format(now);
+        return 'IST · ' + parts;
+    }}
+    function updateISTClock() {{
+        const el = document.getElementById('ist-live-clock');
+        if (el) el.textContent = formatIST();
+    }}
+    updateISTClock();
+    setInterval(updateISTClock, 1000);
     </script>
     """
-    st.markdown(html, unsafe_allow_html=True)
+    components.html(html, height=70)
+
 
 def render_header(cfg):
     c1, c2 = st.columns([5.5, 1.9])
