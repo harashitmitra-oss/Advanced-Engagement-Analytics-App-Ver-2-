@@ -1208,19 +1208,8 @@ def render_student_profile(data):
                 "Community Status (Batch)": batch_comm,
             }
             st.dataframe(pd.DataFrame(master_display.items(), columns=["Field", "Value"]), use_container_width=True, hide_index=True, key=f"profile_info_{i}")
-        with c2:
-            if related_df.empty:
-                st.info("No matching batch / Tetr-X records found.")
-            else:
-                total_events = int(related_df["participation_count"].sum()) if "participation_count" in related_df else 0
-                distinct_sheets = related_df["source_sheet"].nunique()
-                active_records = int((related_df["engagement_pct"] > 0).sum()) if "engagement_pct" in related_df else 0
-                st.metric("Total Event Participations", total_events)
-                st.metric("Matched Sheets", distinct_sheets)
-                st.metric("Active Records", active_records)
-
+        profile_event_df = pd.DataFrame()
         if not related_df.empty:
-            # event type summary
             event_rows = []
             for sheet, ctx in data["activity_ctx"].items():
                 part = data["activities"][sheet][(data["activities"][sheet]["email_key"] == email_key) | (data["activities"][sheet]["student_key"] == name_key)]
@@ -1230,16 +1219,47 @@ def render_student_profile(data):
                 for _, ev in ctx["event_info"].iterrows():
                     count = int(row.get(ev["column_name"], 0))
                     if count > 0:
+                        event_name = clean_text(ev["event_name"])
+                        event_type = clean_text(ev["event_type"])
+                        event_date = pd.to_datetime(ev["event_date"], errors="coerce")
+                        profile_key = f"{normalize_name(event_name)}|{event_date.strftime('%Y-%m-%d') if pd.notna(event_date) else ''}|{normalize_name(event_type)}"
                         event_rows.append({
                             "sheet": sheet,
-                            "event_name": ev["event_name"],
-                            "event_type": ev["event_type"],
-                            "event_date": ev["event_date"],
+                            "event_name": event_name,
+                            "event_type": event_type,
+                            "event_date": event_date,
                             "count": count,
+                            "profile_event_key": profile_key,
                         })
             ev_df = pd.DataFrame(event_rows)
             if not ev_df.empty:
-                type_df = ev_df.groupby("event_type")["count"].sum().reset_index().sort_values("count", ascending=False)
+                profile_event_df = (
+                    ev_df.sort_values(["event_date", "event_name", "sheet"])
+                    .groupby("profile_event_key", as_index=False)
+                    .agg({
+                        "event_name": "first",
+                        "event_type": "first",
+                        "event_date": "first",
+                        "count": "max",
+                        "sheet": lambda s: ", ".join(sorted(dict.fromkeys([clean_text(x) for x in s if clean_text(x)]))),
+                    })
+                    .rename(columns={"sheet": "source_sheets"})
+                )
+
+        with c2:
+            if related_df.empty:
+                st.info("No matching batch / Tetr-X records found.")
+            else:
+                total_events = int(profile_event_df["count"].sum()) if not profile_event_df.empty else 0
+                distinct_sheets = related_df["source_sheet"].nunique()
+                active_records = int((related_df["engagement_pct"] > 0).sum()) if "engagement_pct" in related_df else 0
+                st.metric("Total Event Participations", total_events)
+                st.metric("Matched Sheets", distinct_sheets)
+                st.metric("Active Records", active_records)
+
+        if not related_df.empty:
+            if not profile_event_df.empty:
+                type_df = profile_event_df.groupby("event_type")["count"].sum().reset_index().sort_values("count", ascending=False)
                 total = type_df["count"].sum()
                 type_df["percentage"] = np.where(total > 0, type_df["count"] / total * 100, 0)
 
@@ -1252,7 +1272,7 @@ def render_student_profile(data):
                     fig = px.pie(type_df, names="event_type", values="count", hole=0.58, title="Event Type % Share")
                     st.plotly_chart(nice_layout(fig, height=340), use_container_width=True, key=f"profile_type_pie_{i}")
 
-                timeline = ev_df.dropna(subset=["event_date"]).sort_values("event_date")
+                timeline = profile_event_df.dropna(subset=["event_date"]).sort_values("event_date")
                 if not timeline.empty:
                     timeline = timeline.groupby(["event_date", "event_name"], as_index=False)["count"].sum()
                     fig = px.line(timeline, x="event_date", y="count", markers=True, title="Engagement Timeline")
@@ -1264,7 +1284,7 @@ def render_student_profile(data):
                     st.plotly_chart(nice_layout(fig, height=360), use_container_width=True, key=f"profile_timeline_{i}")
 
                 st.markdown("#### Event Details")
-                show = ev_df.sort_values(["event_date", "event_type", "event_name"], ascending=[True, True, True]).copy()
+                show = profile_event_df.sort_values(["event_date", "event_type", "event_name"], ascending=[True, True, True]).copy()
                 st.dataframe(show, use_container_width=True, height=320, key=f"profile_events_{i}")
             else:
                 st.info("Matched records found, but no attended events were recorded for this student.")
