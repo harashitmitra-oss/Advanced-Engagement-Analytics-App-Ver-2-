@@ -732,22 +732,40 @@ def load_dashboard_data(source_mode: str, spreadsheet_id=None, file_bytes=None):
 
 
 def compute_tx_prepayment_event_type_summary(tx_df, tx_program, data):
+    columns = ["event_type", "Students Attended", "Attended %", "Event Occurrences"]
     if tx_df is None or tx_df.empty:
-        return pd.DataFrame(columns=["event_type", "Students Attended", "Attended %"])
+        return pd.DataFrame(columns=columns)
 
     batch_sheets = UG_BATCH_SHEETS if tx_program == "UG" else PG_BATCH_SHEETS
     available_batch_sheets = [s for s in batch_sheets if s in data.get("activities", {})]
     if not available_batch_sheets:
-        return pd.DataFrame(columns=["event_type", "Students Attended", "Attended %"])
+        return pd.DataFrame(columns=columns)
 
-    type_to_students = {}
     total_students = int(len(tx_df))
+    # Build unique event occurrences by (event_type, event_date) across program sheets.
+    unique_events = set()
+    for sheet in available_batch_sheets:
+        ctx = data.get("activity_ctx", {}).get(sheet, {})
+        event_info = ctx.get("event_info", pd.DataFrame())
+        if event_info is None or event_info.empty:
+            continue
+        for _, ev in event_info.iterrows():
+            ev_type = clean_text(ev.get("event_type", "Other")) or "Other"
+            ev_date = pd.to_datetime(ev.get("event_date", pd.NaT), errors="coerce")
+            ev_date_key = ev_date.normalize() if pd.notna(ev_date) else pd.NaT
+            unique_events.add((ev_type, ev_date_key))
+
+    occurrence_counts = {}
+    for ev_type, ev_date in unique_events:
+        occurrence_counts[ev_type] = occurrence_counts.get(ev_type, 0) + 1
+
+    attendance_hits = {}
+    unique_student_hits = {}
 
     for _, tx_row in tx_df.iterrows():
         email_key = clean_text(tx_row.get("email_key", ""))
         student_key = clean_text(tx_row.get("student_key", ""))
-        pay_dt = tx_row.get("payment_date_parsed", pd.NaT)
-        pay_dt = pd.to_datetime(pay_dt, errors="coerce")
+        pay_dt = pd.to_datetime(tx_row.get("payment_date_parsed", pd.NaT), errors="coerce")
 
         matched_batch_row = None
         matched_ctx = None
@@ -755,7 +773,12 @@ def compute_tx_prepayment_event_type_summary(tx_df, tx_program, data):
             batch_df = data["activities"].get(sheet, pd.DataFrame())
             if batch_df.empty:
                 continue
-            part = batch_df[(batch_df.get("email_key", "") == email_key) | (batch_df.get("student_key", "") == student_key)]
+            mask = pd.Series(False, index=batch_df.index)
+            if email_key and "email_key" in batch_df.columns:
+                mask = mask | (batch_df["email_key"] == email_key)
+            if student_key and "student_key" in batch_df.columns:
+                mask = mask | (batch_df["student_key"] == student_key)
+            part = batch_df[mask]
             if not part.empty:
                 matched_batch_row = part.iloc[0]
                 matched_ctx = data["activity_ctx"].get(sheet, {})
@@ -768,7 +791,7 @@ def compute_tx_prepayment_event_type_summary(tx_df, tx_program, data):
         if event_info is None or event_info.empty:
             continue
 
-        student_types = set()
+        student_id = student_key or email_key or clean_text(tx_row.get("student_name", ""))
         for _, ev in event_info.iterrows():
             col = ev.get("column_name")
             if not col or col not in matched_batch_row.index:
@@ -780,55 +803,67 @@ def compute_tx_prepayment_event_type_summary(tx_df, tx_program, data):
             if pd.notna(pay_dt) and pd.notna(ev_date) and ev_date >= pay_dt:
                 continue
             ev_type = clean_text(ev.get("event_type", "Other")) or "Other"
-            student_types.add(ev_type)
-
-        for ev_type in student_types:
-            type_to_students.setdefault(ev_type, set()).add(student_key or email_key or clean_text(tx_row.get("student_name", "")))
+            attendance_hits[ev_type] = attendance_hits.get(ev_type, 0) + 1
+            unique_student_hits.setdefault(ev_type, set()).add(student_id)
 
     rows = []
-    for ev_type, students in type_to_students.items():
-        cnt = len([s for s in students if clean_text(s)])
+    event_types = sorted(set(list(occurrence_counts.keys()) + list(attendance_hits.keys())))
+    for ev_type in event_types:
+        occ = int(occurrence_counts.get(ev_type, 0))
+        hits = int(attendance_hits.get(ev_type, 0))
+        students_attended = len([s for s in unique_student_hits.get(ev_type, set()) if clean_text(s)])
+        denom = total_students * occ if total_students and occ else 0
+        pct = round((hits / denom * 100), 2) if denom else 0.0
         rows.append({
             "event_type": ev_type,
-            "Students Attended": cnt,
-            "Attended %": round((cnt / total_students * 100), 2) if total_students else 0.0,
+            "Students Attended": students_attended,
+            "Attended %": pct,
+            "Event Occurrences": occ,
         })
-    return pd.DataFrame(rows).sort_values(["Attended %", "Students Attended", "event_type"], ascending=[False, False, True]) if rows else pd.DataFrame(columns=["event_type", "Students Attended", "Attended %"])
+
+    return pd.DataFrame(rows).sort_values(["Attended %", "Students Attended", "event_type"], ascending=[False, False, True]) if rows else pd.DataFrame(columns=columns)
 
 
 def render_live_ist_clock(connected_ok: bool, connection_note: str):
-    status_html = live_status_html(connected_ok, connection_note or "Google Sheets")
+    status_text = f"LIVE · {connection_note or 'Google Sheets'}" if connected_ok else f"OFFLINE · {connection_note or 'Google Sheets'}"
+    status_bg = '#e8f6ed' if connected_ok else '#fdeceb'
+    status_fg = GREEN if connected_ok else '#7a1f1b'
+    status_border = '#cfe8d9' if connected_ok else '#f3cdca'
+    status_dot = '#1bb55c' if connected_ok else RED
     html = f"""
-    <div style="display:flex; justify-content:flex-end; align-items:center; gap:14px; margin-bottom:10px; font-family: Arial, sans-serif;">
-        {status_html}
+    <div style="display:flex; justify-content:flex-end; margin-bottom:10px; font-family: Arial, sans-serif;">
+      <div style="display:flex; flex-direction:column; align-items:flex-end; gap:8px;">
         <div id="ist-live-clock" style="padding:10px 14px; border-radius:999px; border:1px solid #dbeee0; background:#ffffff; color:#0b3d2e; font-weight:700; min-width:300px; text-align:center; box-shadow:0 2px 10px rgba(11, 61, 46, 0.05);">IST · --</div>
+        <div style="display:inline-flex; align-items:center; gap:10px; padding:10px 14px; border-radius:999px; font-weight:800; border:1px solid {status_border}; color:{status_fg}; background:{status_bg}; white-space:nowrap;">
+          <span style="width:12px; height:12px; border-radius:50%; background:{status_dot}; display:inline-block;"></span>
+          {status_text}
+        </div>
+      </div>
     </div>
     <script>
-    const pad=(n)=>String(n).padStart(2,'0');
-    function formatIST() {{
-        const now = new Date();
-        const parts = new Intl.DateTimeFormat('en-IN', {{
-            timeZone: 'Asia/Kolkata',
-            weekday: 'short',
-            day: '2-digit',
-            month: 'short',
-            year: 'numeric',
-            hour: '2-digit',
-            minute: '2-digit',
-            second: '2-digit',
-            hour12: true
-        }}).format(now);
-        return 'IST · ' + parts;
-    }}
-    function updateISTClock() {{
-        const el = document.getElementById('ist-live-clock');
-        if (el) el.textContent = formatIST();
-    }}
-    updateISTClock();
-    setInterval(updateISTClock, 1000);
+    (function() {{
+      function updateISTClock() {{
+        var el = document.getElementById('ist-live-clock');
+        if (!el) return;
+        var parts = new Intl.DateTimeFormat('en-IN', {{
+          timeZone: 'Asia/Kolkata',
+          weekday: 'short',
+          day: '2-digit',
+          month: 'short',
+          year: 'numeric',
+          hour: '2-digit',
+          minute: '2-digit',
+          second: '2-digit',
+          hour12: true
+        }}).format(new Date());
+        el.textContent = 'IST · ' + parts;
+      }}
+      updateISTClock();
+      setInterval(updateISTClock, 1000);
+    }})();
     </script>
     """
-    components.html(html, height=70)
+    components.html(html, height=110)
 
 
 def render_header(cfg):
@@ -1058,7 +1093,7 @@ def render_sheet_detail(sheet_name, df, ctx, prefix, data=None):
             st.markdown("#### Event Type Attendance Summary")
             st.caption("Based on each Tetr-X student's attended events in their respective batch sheet before their payment date.")
             if not type_counts.empty:
-                fig = px.bar(type_counts, x="event_type", y="Attended %", text="Students Attended", title="Pre-Payment Batch Attendance by Event Type", hover_data=["Students Attended"], color="event_type")
+                fig = px.bar(type_counts, x="event_type", y="Attended %", text="Students Attended", title="Pre-Payment Batch Attendance by Event Type", hover_data=["Students Attended", "Event Occurrences"], color="event_type")
                 fig.update_traces(textposition="outside")
                 st.plotly_chart(nice_layout(fig, height=390, x_tickangle=-25), use_container_width=True, key=f"{prefix}_event_type_attendance")
                 st.dataframe(type_counts.rename(columns={"event_type": "Event Type"}), use_container_width=True, height=190, key=f"{prefix}_event_type_df")
