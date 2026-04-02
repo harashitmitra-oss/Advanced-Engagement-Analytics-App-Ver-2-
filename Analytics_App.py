@@ -1,6 +1,5 @@
 import json
 import re
-from datetime import datetime
 from io import BytesIO
 from pathlib import Path
 
@@ -9,7 +8,6 @@ import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
-import streamlit.components.v1 as components
 
 try:
     import gspread
@@ -729,123 +727,21 @@ def load_dashboard_data(source_mode: str, spreadsheet_id=None, file_bytes=None):
 
 # ---------------- Rendering ----------------
 
-
-
-def compute_tx_prepayment_event_type_summary(tx_df, tx_program, data):
-    if tx_df is None or tx_df.empty:
-        return pd.DataFrame(columns=["event_type", "Students Attended", "Attended %"])
-
-    batch_sheets = UG_BATCH_SHEETS if tx_program == "UG" else PG_BATCH_SHEETS
-    available_batch_sheets = [s for s in batch_sheets if s in data.get("activities", {})]
-    if not available_batch_sheets:
-        return pd.DataFrame(columns=["event_type", "Students Attended", "Attended %"])
-
-    type_to_students = {}
-    total_students = int(len(tx_df))
-
-    for _, tx_row in tx_df.iterrows():
-        email_key = clean_text(tx_row.get("email_key", ""))
-        student_key = clean_text(tx_row.get("student_key", ""))
-        pay_dt = tx_row.get("payment_date_parsed", pd.NaT)
-        pay_dt = pd.to_datetime(pay_dt, errors="coerce")
-
-        matched_batch_row = None
-        matched_ctx = None
-        for sheet in available_batch_sheets:
-            batch_df = data["activities"].get(sheet, pd.DataFrame())
-            if batch_df.empty:
-                continue
-            part = batch_df[(batch_df.get("email_key", "") == email_key) | (batch_df.get("student_key", "") == student_key)]
-            if not part.empty:
-                matched_batch_row = part.iloc[0]
-                matched_ctx = data["activity_ctx"].get(sheet, {})
-                break
-
-        if matched_batch_row is None or matched_ctx is None:
-            continue
-
-        event_info = matched_ctx.get("event_info", pd.DataFrame())
-        if event_info is None or event_info.empty:
-            continue
-
-        student_types = set()
-        for _, ev in event_info.iterrows():
-            col = ev.get("column_name")
-            if not col or col not in matched_batch_row.index:
-                continue
-            attended = pd.to_numeric(pd.Series([matched_batch_row.get(col, 0)]), errors="coerce").fillna(0).iloc[0]
-            if attended <= 0:
-                continue
-            ev_date = pd.to_datetime(ev.get("event_date", pd.NaT), errors="coerce")
-            if pd.notna(pay_dt) and pd.notna(ev_date) and ev_date >= pay_dt:
-                continue
-            ev_type = clean_text(ev.get("event_type", "Other")) or "Other"
-            student_types.add(ev_type)
-
-        for ev_type in student_types:
-            type_to_students.setdefault(ev_type, set()).add(student_key or email_key or clean_text(tx_row.get("student_name", "")))
-
-    rows = []
-    for ev_type, students in type_to_students.items():
-        cnt = len([s for s in students if clean_text(s)])
-        rows.append({
-            "event_type": ev_type,
-            "Students Attended": cnt,
-            "Attended %": round((cnt / total_students * 100), 2) if total_students else 0.0,
-        })
-    return pd.DataFrame(rows).sort_values(["Attended %", "Students Attended", "event_type"], ascending=[False, False, True]) if rows else pd.DataFrame(columns=["event_type", "Students Attended", "Attended %"])
-
-
-def render_live_ist_clock(connected_ok: bool, connection_note: str):
-    status_html = live_status_html(connected_ok, connection_note or "Google Sheets")
-    html = f"""
-    <div style="display:flex; justify-content:flex-end; align-items:center; gap:14px; margin-bottom:10px; font-family: Arial, sans-serif;">
-        {status_html}
-        <div id="ist-live-clock" style="padding:10px 14px; border-radius:999px; border:1px solid #dbeee0; background:#ffffff; color:#0b3d2e; font-weight:700; min-width:300px; text-align:center; box-shadow:0 2px 10px rgba(11, 61, 46, 0.05);">IST · --</div>
-    </div>
-    <script>
-    const pad=(n)=>String(n).padStart(2,'0');
-    function formatIST() {{
-        const now = new Date();
-        const parts = new Intl.DateTimeFormat('en-IN', {{
-            timeZone: 'Asia/Kolkata',
-            weekday: 'short',
-            day: '2-digit',
-            month: 'short',
-            year: 'numeric',
-            hour: '2-digit',
-            minute: '2-digit',
-            second: '2-digit',
-            hour12: true
-        }}).format(now);
-        return 'IST · ' + parts;
-    }}
-    function updateISTClock() {{
-        const el = document.getElementById('ist-live-clock');
-        if (el) el.textContent = formatIST();
-    }}
-    updateISTClock();
-    setInterval(updateISTClock, 1000);
-    </script>
-    """
-    components.html(html, height=70)
-
-
 def render_header(cfg):
-    c1, c2 = st.columns([5.5, 1.9])
+    c1, c2 = st.columns([6, 1.4])
     with c1:
         logo = find_logo_path()
-        hero_html = '<div class="hero-card"><div style="font-size:30px; font-weight:900; color:#0b3d2e;">Tetr Analytics Dashboard</div><div style="margin-top:6px; color:#2e6b57; font-weight:600;">Live overview, batch analytics, and student-level tracking across Master, Batch, and Tetr-X sheets.</div><div style="margin-top:10px; color:#5b7f6e; font-size:13px; font-weight:600;">Developed by <span style="color:#0b3d2e; font-weight:800;">Harashit Mitra</span></div></div>'
         if logo is not None:
             a, b = st.columns([0.12, 0.88])
             with a:
                 st.image(str(logo), width=72)
             with b:
-                st.markdown(hero_html, unsafe_allow_html=True)
+                st.markdown('<div class="hero-card"><div style="font-size:30px; font-weight:900; color:#0b3d2e;">Tetr Analytics Dashboard</div><div style="margin-top:6px; color:#2e6b57; font-weight:600;">Live overview, batch analytics, and student-level tracking across Master, Batch, and Tetr-X sheets.</div></div>', unsafe_allow_html=True)
         else:
-            st.markdown(hero_html, unsafe_allow_html=True)
+            st.markdown('<div class="hero-card"><div style="font-size:30px; font-weight:900; color:#0b3d2e;">Tetr Analytics Dashboard</div><div style="margin-top:6px; color:#2e6b57; font-weight:600;">Live overview, batch analytics, and student-level tracking across Master, Batch, and Tetr-X sheets.</div></div>', unsafe_allow_html=True)
     with c2:
-        render_live_ist_clock(cfg["connected_ok"], cfg["connection_note"])
+        label = cfg["connection_note"] if cfg["connected_ok"] else cfg["connection_note"]
+        st.markdown(live_status_html(cfg["connected_ok"], label), unsafe_allow_html=True)
 
 
 def overview_metrics(overview_df):
@@ -878,15 +774,11 @@ def build_status_breakdown(df, status_col="sheet_status_raw"):
 
 def payment_percentage_by_country(overview_df, country_col):
     if not country_col or country_col not in overview_df.columns:
-        return pd.DataFrame(columns=[country_col or "Country", "Paid Students", "Paid Student %"])
-    paid_df = overview_df[overview_df["is_paid"]].copy()
-    if paid_df.empty:
-        return pd.DataFrame(columns=[country_col or "Country", "Paid Students", "Paid Student %"])
-    grp = paid_df.groupby(country_col, dropna=False).agg(**{"Paid Students": ("student_name", "count")}).reset_index()
+        return pd.DataFrame(columns=[country_col or "Country", "Students", "Paid", "Payment %"])
+    grp = overview_df.groupby(country_col, dropna=False).agg(Students=("student_name", "count"), Paid=("is_paid", "sum")).reset_index()
     grp[country_col] = grp[country_col].replace("", "Unknown")
-    total_paid = grp["Paid Students"].sum()
-    grp["Paid Student %"] = np.where(total_paid > 0, grp["Paid Students"] / total_paid * 100, 0.0)
-    return grp.sort_values(["Paid Student %", "Paid Students"], ascending=[False, False])
+    grp["Payment %"] = np.where(grp["Students"] > 0, grp["Paid"] / grp["Students"] * 100, 0.0)
+    return grp.sort_values(["Payment %", "Paid", "Students"], ascending=[False, False, False])
 
 
 def render_overview(data):
@@ -961,7 +853,7 @@ def render_overview(data):
     with c2:
         country_pay = payment_percentage_by_country(overview_df, country_col)
         if not country_pay.empty:
-            fig = px.bar(country_pay.head(15), x=country_col, y="Paid Student %", hover_data=["Paid Students"], title="Paid Students Country-wise % Distribution")
+            fig = px.bar(country_pay.head(15), x=country_col, y="Payment %", hover_data=["Students", "Paid"], title="Paid Students % by Country")
             fig.update_traces(marker_color=GREEN_2)
             st.plotly_chart(nice_layout(fig, height=400, x_tickangle=-30), use_container_width=True, key="overview_country_payment_bar")
 
@@ -986,7 +878,7 @@ def render_overview(data):
 
 
 
-def render_sheet_detail(sheet_name, df, ctx, prefix, data=None):
+def render_sheet_detail(sheet_name, df, ctx, prefix):
     st.markdown(f"#### {sheet_name}")
     if df.empty:
         st.warning(f"No data available for {sheet_name}.")
@@ -1003,7 +895,6 @@ def render_sheet_detail(sheet_name, df, ctx, prefix, data=None):
     k3.metric("Admitted / Paid", f"{paid_students:,}", delta=f"{(paid_students/total_students*100 if total_students else 0):.1f}%")
     k4.metric("Refunded", f"{refunded_students:,}", delta=f"{(refunded_students/total_students*100 if total_students else 0):.1f}%")
 
-    event_info = ctx["event_info"]
     c1, c2, c3 = st.columns(3)
     with c1:
         fig = px.histogram(df, x="engagement_pct", nbins=12, title="Engagement Distribution")
@@ -1052,23 +943,11 @@ def render_sheet_detail(sheet_name, df, ctx, prefix, data=None):
         st.markdown("#### Top Students")
         st.dataframe(students, use_container_width=True, height=390, key=f"{prefix}_top_df")
     with t2:
-        if prefix.startswith("tx_") and data is not None:
-            tx_program = infer_program_from_sheet(sheet_name)
-            type_counts = compute_tx_prepayment_event_type_summary(df, tx_program, data)
-            st.markdown("#### Event Type Attendance Summary")
-            st.caption("Based on each Tetr-X student's attended events in their respective batch sheet before their payment date.")
-            if not type_counts.empty:
-                fig = px.bar(type_counts, x="event_type", y="Attended %", text="Students Attended", title="Pre-Payment Batch Attendance by Event Type", hover_data=["Students Attended"], color="event_type")
-                fig.update_traces(textposition="outside")
-                st.plotly_chart(nice_layout(fig, height=390, x_tickangle=-25), use_container_width=True, key=f"{prefix}_event_type_attendance")
-                st.dataframe(type_counts.rename(columns={"event_type": "Event Type"}), use_container_width=True, height=190, key=f"{prefix}_event_type_df")
-            else:
-                st.info("No pre-payment batch attendance was found for the students in this Tetr-X sheet.")
-        else:
-            target = df[(~df["sheet_is_paid"]) & (~df["sheet_is_refunded"]) & (df["is_active"])][["student_name", "engagement_pct", "engagement_score", "community_status_value"]].sort_values(["engagement_pct", "engagement_score"], ascending=False).head(20)
-            st.markdown("#### Best Upgrade Targets")
-            st.dataframe(target, use_container_width=True, height=390, key=f"{prefix}_upgrade_df")
+        target = df[(~df["sheet_is_paid"]) & (~df["sheet_is_refunded"]) & (df["is_active"])][["student_name", "engagement_pct", "engagement_score", "community_status_value"]].sort_values(["engagement_pct", "engagement_score"], ascending=False).head(20)
+        st.markdown("#### Best Upgrade Targets")
+        st.dataframe(target, use_container_width=True, height=390, key=f"{prefix}_upgrade_df")
 
+    event_info = ctx["event_info"]
     if not event_info.empty and event_info["event_date"].notna().any():
         participants = []
         for _, r in event_info.iterrows():
@@ -1216,7 +1095,7 @@ def render_program_page(title, sheets, data, page_prefix):
     tabs = st.tabs(available)
     for tab, sheet in zip(tabs, available):
         with tab:
-            render_sheet_detail(sheet, data["activities"][sheet], data["activity_ctx"][sheet], f"{page_prefix}_{sheet}", data=data)
+            render_sheet_detail(sheet, data["activities"][sheet], data["activity_ctx"][sheet], f"{page_prefix}_{sheet}")
 
 
 
@@ -1319,7 +1198,7 @@ def render_tetrx_page(data):
     tabs = st.tabs(available)
     for tab, sheet in zip(tabs, available):
         with tab:
-            render_sheet_detail(sheet, data["activities"][sheet], data["activity_ctx"][sheet], f"tx_{sheet}", data=data)
+            render_sheet_detail(sheet, data["activities"][sheet], data["activity_ctx"][sheet], f"tx_{sheet}")
 
 
 def main():
