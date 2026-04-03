@@ -1505,6 +1505,191 @@ def build_t7_event_window_data(data):
     out = out.sort_values(["student_name", "event_date", "event_name", "source_sheet"]).drop_duplicates(subset=["dedupe_key"]).reset_index(drop=True)
     return out
 
+
+
+def build_t7_student_summary_table(data):
+    overview_df = data.get("overview_df", pd.DataFrame())
+    if overview_df.empty or "is_paid" not in overview_df.columns:
+        return pd.DataFrame()
+
+    admitted = overview_df[overview_df["is_paid"]].copy()
+    if admitted.empty:
+        return pd.DataFrame()
+
+    activities = data.get("activities", {})
+    activity_ctx = data.get("activity_ctx", {})
+    rows = []
+
+    for _, stu in admitted.iterrows():
+        student_name = clean_text(stu.get("student_name", ""))
+        program = clean_text(stu.get("Program", ""))
+        batch = clean_text(stu.get("Batch", ""))
+        email_key = clean_text(stu.get("email_key", ""))
+        student_key = clean_text(stu.get("student_key", ""))
+        pay_dt = pd.to_datetime(stu.get("resolved_payment_date", stu.get("master_payment_date_parsed", pd.NaT)), errors="coerce")
+        if pd.isna(pay_dt):
+            pay_dt = pd.to_datetime(stu.get("master_payment_date_parsed", pd.NaT), errors="coerce")
+
+        batch_sheets = list(UG_BATCH_SHEETS if program == "UG" else PG_BATCH_SHEETS)
+        tx_sheet = "Tetr-X-UG" if program == "UG" else "Tetr-X-PG"
+        candidate_sheets = batch_sheets + ([tx_sheet] if tx_sheet in activities else [])
+
+        if pd.isna(pay_dt):
+            fallback_pays = []
+            for sheet in candidate_sheets:
+                if sheet not in activities:
+                    continue
+                sdf = activities[sheet]
+                if sdf.empty or "payment_date_parsed" not in sdf.columns:
+                    continue
+                mask = pd.Series(False, index=sdf.index)
+                if email_key and "email_key" in sdf.columns:
+                    mask = mask | sdf["email_key"].astype(str).eq(email_key)
+                if student_key and "student_key" in sdf.columns:
+                    mask = mask | sdf["student_key"].astype(str).eq(student_key)
+                vals = pd.to_datetime(sdf.loc[mask, "payment_date_parsed"], errors="coerce").dropna()
+                if not vals.empty:
+                    fallback_pays.extend(vals.tolist())
+            if fallback_pays:
+                pay_dt = min(fallback_pays)
+        if pd.isna(pay_dt):
+            continue
+        pay_dt = pd.to_datetime(pay_dt, errors="coerce").normalize()
+
+        # community status from batch sheets only
+        comm_vals = []
+        for sheet in batch_sheets:
+            if sheet not in activities:
+                continue
+            sdf = activities[sheet]
+            if sdf.empty:
+                continue
+            mask = pd.Series(False, index=sdf.index)
+            if email_key and "email_key" in sdf.columns:
+                mask = mask | sdf["email_key"].astype(str).eq(email_key)
+            if student_key and "student_key" in sdf.columns:
+                mask = mask | sdf["student_key"].astype(str).eq(student_key)
+            part = sdf.loc[mask]
+            if not part.empty and "community_status_value" in part.columns:
+                comm_vals.extend([clean_text(x) for x in part["community_status_value"].tolist() if clean_text(x)])
+        community_yes_no = "Yes" if any(v in {"Tetr X", "In"} for v in comm_vals) else "No"
+
+        event_rows = []
+        for sheet in candidate_sheets:
+            if sheet not in activities or sheet not in activity_ctx:
+                continue
+            sdf = activities[sheet]
+            if sdf.empty:
+                continue
+            mask = pd.Series(False, index=sdf.index)
+            if email_key and "email_key" in sdf.columns:
+                mask = mask | sdf["email_key"].astype(str).eq(email_key)
+            if student_key and "student_key" in sdf.columns:
+                mask = mask | sdf["student_key"].astype(str).eq(student_key)
+            part = sdf.loc[mask].copy()
+            if part.empty:
+                continue
+            event_info = activity_ctx[sheet].get("event_info", pd.DataFrame())
+            if event_info is None or event_info.empty:
+                continue
+            for _, prow in part.iterrows():
+                for _, ev in event_info.iterrows():
+                    col = ev.get("column_name")
+                    if not col or col not in prow.index:
+                        continue
+                    attended = pd.to_numeric(pd.Series([prow.get(col, 0)]), errors="coerce").fillna(0).iloc[0]
+                    if attended <= 0:
+                        continue
+                    ev_date = pd.to_datetime(ev.get("event_date", pd.NaT), errors="coerce")
+                    if pd.isna(ev_date):
+                        continue
+                    ev_date = ev_date.normalize()
+                    delta = (ev_date - pay_dt).days
+                    source_group = "tetrx" if sheet == tx_sheet else "batch"
+                    # total-30 logic: before payment from batch sheets only, after payment from Tetr-X only
+                    in_total30 = ((source_group == "batch" and -30 <= delta <= -1) or
+                                  (source_group == "tetrx" and 0 <= delta <= 30))
+                    # T+7 logic: both batch and tetrx after payment, merged later
+                    in_tplus7 = 0 <= delta <= 7
+                    in_tminus7 = source_group == "batch" and -7 <= delta <= -1
+                    if not (in_total30 or in_tplus7 or in_tminus7):
+                        continue
+                    ev_name = clean_text(ev.get("event_name", "")) or clean_text(col)
+                    ev_type = clean_text(ev.get("event_type", "Other")) or "Other"
+                    dedupe_key = "|".join([
+                        student_key or email_key or normalize_name(student_name),
+                        normalize_name(ev_name),
+                        normalize_name(ev_type),
+                        ev_date.strftime('%Y-%m-%d')
+                    ])
+                    event_rows.append({
+                        "student_name": student_name,
+                        "program": program,
+                        "batch": batch,
+                        "payment_date": pay_dt,
+                        "event_name": ev_name,
+                        "event_type": ev_type,
+                        "event_date": ev_date,
+                        "source_sheet": sheet,
+                        "source_group": source_group,
+                        "delta": delta,
+                        "dedupe_key": dedupe_key,
+                        "in_total30": in_total30,
+                        "in_tminus7": in_tminus7,
+                        "in_tplus7": in_tplus7,
+                    })
+
+        ev_df = pd.DataFrame(event_rows)
+        if not ev_df.empty:
+            ev_df = ev_df.sort_values(["event_date", "event_name", "source_sheet"]).drop_duplicates(subset=["dedupe_key"]).reset_index(drop=True)
+
+        # Helper to get per-type counts
+        def type_count_map(frame):
+            if frame.empty:
+                return {}
+            return frame.groupby("event_type")["dedupe_key"].nunique().to_dict()
+
+        total30_df = ev_df[ev_df["in_total30"]].copy() if not ev_df.empty else pd.DataFrame()
+        tminus7_df = ev_df[ev_df["in_tminus7"]].copy() if not ev_df.empty else pd.DataFrame()
+        tplus7_df = ev_df[ev_df["in_tplus7"]].copy() if not ev_df.empty else pd.DataFrame()
+
+        row = {
+            "Student Name": student_name,
+            "UG PG": program,
+            "Batch": batch,
+            "Date of payment": pay_dt,
+            "Community status (yes/no)": community_yes_no,
+            "Total activities (30D)": int(total30_df["dedupe_key"].nunique()) if not total30_df.empty else 0,
+            "Number of activities T-7": int(tminus7_df["dedupe_key"].nunique()) if not tminus7_df.empty else 0,
+            "Number of activities T+7": int(tplus7_df["dedupe_key"].nunique()) if not tplus7_df.empty else 0,
+        }
+
+        for event_type, count in type_count_map(total30_df).items():
+            row[f"30D | {event_type}"] = int(count)
+        for event_type, count in type_count_map(tminus7_df).items():
+            row[f"T-7 | {event_type}"] = int(count)
+        for event_type, count in type_count_map(tplus7_df).items():
+            row[f"T+7 | {event_type}"] = int(count)
+        rows.append(row)
+
+    if not rows:
+        return pd.DataFrame()
+
+    out = pd.DataFrame(rows)
+    static_cols = [
+        "Student Name", "UG PG", "Batch", "Date of payment", "Total activities (30D)",
+        "Community status (yes/no)", "Number of activities T-7", "Number of activities T+7"
+    ]
+    thirty_cols = sorted([c for c in out.columns if c.startswith("30D | ")])
+    minus_cols = sorted([c for c in out.columns if c.startswith("T-7 | ")])
+    plus_cols = sorted([c for c in out.columns if c.startswith("T+7 | ")])
+    ordered = static_cols[:5] + thirty_cols + [static_cols[5], static_cols[6]] + minus_cols + [static_cols[7]] + plus_cols
+    for c in ordered:
+        if c not in out.columns:
+            out[c] = 0 if "|" in c or "activities" in c else ""
+    out["Date of payment"] = pd.to_datetime(out["Date of payment"], errors="coerce")
+    return out[ordered].sort_values(["UG PG", "Batch", "Student Name"]).reset_index(drop=True)
+
 def render_t7_analysis_page(data):
     st.subheader("T-7 & T+7 Analysis")
     window_df = build_t7_event_window_data(data)
@@ -1590,6 +1775,13 @@ def render_t7_analysis_page(data):
     fig = px.bar(chart_df, x="student_name", y="Events", color="Window", barmode="group", title="Each Student's Attendance Around Payment Date",
                  hover_data={"program": True}, color_discrete_map={"T-7": GREEN, "T+7": GREEN_3})
     st.plotly_chart(nice_layout(fig, height=360, x_tickangle=-45), use_container_width=True, key="t7_student_bar")
+
+    st.markdown("#### Paid / Tetr X Student Activity Table")
+    student_summary = build_t7_student_summary_table(data)
+    if student_summary.empty:
+        st.info("No student-level T-7 / T+7 summary rows could be built.")
+    else:
+        st.dataframe(student_summary, use_container_width=True, height=420, key="t7_student_summary_table")
 
     st.markdown("#### Detailed Window Event Log")
     show = window_df.sort_values(["student_name", "window", "event_date", "event_type", "event_name"]).copy()
