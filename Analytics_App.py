@@ -1417,6 +1417,10 @@ def build_t7_event_window_data(data):
         if pd.isna(pay_dt):
             pay_dt = pd.to_datetime(stu.get("master_payment_date_parsed", pd.NaT), errors="coerce")
 
+        candidate_sheets = list(UG_BATCH_SHEETS if program == "UG" else PG_BATCH_SHEETS)
+        tx_sheet = "Tetr-X-UG" if program == "UG" else "Tetr-X-PG"
+        if tx_sheet in activities:
+            candidate_sheets.append(tx_sheet)
 
         if pd.isna(pay_dt):
             fallback_pays = []
@@ -1439,11 +1443,6 @@ def build_t7_event_window_data(data):
         if pd.isna(pay_dt):
             continue
         pay_dt = pd.to_datetime(pay_dt, errors="coerce").normalize()
-
-        candidate_sheets = list(UG_BATCH_SHEETS if program == "UG" else PG_BATCH_SHEETS)
-        tx_sheet = "Tetr-X-UG" if program == "UG" else "Tetr-X-PG"
-        if tx_sheet in activities:
-            candidate_sheets.append(tx_sheet)
 
         for sheet in candidate_sheets:
             if sheet not in activities or sheet not in activity_ctx:
