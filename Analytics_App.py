@@ -153,6 +153,24 @@ def normalize_email(x):
     return clean_text(x).lower()
 
 
+def normalize_batch_token(x):
+    s = clean_text(x).strip().upper()
+    if not s:
+        return ""
+    s = s.replace("–", "-").replace("—", "-")
+    s = re.sub(r"\s+", "", s)
+    m = re.search(r"B?(\d+)$", s)
+    if m:
+        return f"B{m.group(1)}"
+    m = re.search(r"B?(\d+)TOB?(\d+)", s)
+    if m:
+        return f"B{m.group(1)}-B{m.group(2)}"
+    m = re.search(r"B?(\d+)&B?(\d+)", s)
+    if m:
+        return f"B{m.group(1)}-B{m.group(2)}"
+    return s
+
+
 def is_numeric_or_percent_text(x):
     s = clean_text(x).replace(",", "")
     if not s:
@@ -450,7 +468,7 @@ def parse_dates_sheet(raw: pd.DataFrame):
     df["student_key"] = df["student_name"].map(normalize_name)
     df["email_key"] = df[email_col].map(normalize_email) if email_col else ""
     df["UG PG"] = df[program_col].map(clean_text) if program_col else ""
-    df["Batch"] = df[batch_col].map(clean_text) if batch_col else ""
+    df["Batch"] = df[batch_col].map(normalize_batch_token) if batch_col else ""
     df["Offered date"] = df[offered_col].map(clean_text) if offered_col else ""
     df["Deadline"] = df[deadline_col].map(clean_text) if deadline_col else ""
     df["offered_date_parsed"] = df["Offered date"].apply(parse_date_safe)
@@ -466,28 +484,35 @@ def parse_dates_sheet(raw: pd.DataFrame):
 def find_student_dates_row(dates_df: pd.DataFrame, student_name: str, email_key: str = "", student_key: str = "", program: str = "", batch: str = ""):
     if dates_df is None or dates_df.empty:
         return None
-    masks = []
-    if email_key:
-        masks.append(dates_df["email_key"].astype(str).eq(email_key))
-    if student_key:
-        masks.append(dates_df["student_key"].astype(str).eq(student_key))
-    if not masks:
-        return None
-    mask = masks[0].copy()
-    for m in masks[1:]:
-        mask = mask | m
+
+    email_key = clean_text(email_key)
+    student_key = clean_text(student_key) or normalize_name(student_name)
+    norm_program = clean_text(program).upper()
+    norm_batch = normalize_batch_token(batch)
+
+    mask = pd.Series(False, index=dates_df.index)
+    if email_key and "email_key" in dates_df.columns:
+        mask = mask | dates_df["email_key"].astype(str).eq(email_key)
+    if student_key and "student_key" in dates_df.columns:
+        mask = mask | dates_df["student_key"].astype(str).eq(student_key)
+
     cand = dates_df.loc[mask].copy()
+    if cand.empty and student_name:
+        cand = dates_df.loc[dates_df["student_key"].astype(str).eq(normalize_name(student_name))].copy()
     if cand.empty:
         return None
-    if program and "UG PG" in cand.columns:
-        c2 = cand[cand["UG PG"].astype(str).str.upper().eq(clean_text(program).upper())]
+
+    if norm_program and "UG PG" in cand.columns:
+        c2 = cand[cand["UG PG"].astype(str).str.upper().eq(norm_program)]
         if not c2.empty:
             cand = c2
-    if batch and "Batch" in cand.columns:
-        c2 = cand[cand["Batch"].astype(str).str.upper().eq(clean_text(batch).upper())]
+
+    if norm_batch and "Batch" in cand.columns:
+        c2 = cand[cand["Batch"].astype(str).map(normalize_batch_token).eq(norm_batch)]
         if not c2.empty:
             cand = c2
-    cand = cand.sort_values(["offered_date_parsed", "deadline_parsed"], na_position='last')
+
+    cand = cand.sort_values(["offered_date_parsed", "deadline_parsed"], na_position="last")
     return cand.iloc[0] if not cand.empty else None
 
 def parse_master_sheet(raw: pd.DataFrame, program: str, sheet_name: str):
@@ -1250,6 +1275,8 @@ def render_student_profile(data):
         st.info("Search and select a student to view the profile.")
         return
 
+    profile_window_df = build_t7_event_window_data(data)
+
     for i, student_name in enumerate(final_names):
         matches = overview_df[overview_df["student_name"].str.lower() == student_name.lower()]
         if matches.empty:
@@ -1278,20 +1305,30 @@ def render_student_profile(data):
 
         st.markdown("---")
         st.markdown(f"### {master['student_name']}")
-        p1, p2, p3, p4, p5 = st.columns(5)
-        p1.metric("Program", clean_text(master.get("Program", "")))
-        p2.metric("Batch", clean_text(master.get("Batch", "")))
-        p3.metric("Paid Status", clean_text(master.get("resolved_status", "Not Paid")))
         pay_dt = pd.to_datetime(master.get("resolved_payment_date", pd.NaT), errors="coerce")
         if pd.isna(pay_dt) and not related_df.empty and "payment_date_parsed" in related_df.columns:
             rel_pay = pd.to_datetime(related_df["payment_date_parsed"], errors="coerce").dropna()
             if not rel_pay.empty:
                 pay_dt = rel_pay.iloc[0]
-        p4.metric("Payment Date", pay_dt.strftime("%Y-%m-%d") if pd.notna(pay_dt) else "—")
-        dates_row = find_student_dates_row(data.get("dates_df", pd.DataFrame()), master.get("student_name", ""), email_key, name_key, master.get("Program", ""), master.get("Batch", ""))
+        dates_row = find_student_dates_row(
+            data.get("dates_df", pd.DataFrame()),
+            master.get("student_name", ""),
+            email_key,
+            name_key,
+            master.get("Program", ""),
+            master.get("Batch", ""),
+        )
         offered_dt = pd.to_datetime(dates_row.get("offered_date_parsed", pd.NaT), errors="coerce") if dates_row is not None else pd.NaT
         deadline_dt = pd.to_datetime(dates_row.get("deadline_parsed", pd.NaT), errors="coerce") if dates_row is not None else pd.NaT
-        p5.metric("Community Status", batch_comm if batch_comm else "—")
+
+        p1, p2, p3, p4, p5, p6, p7 = st.columns(7)
+        p1.metric("Program", clean_text(master.get("Program", "")))
+        p2.metric("Batch", clean_text(master.get("Batch", "")))
+        p3.metric("Paid Status", clean_text(master.get("resolved_status", "Not Paid")))
+        p4.metric("Payment Date", pay_dt.strftime("%Y-%m-%d") if pd.notna(pay_dt) else "—")
+        p5.metric("Offered Date", offered_dt.strftime("%Y-%m-%d") if pd.notna(offered_dt) else "—")
+        p6.metric("Deadline", deadline_dt.strftime("%Y-%m-%d") if pd.notna(deadline_dt) else "—")
+        p7.metric("Community Status", batch_comm if batch_comm else "—")
 
         c1, c2 = st.columns([1.2, 1])
         with c1:
@@ -1384,6 +1421,42 @@ def render_student_profile(data):
                         fig.add_shape(type="line", x0=x, x1=x, y0=0, y1=1, xref="x", yref="paper", line=dict(color=RED, width=2, dash="dash"))
                         fig.add_annotation(x=x, y=1, yref="paper", text="Payment Date", showarrow=False, font=dict(color=RED), bgcolor="white")
                     st.plotly_chart(nice_layout(fig, height=360), use_container_width=True, key=f"profile_timeline_{i}")
+
+                if clean_text(master.get("resolved_status", "")).lower() == "admitted" and not profile_window_df.empty:
+                    wmask = pd.Series(False, index=profile_window_df.index)
+                    if email_key and "email_key" in profile_window_df.columns:
+                        wmask = wmask | profile_window_df["email_key"].astype(str).eq(email_key)
+                    if name_key and "student_key" in profile_window_df.columns:
+                        wmask = wmask | profile_window_df["student_key"].astype(str).eq(name_key)
+                    if not wmask.any():
+                        wmask = profile_window_df["student_name"].astype(str).str.lower().eq(clean_text(master.get("student_name", "")).lower())
+                    stu_window = profile_window_df.loc[wmask].copy()
+                    if not stu_window.empty:
+                        st.markdown("#### T-7 & T+7 Attendance")
+                        summary = stu_window.groupby("window", as_index=False).agg(
+                            activities=("dedupe_key", "nunique"),
+                            event_types=("event_type", lambda s: ", ".join(sorted(dict.fromkeys([clean_text(x) for x in s if clean_text(x)])))),
+                            event_names=("event_name", lambda s: ", ".join(sorted(dict.fromkeys([clean_text(x) for x in s if clean_text(x)]))))
+                        )
+                        t7 = summary[summary["window"] == "T-7 to T-1"]
+                        tp7 = summary[summary["window"] == "T+1 to T+7"]
+                        q1, q2 = st.columns(2)
+                        q1.metric("Activities in T-7", int(t7["activities"].iloc[0]) if not t7.empty else 0)
+                        q2.metric("Activities in T+7", int(tp7["activities"].iloc[0]) if not tp7.empty else 0)
+
+                        detail_rows = []
+                        for label in ["T-7 to T-1", "T+1 to T+7"]:
+                            partw = stu_window[stu_window["window"] == label].copy()
+                            if partw.empty:
+                                detail_rows.append({"Window": label, "Activities": 0, "Event Types": "", "Events": ""})
+                            else:
+                                detail_rows.append({
+                                    "Window": label,
+                                    "Activities": int(partw["dedupe_key"].nunique()),
+                                    "Event Types": ", ".join(sorted(dict.fromkeys([clean_text(x) for x in partw["event_type"].tolist() if clean_text(x)]))),
+                                    "Events": ", ".join(sorted(dict.fromkeys([clean_text(x) for x in partw["event_name"].tolist() if clean_text(x)]))),
+                                })
+                        st.dataframe(pd.DataFrame(detail_rows), use_container_width=True, hide_index=True, key=f"profile_t7_table_{i}")
 
                 st.markdown("#### Event Details")
                 show = profile_event_df.sort_values(["event_date", "event_type", "event_name"], ascending=[True, True, True]).copy()
@@ -1492,7 +1565,7 @@ def render_ug_vs_pg_page(data):
 
 
 def build_t7_event_window_data(data):
-    columns = ["student_name", "program", "payment_date", "window", "event_name", "event_type", "event_date", "source_sheet", "dedupe_key"]
+    columns = ["student_name", "email_key", "student_key", "program", "payment_date", "window", "event_name", "event_type", "event_date", "source_sheet", "dedupe_key"]
     overview_df = data.get("overview_df", pd.DataFrame())
     if overview_df.empty:
         return pd.DataFrame(columns=columns)
@@ -1586,6 +1659,8 @@ def build_t7_event_window_data(data):
                     ])
                     rows.append({
                         "student_name": student_name,
+                        "email_key": email_key,
+                        "student_key": student_key,
                         "program": program,
                         "payment_date": pay_dt,
                         "window": window,
