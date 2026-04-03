@@ -564,7 +564,7 @@ def parse_activity_sheet(raw: pd.DataFrame, sheet_name: str):
     community_status_col = best_matching_col(df, ["community status", "admitted group"])
     term_zero_col = best_matching_col(df, ["term zero group"])
     payment_status_col = best_matching_col(df, ["payment status", "status"])
-    payment_date_col = best_matching_col(df, ["payment date"])
+    payment_date_col = best_matching_col(df, ["payment date", "community join date"])
     engagement_pct_col = best_matching_col(df, ["overall engagement %", "engagement %"])
     engagement_score_col = best_matching_col(df, ["overall engagement score", "engagement score"])
 
@@ -609,6 +609,11 @@ def parse_activity_sheet(raw: pd.DataFrame, sheet_name: str):
         df["payment_date_parsed"] = df[payment_date_col]
     else:
         df["payment_date_parsed"] = pd.NaT
+
+    if sheet_name in {"Tetr-X-UG", "Tetr-X-PG"} and "payment_date_parsed" in df.columns and df["payment_date_parsed"].isna().all():
+        join_col = best_matching_col(df, ["community join date"])
+        if join_col and join_col in df.columns:
+            df["payment_date_parsed"] = df[join_col].apply(parse_date_safe)
 
     stat_series = df[payment_status_col].astype(str).str.lower().str.strip() if payment_status_col else pd.Series("", index=df.index)
     df["sheet_status_raw"] = df[payment_status_col].map(clean_text) if payment_status_col else ""
@@ -1411,9 +1416,29 @@ def build_t7_event_window_data(data):
         pay_dt = pd.to_datetime(stu.get("resolved_payment_date", stu.get("master_payment_date_parsed", pd.NaT)), errors="coerce")
         if pd.isna(pay_dt):
             pay_dt = pd.to_datetime(stu.get("master_payment_date_parsed", pd.NaT), errors="coerce")
+
+
+        if pd.isna(pay_dt):
+            fallback_pays = []
+            for sheet in candidate_sheets:
+                if sheet not in activities:
+                    continue
+                sdf = activities[sheet]
+                if sdf.empty or "payment_date_parsed" not in sdf.columns:
+                    continue
+                mask = pd.Series(False, index=sdf.index)
+                if email_key and "email_key" in sdf.columns:
+                    mask = mask | sdf["email_key"].astype(str).eq(email_key)
+                if student_key and "student_key" in sdf.columns:
+                    mask = mask | sdf["student_key"].astype(str).eq(student_key)
+                part_pay = pd.to_datetime(sdf.loc[mask, "payment_date_parsed"], errors="coerce").dropna()
+                if not part_pay.empty:
+                    fallback_pays.extend(part_pay.tolist())
+            if fallback_pays:
+                pay_dt = min(fallback_pays)
         if pd.isna(pay_dt):
             continue
-        pay_dt = pay_dt.normalize()
+        pay_dt = pd.to_datetime(pay_dt, errors="coerce").normalize()
 
         candidate_sheets = list(UG_BATCH_SHEETS if program == "UG" else PG_BATCH_SHEETS)
         tx_sheet = "Tetr-X-UG" if program == "UG" else "Tetr-X-PG"
