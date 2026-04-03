@@ -24,6 +24,7 @@ MASTER_SHEETS = ["Master UG", "Master PG"]
 UG_BATCH_SHEETS = ["UG - B1 to B4", "UG B5", "UG B6", "UG B7", "UG B8", "UG B9"]
 PG_BATCH_SHEETS = ["PG - B1 & B2", "PG - B3 & B4", "PG B5"]
 TX_SHEETS = ["Tetr-X-UG", "Tetr-X-PG"]
+DATES_SHEET = "Dates"
 ALL_REQUIRED = MASTER_SHEETS + UG_BATCH_SHEETS + PG_BATCH_SHEETS + TX_SHEETS
 
 GREEN = "#0b3d2e"
@@ -416,6 +417,79 @@ def load_raw_sheet(source_mode: str, sheet_name: str, spreadsheet_id=None, file_
 # ---------------- Parsing ----------------
 
 
+
+def parse_dates_sheet(raw: pd.DataFrame):
+    if raw is None or raw.empty:
+        return pd.DataFrame(columns=["student_name", "student_key", "email_key", "UG PG", "Batch", "Offered date", "Deadline", "offered_date_parsed", "deadline_parsed"])
+
+    header_row = 0
+    for i in range(min(10, len(raw))):
+        vals = [clean_text(v).lower() for v in raw.iloc[i].tolist()]
+        joined = " | ".join(vals)
+        if "offered" in joined and "deadline" in joined and ("name" in joined or "email" in joined):
+            header_row = i
+            break
+
+    df = raw.iloc[header_row + 1 :].copy().reset_index(drop=True)
+    df.columns = make_unique(raw.iloc[header_row].tolist())
+    df = df.dropna(how="all")
+
+    name_col = next((c for c in df.columns if "name" in clean_text(c).lower()), None)
+    email_col = next((c for c in df.columns if "email" in clean_text(c).lower()), None)
+    program_col = next((c for c in df.columns if clean_text(c).lower() in {"ug/pg", "program", "ug pg"}), None)
+    if program_col is None:
+        program_col = next((c for c in df.columns if "ug/pg" in clean_text(c).lower()), None)
+    batch_col = next((c for c in df.columns if "batch" in clean_text(c).lower()), None)
+    offered_col = next((c for c in df.columns if "offered" in clean_text(c).lower()), None)
+    deadline_col = next((c for c in df.columns if "deadline" in clean_text(c).lower()), None)
+
+    if name_col is None and email_col is None:
+        return pd.DataFrame(columns=["student_name", "student_key", "email_key", "UG PG", "Batch", "Offered date", "Deadline", "offered_date_parsed", "deadline_parsed"])
+
+    df["student_name"] = df[name_col].map(clean_text) if name_col else ""
+    df["student_key"] = df["student_name"].map(normalize_name)
+    df["email_key"] = df[email_col].map(normalize_email) if email_col else ""
+    df["UG PG"] = df[program_col].map(clean_text) if program_col else ""
+    df["Batch"] = df[batch_col].map(clean_text) if batch_col else ""
+    df["Offered date"] = df[offered_col].map(clean_text) if offered_col else ""
+    df["Deadline"] = df[deadline_col].map(clean_text) if deadline_col else ""
+    df["offered_date_parsed"] = df["Offered date"].apply(parse_date_safe)
+    df["deadline_parsed"] = df["Deadline"].apply(parse_date_safe)
+
+    keep = ["student_name", "student_key", "email_key", "UG PG", "Batch", "Offered date", "Deadline", "offered_date_parsed", "deadline_parsed"]
+    out = df[keep].copy()
+    out = out[(out["student_name"].apply(is_valid_student_name)) | (out["email_key"].astype(str).str.len() > 3)].copy()
+    out = out.sort_values(["email_key", "student_key"]).drop_duplicates(subset=["email_key", "student_key", "UG PG", "Batch"], keep="first")
+    return out.reset_index(drop=True)
+
+
+def find_student_dates_row(dates_df: pd.DataFrame, student_name: str, email_key: str = "", student_key: str = "", program: str = "", batch: str = ""):
+    if dates_df is None or dates_df.empty:
+        return None
+    masks = []
+    if email_key:
+        masks.append(dates_df["email_key"].astype(str).eq(email_key))
+    if student_key:
+        masks.append(dates_df["student_key"].astype(str).eq(student_key))
+    if not masks:
+        return None
+    mask = masks[0].copy()
+    for m in masks[1:]:
+        mask = mask | m
+    cand = dates_df.loc[mask].copy()
+    if cand.empty:
+        return None
+    if program and "UG PG" in cand.columns:
+        c2 = cand[cand["UG PG"].astype(str).str.upper().eq(clean_text(program).upper())]
+        if not c2.empty:
+            cand = c2
+    if batch and "Batch" in cand.columns:
+        c2 = cand[cand["Batch"].astype(str).str.upper().eq(clean_text(batch).upper())]
+        if not c2.empty:
+            cand = c2
+    cand = cand.sort_values(["offered_date_parsed", "deadline_parsed"], na_position='last')
+    return cand.iloc[0] if not cand.empty else None
+
 def parse_master_sheet(raw: pd.DataFrame, program: str, sheet_name: str):
     header_row = 0
     data_start = 3
@@ -704,6 +778,7 @@ def load_dashboard_data(source_mode: str, spreadsheet_id=None, file_bytes=None):
 
     masters, master_ctx = {}, {}
     activities, activity_ctx = {}, {}
+    dates_df = pd.DataFrame()
 
     for sheet in MASTER_SHEETS:
         if sheet in sheet_names:
@@ -715,15 +790,30 @@ def load_dashboard_data(source_mode: str, spreadsheet_id=None, file_bytes=None):
             raw = load_raw_sheet(source_mode, sheet, spreadsheet_id, file_bytes)
             activities[sheet], activity_ctx[sheet] = parse_activity_sheet(raw, sheet)
 
+    if DATES_SHEET in sheet_names:
+        raw = load_raw_sheet(source_mode, DATES_SHEET, spreadsheet_id, file_bytes)
+        dates_df = parse_dates_sheet(raw)
+
     tx_df = pd.concat([activities[s] for s in TX_SHEETS if s in activities], ignore_index=True) if any(s in activities for s in TX_SHEETS) else pd.DataFrame()
     if not tx_df.empty:
         tx_df = tx_df.copy()
         tx_df["tx_status"] = tx_df.get("sheet_status_raw", "")
         tx_df["tx_payment_date"] = tx_df.get("payment_date_parsed", pd.NaT)
 
-    # Overview must come only from Master UG and Master PG.
     overview_frames = [masters[sheet].copy() for sheet in MASTER_SHEETS if sheet in masters]
     overview_df = pd.concat(overview_frames, ignore_index=True) if overview_frames else pd.DataFrame()
+
+    if not overview_df.empty and not dates_df.empty:
+        offered_vals, deadline_vals = [], []
+        for _, row in overview_df.iterrows():
+            drow = find_student_dates_row(dates_df, row.get("student_name", ""), row.get("email_key", ""), row.get("student_key", ""), row.get("Program", ""), row.get("Batch", ""))
+            if drow is None:
+                offered_vals.append(pd.NaT); deadline_vals.append(pd.NaT)
+            else:
+                offered_vals.append(pd.to_datetime(drow.get("offered_date_parsed", pd.NaT), errors="coerce"))
+                deadline_vals.append(pd.to_datetime(drow.get("deadline_parsed", pd.NaT), errors="coerce"))
+        overview_df["offered_date_parsed"] = offered_vals
+        overview_df["deadline_parsed"] = deadline_vals
 
     combined_profiles = []
     if not overview_df.empty:
@@ -742,6 +832,7 @@ def load_dashboard_data(source_mode: str, spreadsheet_id=None, file_bytes=None):
         "overview_df": overview_df,
         "profile_df": profile_df,
         "tx_df": tx_df,
+        "dates_df": dates_df,
     }
 
 
@@ -1197,6 +1288,9 @@ def render_student_profile(data):
             if not rel_pay.empty:
                 pay_dt = rel_pay.iloc[0]
         p4.metric("Payment Date", pay_dt.strftime("%Y-%m-%d") if pd.notna(pay_dt) else "—")
+        dates_row = find_student_dates_row(data.get("dates_df", pd.DataFrame()), master.get("student_name", ""), email_key, name_key, master.get("Program", ""), master.get("Batch", ""))
+        offered_dt = pd.to_datetime(dates_row.get("offered_date_parsed", pd.NaT), errors="coerce") if dates_row is not None else pd.NaT
+        deadline_dt = pd.to_datetime(dates_row.get("deadline_parsed", pd.NaT), errors="coerce") if dates_row is not None else pd.NaT
         p5.metric("Community Status", batch_comm if batch_comm else "—")
 
         c1, c2 = st.columns([1.2, 1])
@@ -1211,6 +1305,8 @@ def render_student_profile(data):
                 "Status": clean_text(master.get("resolved_status", "")),
                 "Payment": clean_text(master.get("master_payment_value", "")),
                 "Payment Date": pay_dt.strftime("%Y-%m-%d") if pd.notna(pay_dt) else "",
+                "Offered Date": offered_dt.strftime("%Y-%m-%d") if pd.notna(offered_dt) else "",
+                "Deadline": deadline_dt.strftime("%Y-%m-%d") if pd.notna(deadline_dt) else "",
                 "Community Status (Batch)": batch_comm,
             }
             st.dataframe(pd.DataFrame(master_display.items(), columns=["Field", "Value"]), use_container_width=True, hide_index=True, key=f"profile_info_{i}")
@@ -1533,6 +1629,9 @@ def build_t7_student_summary_table(data):
         batch_sheets = list(UG_BATCH_SHEETS if program == "UG" else PG_BATCH_SHEETS)
         tx_sheet = "Tetr-X-UG" if program == "UG" else "Tetr-X-PG"
         candidate_sheets = batch_sheets + ([tx_sheet] if tx_sheet in activities else [])
+        dates_row = find_student_dates_row(data.get("dates_df", pd.DataFrame()), student_name, email_key, student_key, program, batch)
+        offered_dt = pd.to_datetime(dates_row.get("offered_date_parsed", pd.NaT), errors="coerce") if dates_row is not None else pd.NaT
+        deadline_dt = pd.to_datetime(dates_row.get("deadline_parsed", pd.NaT), errors="coerce") if dates_row is not None else pd.NaT
 
         if pd.isna(pay_dt):
             fallback_pays = []
@@ -1606,9 +1705,11 @@ def build_t7_student_summary_table(data):
                     ev_date = ev_date.normalize()
                     delta = (ev_date - pay_dt).days
                     source_group = "tetrx" if sheet == tx_sheet else "batch"
-                    # total-30 logic: before payment from batch sheets only, after payment from Tetr-X only
-                    in_total30 = ((source_group == "batch" and -30 <= delta <= -1) or
-                                  (source_group == "tetrx" and 0 <= delta <= 30))
+                    # offered->deadline logic: before payment from batch only, on/after payment from Tetr-X only
+                    in_total30 = False
+                    if pd.notna(offered_dt) and pd.notna(deadline_dt) and offered_dt.normalize() <= ev_date <= deadline_dt.normalize():
+                        in_total30 = ((source_group == "batch" and ev_date < pay_dt) or
+                                      (source_group == "tetrx" and ev_date >= pay_dt))
                     # T+7 logic: both batch and tetrx after payment, merged later
                     in_tplus7 = 0 <= delta <= 7
                     in_tminus7 = source_group == "batch" and -7 <= delta <= -1
