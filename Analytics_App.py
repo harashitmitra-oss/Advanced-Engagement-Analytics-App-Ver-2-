@@ -1387,6 +1387,168 @@ def render_ug_vs_pg_page(data):
     st.dataframe(comp, use_container_width=True, hide_index=True, key="uvspg_table")
 
 
+
+
+def build_t7_event_window_data(data):
+    columns = ["student_name", "program", "payment_date", "window", "event_name", "event_type", "event_date", "source_sheet", "dedupe_key"]
+    overview_df = data.get("overview_df", pd.DataFrame())
+    if overview_df.empty:
+        return pd.DataFrame(columns=columns)
+
+    admitted = overview_df[overview_df["resolved_status"].astype(str).str.strip().str.lower().eq("admitted")].copy()
+    if admitted.empty:
+        return pd.DataFrame(columns=columns)
+
+    rows = []
+    activity_ctx = data.get("activity_ctx", {})
+    activities = data.get("activities", {})
+    for _, stu in admitted.iterrows():
+        email_key = clean_text(stu.get("email_key", ""))
+        student_key = clean_text(stu.get("student_key", ""))
+        student_name = clean_text(stu.get("student_name", ""))
+        program = clean_text(stu.get("Program", ""))
+        pay_dt = pd.to_datetime(stu.get("resolved_payment_date", pd.NaT), errors="coerce")
+        if pd.isna(pay_dt):
+            continue
+        pay_dt = pay_dt.normalize()
+
+        candidate_sheets = UG_BATCH_SHEETS + TX_SHEETS if program == "UG" else PG_BATCH_SHEETS + TX_SHEETS
+        for sheet in candidate_sheets:
+            if sheet not in activities or sheet not in activity_ctx:
+                continue
+            sdf = activities[sheet]
+            if sdf.empty:
+                continue
+            mask = pd.Series(False, index=sdf.index)
+            if email_key and "email_key" in sdf.columns:
+                mask = mask | (sdf["email_key"] == email_key)
+            if student_key and "student_key" in sdf.columns:
+                mask = mask | (sdf["student_key"] == student_key)
+            part = sdf[mask]
+            if part.empty:
+                continue
+            row = part.iloc[0]
+            event_info = activity_ctx[sheet].get("event_info", pd.DataFrame())
+            if event_info is None or event_info.empty:
+                continue
+            for _, ev in event_info.iterrows():
+                col = ev.get("column_name")
+                if not col or col not in row.index:
+                    continue
+                attended = pd.to_numeric(pd.Series([row.get(col, 0)]), errors="coerce").fillna(0).iloc[0]
+                if attended <= 0:
+                    continue
+                ev_date = pd.to_datetime(ev.get("event_date", pd.NaT), errors="coerce")
+                if pd.isna(ev_date):
+                    continue
+                ev_date = ev_date.normalize()
+                delta = (ev_date - pay_dt).days
+                if -7 <= delta <= -1:
+                    window = "T-7 to T-1"
+                elif 1 <= delta <= 7:
+                    window = "T+1 to T+7"
+                else:
+                    continue
+                ev_name = clean_text(ev.get("event_name", "")) or clean_text(col)
+                ev_type = clean_text(ev.get("event_type", "Other")) or "Other"
+                dedupe_key = "|".join([student_key or email_key or normalize_name(student_name), normalize_name(ev_name), normalize_name(ev_type), ev_date.strftime('%Y-%m-%d')])
+                rows.append({
+                    "student_name": student_name,
+                    "program": program,
+                    "payment_date": pay_dt,
+                    "window": window,
+                    "event_name": ev_name,
+                    "event_type": ev_type,
+                    "event_date": ev_date,
+                    "source_sheet": sheet,
+                    "dedupe_key": dedupe_key,
+                })
+    if not rows:
+        return pd.DataFrame(columns=columns)
+    out = pd.DataFrame(rows)
+    out = out.sort_values(["student_name", "event_date", "event_name", "source_sheet"]).drop_duplicates(subset=["dedupe_key"]).reset_index(drop=True)
+    return out
+
+
+def render_t7_analysis_page(data):
+    st.subheader("T-7 & T+7 Analysis")
+    window_df = build_t7_event_window_data(data)
+    overview_df = data.get("overview_df", pd.DataFrame())
+    admitted_total = int(overview_df[overview_df["resolved_status"].astype(str).str.strip().str.lower().eq("admitted")].shape[0]) if not overview_df.empty else 0
+
+    k1, k2, k3 = st.columns(3)
+    k1.metric("Admitted Students", f"{admitted_total:,}")
+    k2.metric("T-7 Participations", f"{int((window_df['window'] == 'T-7 to T-1').sum()) if not window_df.empty else 0:,}")
+    k3.metric("T+7 Participations", f"{int((window_df['window'] == 'T+1 to T+7').sum()) if not window_df.empty else 0:,}")
+
+    if window_df.empty:
+        st.info("No paid/admitted students with dated events inside the 7-day payment windows were found.")
+        return
+
+    type_summary = (
+        window_df.groupby(["window", "event_type"], as_index=False)
+        .agg(student_count=("student_name", "nunique"), event_names=("event_name", lambda s: ", ".join(sorted(dict.fromkeys([clean_text(x) for x in s if clean_text(x)])))))
+    )
+    type_summary["student_pct"] = np.where(admitted_total > 0, type_summary["student_count"] / admitted_total * 100, 0.0)
+
+    st.markdown("#### Event Type Participation in Payment Window")
+    st.caption("X count of admitted students participated in each event type within 7 days before and after payment.")
+    c1, c2 = st.columns([1.2, 1])
+    with c1:
+        fig = px.bar(type_summary, x="student_pct", y="event_type", color="window", barmode="group", orientation="h",
+                     title="Students Participating by Event Type (% of admitted students)",
+                     hover_data=["student_count", "event_names"], text="student_count",
+                     color_discrete_map={"T-7 to T-1": GREEN, "T+1 to T+7": GREEN_3})
+        fig.update_traces(textposition="outside")
+        st.plotly_chart(nice_layout(fig, height=max(360, 90 + 28 * len(type_summary["event_type"].unique()))), use_container_width=True, key="t7_type_pct_bar")
+    with c2:
+        st.dataframe(type_summary.rename(columns={"event_type": "Event Type", "student_count": "Students", "student_pct": "% of Admitted", "event_names": "Events"}),
+                     use_container_width=True, height=420, key="t7_type_table")
+
+    online_mask = type_summary["event_type"].astype(str).str.strip().str.lower().eq("online event")
+    online_summary = type_summary[online_mask].copy()
+    st.markdown("#### Online Event Participation")
+    if online_summary.empty:
+        st.info("No Online Event activity found inside the T-7 / T+7 windows.")
+    else:
+        fig = px.bar(online_summary, x="window", y="student_pct", color="window", text="student_count",
+                     title="Online Event Participation (% of admitted students)", hover_data=["student_count", "event_names"],
+                     color_discrete_map={"T-7 to T-1": GREEN, "T+1 to T+7": GREEN_3})
+        fig.update_traces(textposition="outside")
+        st.plotly_chart(nice_layout(fig, height=320), use_container_width=True, key="t7_online_bar")
+        st.dataframe(online_summary.rename(columns={"student_count": "Students", "student_pct": "% of Admitted", "event_names": "Online Events"}),
+                     use_container_width=True, height=180, key="t7_online_table")
+
+    st.markdown("#### Event Names Attended in Each Window")
+    event_summary = (
+        window_df.groupby(["window", "event_name"], as_index=False)
+        .agg(students=("student_name", "nunique"), event_type=("event_type", "first"), event_date=("event_date", "first"))
+        .sort_values(["window", "students", "event_date", "event_name"], ascending=[True, False, True, True])
+    )
+    top_before = event_summary[event_summary["window"] == "T-7 to T-1"].head(12)
+    top_after = event_summary[event_summary["window"] == "T+1 to T+7"].head(12)
+    e1, e2 = st.columns(2)
+    with e1:
+        if not top_before.empty:
+            fig = px.bar(top_before.sort_values("students", ascending=True), x="students", y="event_name", orientation="h", color="event_type",
+                         title="Before Payment (T-7 to T-1)", hover_data=["event_date"])
+            st.plotly_chart(nice_layout(fig, height=390), use_container_width=True, key="t7_before_events")
+        else:
+            st.info("No attended events found in the 7 days before payment.")
+    with e2:
+        if not top_after.empty:
+            fig = px.bar(top_after.sort_values("students", ascending=True), x="students", y="event_name", orientation="h", color="event_type",
+                         title="After Payment (T+1 to T+7)", hover_data=["event_date"])
+            st.plotly_chart(nice_layout(fig, height=390), use_container_width=True, key="t7_after_events")
+        else:
+            st.info("No attended events found in the 7 days after payment.")
+
+    st.markdown("#### Detailed Window Event Log")
+    show = window_df.sort_values(["window", "event_date", "event_type", "event_name", "student_name"]).copy()
+    st.dataframe(show[["student_name", "program", "payment_date", "window", "event_date", "event_type", "event_name", "source_sheet"]],
+                 use_container_width=True, height=320, key="t7_detail_table")
+
+
 def render_tetrx_page(data):
     st.subheader("Tetr-X")
     available = [s for s in TX_SHEETS if s in data["activities"]]
@@ -1415,7 +1577,7 @@ def main():
 
     with st.sidebar:
         st.markdown("## 🧭 Navigation")
-        default_pages = ["Overview", "Student Profile", "UG", "PG", "UG vs PG", "Tetr-X"]
+        default_pages = ["Overview", "Student Profile", "UG", "PG", "UG vs PG", "Tetr-X", "T-7 & T+7 Analysis"]
         default_index = default_pages.index(st.session_state.get("nav_page", "Overview")) if st.session_state.get("nav_page", "Overview") in default_pages else 0
         page = st.radio("Go to", default_pages, index=default_index, label_visibility="collapsed", key="nav")
         st.session_state["nav_page"] = page
@@ -1449,6 +1611,8 @@ def main():
         render_ug_vs_pg_page(data)
     elif page == "Tetr-X":
         render_tetrx_page(data)
+    elif page == "T-7 & T+7 Analysis":
+        render_t7_analysis_page(data)
 
 
 if __name__ == "__main__":
