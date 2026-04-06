@@ -1392,7 +1392,7 @@ def render_student_profile(data):
                 total_events = int(profile_event_df["count"].sum()) if not profile_event_df.empty else 0
                 distinct_sheets = related_df["source_sheet"].nunique()
                 active_records = int((related_df["engagement_pct"] > 0).sum()) if "engagement_pct" in related_df else 0
-                st.metric("Total Event Participations", total_events)
+                st.metric("Total Participations", total_events)
                 st.metric("Matched Sheets", distinct_sheets)
                 st.metric("Active Records", active_records)
 
