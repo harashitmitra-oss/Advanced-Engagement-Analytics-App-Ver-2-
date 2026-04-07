@@ -10,6 +10,8 @@ import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
 import streamlit.components.v1 as components
+import matplotlib.pyplot as plt
+from matplotlib.backends.backend_pdf import PdfPages
 
 try:
     import gspread
@@ -21,7 +23,7 @@ except Exception:
 st.set_page_config(page_title="Tetr Analytics Dashboard", layout="wide")
 
 MASTER_SHEETS = ["Master UG", "Master PG"]
-UG_BATCH_SHEETS = ["UG - B1 to B4", "UG B5", "UG B6", "UG B7", "UG B8", "UG B9"]
+UG_BATCH_SHEETS = ["UG - B1 to B4", "UG B5", "UG B6", "UG B7", "UG B8", "UG B9", "UG B10", "UG B11"]
 PG_BATCH_SHEETS = ["PG - B1 & B2", "PG - B3 & B4", "PG B5"]
 TX_SHEETS = ["Tetr-X-UG", "Tetr-X-PG"]
 DATES_SHEET = "Dates"
@@ -210,6 +212,24 @@ def parse_date_safe(x):
     except Exception:
         return pd.NaT
 
+
+
+def parse_numeric_percent(x):
+    s = clean_text(x)
+    if not s:
+        return np.nan
+    s = s.replace(",", "").replace("%", "").strip()
+    if s.lower() in {"nan", "none", "#div/0!", "inf", "-inf"}:
+        return np.nan
+    try:
+        return float(s)
+    except Exception:
+        return np.nan
+
+
+def format_date_display(x):
+    dt = pd.to_datetime(x, errors="coerce")
+    return dt.strftime("%Y-%m-%d") if pd.notna(dt) else "—"
 
 def parse_event_date(val):
     try:
@@ -695,12 +715,19 @@ def parse_activity_sheet(raw: pd.DataFrame, sheet_name: str):
     else:
         first_col = df.columns[0]
         df["engagement_score"] = pd.to_numeric(df[first_col], errors="coerce").fillna(df["participation_count"])
+    total_events = max(len(event_cols), 1)
     if engagement_pct_col:
-        df["engagement_pct"] = pd.to_numeric(df[engagement_pct_col], errors="coerce").fillna(0)
-        if df["engagement_pct"].max() <= 1.05:
-            df["engagement_pct"] = df["engagement_pct"] * 100
+        parsed_pct = df[engagement_pct_col].apply(parse_numeric_percent)
+        if parsed_pct.dropna().empty:
+            df["engagement_pct"] = (df["participation_count"] / total_events) * 100
+        else:
+            if parsed_pct.max(skipna=True) <= 1.05:
+                parsed_pct = parsed_pct * 100
+            fallback_pct = (df["participation_count"] / total_events) * 100
+            zero_needs_fallback = parsed_pct.fillna(0).eq(0) & df["participation_count"].gt(0)
+            parsed_pct = parsed_pct.where(~zero_needs_fallback, fallback_pct)
+            df["engagement_pct"] = parsed_pct.fillna(fallback_pct).fillna(0)
     else:
-        total_events = max(len(event_cols), 1)
         df["engagement_pct"] = (df["participation_count"] / total_events) * 100
 
     if payment_date_col:
@@ -1256,6 +1283,151 @@ def render_sheet_detail(sheet_name, df, ctx, prefix, data=None):
         st.plotly_chart(nice_layout(fig, height=360), use_container_width=True, key=f"{prefix}_timeline")
 
 
+
+def collect_student_profile_events(data, email_key: str, student_key: str, student_name: str, pay_dt=pd.NaT, offered_dt=pd.NaT, deadline_dt=pd.NaT):
+    rows = []
+    for sheet, ctx in data.get("activity_ctx", {}).items():
+        sdf = data.get("activities", {}).get(sheet, pd.DataFrame())
+        if sdf.empty or ctx.get("event_info", pd.DataFrame()).empty:
+            continue
+        mask = pd.Series(False, index=sdf.index)
+        if email_key and "email_key" in sdf.columns:
+            mask = mask | sdf["email_key"].astype(str).eq(email_key)
+        if student_key and "student_key" in sdf.columns:
+            mask = mask | sdf["student_key"].astype(str).eq(student_key)
+        part = sdf.loc[mask].copy()
+        if part.empty:
+            continue
+        event_info = ctx.get("event_info", pd.DataFrame())
+        for _, prow in part.iterrows():
+            for _, ev in event_info.iterrows():
+                col = ev.get("column_name")
+                if not col or col not in prow.index:
+                    continue
+                attended = pd.to_numeric(pd.Series([prow.get(col, 0)]), errors="coerce").fillna(0).iloc[0]
+                if attended <= 0:
+                    continue
+                ev_name = clean_text(ev.get("event_name", "")) or clean_text(col)
+                ev_type = clean_text(ev.get("event_type", "Other")) or "Other"
+                ev_date = pd.to_datetime(ev.get("event_date", pd.NaT), errors="coerce")
+                ev_date_norm = ev_date.normalize() if pd.notna(ev_date) else pd.NaT
+                date_key = ev_date_norm.strftime("%Y-%m-%d") if pd.notna(ev_date_norm) else "undated"
+                dedupe_key = "|".join([
+                    student_key or email_key or normalize_name(student_name),
+                    normalize_name(ev_name),
+                    normalize_name(ev_type),
+                    date_key,
+                ])
+                rows.append({
+                    "sheet": sheet,
+                    "source_group": "tetrx" if sheet in TX_SHEETS else "batch",
+                    "event_name": ev_name,
+                    "event_type": ev_type,
+                    "event_date": ev_date_norm,
+                    "count": int(attended),
+                    "dedupe_key": dedupe_key,
+                })
+    ev_df = pd.DataFrame(rows)
+    if ev_df.empty:
+        return ev_df
+    ev_df = (
+        ev_df.sort_values(["event_date", "event_name", "sheet"], na_position="last")
+        .groupby("dedupe_key", as_index=False)
+        .agg({
+            "event_name": "first",
+            "event_type": "first",
+            "event_date": "first",
+            "count": "max",
+            "sheet": lambda s: ", ".join(sorted(dict.fromkeys([clean_text(x) for x in s if clean_text(x)]))),
+            "source_group": lambda s: ", ".join(sorted(dict.fromkeys([clean_text(x) for x in s if clean_text(x)]))),
+        })
+        .rename(columns={"sheet": "source_sheets"})
+    )
+    pay_dt = pd.to_datetime(pay_dt, errors="coerce")
+    offered_dt = pd.to_datetime(offered_dt, errors="coerce")
+    deadline_dt = pd.to_datetime(deadline_dt, errors="coerce")
+    ev_df["in_first30"] = False
+    ev_df["after_paid"] = False
+    ev_df["in_t7"] = False
+    ev_df["in_tplus7"] = False
+    if pd.notna(offered_dt) and pd.notna(deadline_dt):
+        ev_df["in_first30"] = ev_df["event_date"].between(offered_dt.normalize(), deadline_dt.normalize(), inclusive="both")
+    if pd.notna(pay_dt):
+        norm_pay = pay_dt.normalize()
+        ev_df["after_paid"] = ev_df["event_date"].ge(norm_pay)
+        delta = (ev_df["event_date"] - norm_pay).dt.days
+        ev_df["in_t7"] = delta.between(-7, -1, inclusive="both")
+        ev_df["in_tplus7"] = delta.between(1, 7, inclusive="both")
+    return ev_df
+
+
+def create_student_profiles_pdf(profile_payloads):
+    if not profile_payloads:
+        return None
+    bio = BytesIO()
+    with PdfPages(bio) as pdf:
+        for payload in profile_payloads:
+            fig = plt.figure(figsize=(8.27, 11.69))
+            gs = fig.add_gridspec(5, 2, height_ratios=[0.9, 1.1, 1.6, 1.4, 1.3], hspace=0.7, wspace=0.45)
+            ax_title = fig.add_subplot(gs[0, :]); ax_title.axis("off")
+            ax_title.text(0, 0.92, payload["title"], fontsize=18, fontweight="bold", color="#0b3d2e", va="top")
+            ax_title.text(0, 0.65, payload.get("subtitle", ""), fontsize=10, color="#12372a", va="top")
+            metrics = payload.get("metrics", {})
+            metric_lines = [f"{k}: {v}" for k, v in metrics.items()]
+            ax_title.text(0, 0.18, "   |   ".join(metric_lines), fontsize=9, color="#1f7a56", va="top")
+
+            ax_info = fig.add_subplot(gs[1, 0]); ax_info.axis("off")
+            info_lines = [f"{k}: {v}" for k, v in payload.get("info", {}).items()]
+            ax_info.text(0, 1, "\n".join(info_lines), fontsize=8.5, va="top")
+
+            ax_t7 = fig.add_subplot(gs[1, 1]); ax_t7.axis("off")
+            t7_lines = [f"{k}: {v}" for k, v in payload.get("t7_info", {}).items()]
+            ax_t7.text(0, 1, "\n".join(t7_lines), fontsize=8.5, va="top")
+
+            type_df = payload.get("type_df", pd.DataFrame())
+            ax_type = fig.add_subplot(gs[2, 0])
+            if not type_df.empty:
+                d = type_df.head(8)
+                ax_type.barh(d["event_type"], d["count"])
+                ax_type.set_title("Event Type Participation", fontsize=10)
+                ax_type.invert_yaxis()
+            else:
+                ax_type.text(0.5, 0.5, "No event type data", ha="center", va="center")
+                ax_type.set_axis_off()
+
+            timeline_df = payload.get("timeline_df", pd.DataFrame())
+            ax_time = fig.add_subplot(gs[2, 1])
+            if not timeline_df.empty:
+                ax_time.plot(timeline_df["event_date"], timeline_df["count"], marker="o")
+                if pd.notna(payload.get("payment_date", pd.NaT)):
+                    ax_time.axvline(pd.to_datetime(payload["payment_date"]), linestyle="--", linewidth=1.5)
+                ax_time.set_title("Engagement Timeline", fontsize=10)
+                ax_time.tick_params(axis="x", labelrotation=30, labelsize=8)
+            else:
+                ax_time.text(0.5, 0.5, "No dated events", ha="center", va="center")
+                ax_time.set_axis_off()
+
+            ax_events = fig.add_subplot(gs[3:, :]); ax_events.axis("off")
+            events_df = payload.get("events_df", pd.DataFrame())
+            if not events_df.empty:
+                show = events_df.copy()
+                show["event_date"] = show["event_date"].apply(lambda x: format_date_display(x) if pd.notna(pd.to_datetime(x, errors="coerce")) else "")
+                show = show[["event_date", "event_type", "event_name", "source_sheets"]].head(18)
+                tbl = ax_events.table(cellText=show.values, colLabels=show.columns, loc="upper left", cellLoc="left")
+                tbl.auto_set_font_size(False)
+                tbl.set_fontsize(7.5)
+                tbl.scale(1, 1.2)
+                ax_events.set_title("Event Details", fontsize=10, loc="left")
+            else:
+                ax_events.text(0.5, 0.5, "No event details available", ha="center", va="center")
+            fig.tight_layout()
+            pdf.savefig(fig, bbox_inches="tight")
+            plt.close(fig)
+    bio.seek(0)
+    return bio.getvalue()
+
+
+
 def render_student_profile(data):
     st.subheader("Student Profile")
     overview_df = data["overview_df"]
@@ -1276,6 +1448,7 @@ def render_student_profile(data):
         return
 
     profile_window_df = build_t7_event_window_data(data)
+    pdf_payloads = []
 
     for i, student_name in enumerate(final_names):
         matches = overview_df[overview_df["student_name"].str.lower() == student_name.lower()]
@@ -1303,13 +1476,12 @@ def render_student_profile(data):
             if not comm_series.empty:
                 batch_comm = comm_series.mode().iat[0] if not comm_series.mode().empty else comm_series.iloc[0]
 
-        st.markdown("---")
-        st.markdown(f"### {master['student_name']}")
         pay_dt = pd.to_datetime(master.get("resolved_payment_date", pd.NaT), errors="coerce")
         if pd.isna(pay_dt) and not related_df.empty and "payment_date_parsed" in related_df.columns:
             rel_pay = pd.to_datetime(related_df["payment_date_parsed"], errors="coerce").dropna()
             if not rel_pay.empty:
-                pay_dt = rel_pay.iloc[0]
+                pay_dt = rel_pay.min()
+
         dates_row = find_student_dates_row(
             data.get("dates_df", pd.DataFrame()),
             master.get("student_name", ""),
@@ -1321,14 +1493,35 @@ def render_student_profile(data):
         offered_dt = pd.to_datetime(dates_row.get("offered_date_parsed", pd.NaT), errors="coerce") if dates_row is not None else pd.NaT
         deadline_dt = pd.to_datetime(dates_row.get("deadline_parsed", pd.NaT), errors="coerce") if dates_row is not None else pd.NaT
 
+        profile_event_df = collect_student_profile_events(data, email_key, name_key, master.get("student_name", ""), pay_dt=pay_dt, offered_dt=offered_dt, deadline_dt=deadline_dt)
+
+        wmask = pd.Series(False, index=profile_window_df.index)
+        if not profile_window_df.empty:
+            if email_key and "email_key" in profile_window_df.columns:
+                wmask = wmask | profile_window_df["email_key"].astype(str).eq(email_key)
+            if name_key and "student_key" in profile_window_df.columns:
+                wmask = wmask | profile_window_df["student_key"].astype(str).eq(name_key)
+            if not wmask.any():
+                wmask = profile_window_df["student_name"].astype(str).str.lower().eq(clean_text(master.get("student_name", "")).lower())
+        stu_window = profile_window_df.loc[wmask].copy() if not profile_window_df.empty else pd.DataFrame()
+
+        st.markdown("---")
+        st.markdown(f"### {master['student_name']}")
+
         p1, p2, p3, p4, p5, p6, p7 = st.columns(7)
         p1.metric("Program", clean_text(master.get("Program", "")))
         p2.metric("Batch", clean_text(master.get("Batch", "")))
         p3.metric("Paid Status", clean_text(master.get("resolved_status", "Not Paid")))
-        p4.metric("Payment Date", pay_dt.strftime("%Y-%m-%d") if pd.notna(pay_dt) else "—")
-        p5.metric("Offered Date", offered_dt.strftime("%Y-%m-%d") if pd.notna(offered_dt) else "—")
-        p6.metric("Deadline", deadline_dt.strftime("%Y-%m-%d") if pd.notna(deadline_dt) else "—")
+        p4.metric("Payment Date", format_date_display(pay_dt))
+        p5.metric("Offered Date", format_date_display(offered_dt))
+        p6.metric("Deadline", format_date_display(deadline_dt))
         p7.metric("Community Status", batch_comm if batch_comm else "—")
+
+        first30_count = int(profile_event_df.loc[profile_event_df["in_first30"], "dedupe_key"].nunique()) if not profile_event_df.empty else 0
+        after_paid_count = int(profile_event_df.loc[profile_event_df["after_paid"], "dedupe_key"].nunique()) if (not profile_event_df.empty and pd.notna(pay_dt)) else 0
+        t7_count = int(stu_window.loc[stu_window["window"] == "T-7 to T-1", "dedupe_key"].nunique()) if not stu_window.empty else 0
+        tp7_count = int(stu_window.loc[stu_window["window"] == "T+1 to T+7", "dedupe_key"].nunique()) if not stu_window.empty else 0
+        total_events = int(profile_event_df["dedupe_key"].nunique()) if not profile_event_df.empty else 0
 
         c1, c2 = st.columns([1.2, 1])
         with c1:
@@ -1341,64 +1534,25 @@ def render_student_profile(data):
                 "Income": clean_text(master.get(data["master_ctx"]["Master UG"]["income_col"] if master.get("Program") == "UG" and "Master UG" in data["master_ctx"] else data["master_ctx"].get("Master PG", {}).get("income_col", ""), "")),
                 "Status": clean_text(master.get("resolved_status", "")),
                 "Payment": clean_text(master.get("master_payment_value", "")),
-                "Payment Date": pay_dt.strftime("%Y-%m-%d") if pd.notna(pay_dt) else "",
-                "Offered Date": offered_dt.strftime("%Y-%m-%d") if pd.notna(offered_dt) else "",
-                "Deadline": deadline_dt.strftime("%Y-%m-%d") if pd.notna(deadline_dt) else "",
+                "Payment Date": format_date_display(pay_dt),
+                "Offered Date": format_date_display(offered_dt),
+                "Deadline": format_date_display(deadline_dt),
                 "Community Status (Batch)": batch_comm,
             }
             st.dataframe(pd.DataFrame(master_display.items(), columns=["Field", "Value"]), use_container_width=True, hide_index=True, key=f"profile_info_{i}")
-        profile_event_df = pd.DataFrame()
-        if not related_df.empty:
-            event_rows = []
-            for sheet, ctx in data["activity_ctx"].items():
-                part = data["activities"][sheet][(data["activities"][sheet]["email_key"] == email_key) | (data["activities"][sheet]["student_key"] == name_key)]
-                if part.empty or ctx["event_info"].empty:
-                    continue
-                row = part.iloc[0]
-                for _, ev in ctx["event_info"].iterrows():
-                    count = int(row.get(ev["column_name"], 0))
-                    if count > 0:
-                        event_name = clean_text(ev["event_name"])
-                        event_type = clean_text(ev["event_type"])
-                        event_date = pd.to_datetime(ev["event_date"], errors="coerce")
-                        profile_key = f"{normalize_name(event_name)}|{event_date.strftime('%Y-%m-%d') if pd.notna(event_date) else ''}|{normalize_name(event_type)}"
-                        event_rows.append({
-                            "sheet": sheet,
-                            "event_name": event_name,
-                            "event_type": event_type,
-                            "event_date": event_date,
-                            "count": count,
-                            "profile_event_key": profile_key,
-                        })
-            ev_df = pd.DataFrame(event_rows)
-            if not ev_df.empty:
-                profile_event_df = (
-                    ev_df.sort_values(["event_date", "event_name", "sheet"])
-                    .groupby("profile_event_key", as_index=False)
-                    .agg({
-                        "event_name": "first",
-                        "event_type": "first",
-                        "event_date": "first",
-                        "count": "max",
-                        "sheet": lambda s: ", ".join(sorted(dict.fromkeys([clean_text(x) for x in s if clean_text(x)]))),
-                    })
-                    .rename(columns={"sheet": "source_sheets"})
-                )
-
         with c2:
-            if related_df.empty:
-                st.info("No matching batch / Tetr-X records found.")
-            else:
-                total_events = int(profile_event_df["count"].sum()) if not profile_event_df.empty else 0
-                distinct_sheets = related_df["source_sheet"].nunique()
-                active_records = int((related_df["engagement_pct"] > 0).sum()) if "engagement_pct" in related_df else 0
-                st.metric("Total Participations", total_events)
-                st.metric("Matched Sheets", distinct_sheets)
-                st.metric("Active Records", active_records)
+            r1a, r1b = st.columns(2)
+            r2a, r2b = st.columns(2)
+            r3a = st.columns(1)[0]
+            r1a.metric("Total Participations So Far", total_events)
+            r1b.metric("Total Participation in First 30 Days", first30_count)
+            r2a.metric("Total Participation After Admitted/Paid", after_paid_count if clean_text(master.get("resolved_status", "")).lower() == "admitted" else 0)
+            r2b.metric("T-7 Count", t7_count if clean_text(master.get("resolved_status", "")).lower() == "admitted" else 0)
+            r3a.metric("T+7 Count", tp7_count if clean_text(master.get("resolved_status", "")).lower() == "admitted" else 0)
 
         if not related_df.empty:
             if not profile_event_df.empty:
-                type_df = profile_event_df.groupby("event_type")["count"].sum().reset_index().sort_values("count", ascending=False)
+                type_df = profile_event_df.groupby("event_type")["dedupe_key"].nunique().reset_index(name="count").sort_values("count", ascending=False)
                 total = type_df["count"].sum()
                 type_df["percentage"] = np.where(total > 0, type_df["count"] / total * 100, 0)
 
@@ -1413,7 +1567,7 @@ def render_student_profile(data):
 
                 timeline = profile_event_df.dropna(subset=["event_date"]).sort_values("event_date")
                 if not timeline.empty:
-                    timeline = timeline.groupby(["event_date", "event_name"], as_index=False)["count"].sum()
+                    timeline = timeline.groupby(["event_date", "event_name"], as_index=False)["dedupe_key"].nunique().rename(columns={"dedupe_key": "count"})
                     fig = px.line(timeline, x="event_date", y="count", markers=True, title="Engagement Timeline")
                     fig.update_traces(line_color=GREEN, marker_color=GREEN)
                     if pd.notna(pay_dt):
@@ -1422,51 +1576,63 @@ def render_student_profile(data):
                         fig.add_annotation(x=x, y=1, yref="paper", text="Payment Date", showarrow=False, font=dict(color=RED), bgcolor="white")
                     st.plotly_chart(nice_layout(fig, height=360), use_container_width=True, key=f"profile_timeline_{i}")
 
-                if clean_text(master.get("resolved_status", "")).lower() == "admitted" and not profile_window_df.empty:
-                    wmask = pd.Series(False, index=profile_window_df.index)
-                    if email_key and "email_key" in profile_window_df.columns:
-                        wmask = wmask | profile_window_df["email_key"].astype(str).eq(email_key)
-                    if name_key and "student_key" in profile_window_df.columns:
-                        wmask = wmask | profile_window_df["student_key"].astype(str).eq(name_key)
-                    if not wmask.any():
-                        wmask = profile_window_df["student_name"].astype(str).str.lower().eq(clean_text(master.get("student_name", "")).lower())
-                    stu_window = profile_window_df.loc[wmask].copy()
-                    if not stu_window.empty:
-                        st.markdown("#### T-7 & T+7 Attendance")
-                        summary = stu_window.groupby("window", as_index=False).agg(
-                            activities=("dedupe_key", "nunique"),
-                            event_types=("event_type", lambda s: ", ".join(sorted(dict.fromkeys([clean_text(x) for x in s if clean_text(x)])))),
-                            event_names=("event_name", lambda s: ", ".join(sorted(dict.fromkeys([clean_text(x) for x in s if clean_text(x)]))))
-                        )
-                        t7 = summary[summary["window"] == "T-7 to T-1"]
-                        tp7 = summary[summary["window"] == "T+1 to T+7"]
-                        q1, q2 = st.columns(2)
-                        q1.metric("Activities in T-7", int(t7["activities"].iloc[0]) if not t7.empty else 0)
-                        q2.metric("Activities in T+7", int(tp7["activities"].iloc[0]) if not tp7.empty else 0)
-
-                        detail_rows = []
-                        for label in ["T-7 to T-1", "T+1 to T+7"]:
-                            partw = stu_window[stu_window["window"] == label].copy()
-                            if partw.empty:
-                                detail_rows.append({"Window": label, "Activities": 0, "Event Types": "", "Events": ""})
-                            else:
-                                detail_rows.append({
-                                    "Window": label,
-                                    "Activities": int(partw["dedupe_key"].nunique()),
-                                    "Event Types": ", ".join(sorted(dict.fromkeys([clean_text(x) for x in partw["event_type"].tolist() if clean_text(x)]))),
-                                    "Events": ", ".join(sorted(dict.fromkeys([clean_text(x) for x in partw["event_name"].tolist() if clean_text(x)]))),
-                                })
-                        st.dataframe(pd.DataFrame(detail_rows), use_container_width=True, hide_index=True, key=f"profile_t7_table_{i}")
+                if clean_text(master.get("resolved_status", "")).lower() == "admitted" and not stu_window.empty:
+                    st.markdown("#### T-7 & T+7 Attendance")
+                    detail_rows = []
+                    for label in ["T-7 to T-1", "T+1 to T+7"]:
+                        partw = stu_window[stu_window["window"] == label].copy()
+                        detail_rows.append({
+                            "Window": label,
+                            "Activities": int(partw["dedupe_key"].nunique()) if not partw.empty else 0,
+                            "Event Types": ", ".join(sorted(dict.fromkeys([clean_text(x) for x in partw["event_type"].tolist() if clean_text(x)]))),
+                            "Events": ", ".join(sorted(dict.fromkeys([clean_text(x) for x in partw["event_name"].tolist() if clean_text(x)]))),
+                        })
+                    st.dataframe(pd.DataFrame(detail_rows), use_container_width=True, hide_index=True, key=f"profile_t7_table_{i}")
 
                 st.markdown("#### Event Details")
                 show = profile_event_df.sort_values(["event_date", "event_type", "event_name"], ascending=[True, True, True]).copy()
                 st.dataframe(show, use_container_width=True, height=320, key=f"profile_events_{i}")
             else:
+                type_df = pd.DataFrame()
+                timeline = pd.DataFrame()
                 st.info("Matched records found, but no attended events were recorded for this student.")
 
             st.markdown("#### Matched Batch / Tetr-X Records")
             record_cols = [c for c in ["source_sheet", "Batch", "engagement_pct", "engagement_score", "sheet_status_raw", "payment_date_parsed"] if c in related_df.columns]
             st.dataframe(related_df[record_cols].sort_values(["source_sheet", "Batch"]), use_container_width=True, height=250, key=f"profile_records_{i}")
+        else:
+            type_df = pd.DataFrame()
+            timeline = pd.DataFrame()
+
+        pdf_payloads.append({
+            "title": clean_text(master.get("student_name", "")),
+            "subtitle": f"{clean_text(master.get('Program', ''))} | {clean_text(master.get('Batch', ''))} | Status: {clean_text(master.get('resolved_status', ''))}",
+            "metrics": {
+                "Total So Far": total_events,
+                "First 30 Days": first30_count,
+                "After Paid": after_paid_count if clean_text(master.get("resolved_status", "")).lower() == "admitted" else 0,
+                "T-7": t7_count if clean_text(master.get("resolved_status", "")).lower() == "admitted" else 0,
+                "T+7": tp7_count if clean_text(master.get("resolved_status", "")).lower() == "admitted" else 0,
+            },
+            "info": master_display,
+            "t7_info": {
+                "Payment Date": format_date_display(pay_dt),
+                "Offered Date": format_date_display(offered_dt),
+                "Deadline": format_date_display(deadline_dt),
+                "Community Status": batch_comm if batch_comm else "—",
+            },
+            "type_df": type_df if 'type_df' in locals() else pd.DataFrame(),
+            "timeline_df": timeline if 'timeline' in locals() else pd.DataFrame(),
+            "events_df": profile_event_df if not profile_event_df.empty else pd.DataFrame(),
+            "payment_date": pay_dt,
+        })
+
+    if pdf_payloads:
+        pdf_bytes = create_student_profiles_pdf(pdf_payloads)
+        if pdf_bytes:
+            label = "Download Student Profile PDF" if len(pdf_payloads) == 1 else "Download Selected Student Profiles PDF"
+            st.download_button(label, data=pdf_bytes, file_name="student_profiles.pdf", mime="application/pdf", key="student_profile_pdf_download")
+
 
 
 def render_program_page(title, sheets, data, page_prefix):
