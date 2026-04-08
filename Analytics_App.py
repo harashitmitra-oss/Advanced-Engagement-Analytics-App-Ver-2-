@@ -2306,13 +2306,19 @@ def build_count_distribution(series: pd.Series):
     return dist_df, at_least_one
 
 
-def summarize_event_types(events_df: pd.DataFrame, flag_col: str):
-    cols = ["Event Type", "Student Count", "Attendance Hits", "Event Occurrences", "Attendance % of Done Activities"]
+def summarize_event_types(events_df: pd.DataFrame, flag_col: str, eligible_students: int | None = None):
+    cols = [
+        "Event Type", "Student Count", "Attendance Hits", "Event Occurrences",
+        "Avg Attendance per Occurrence", "Unique Student Reach %", "Repeat Pull", "Performance Score"
+    ]
     if events_df.empty or flag_col not in events_df.columns:
         return pd.DataFrame(columns=cols)
     frame = events_df[events_df[flag_col]].copy()
     if frame.empty:
         return pd.DataFrame(columns=cols)
+    eligible = int(eligible_students if eligible_students is not None else frame["student_name"].nunique())
+    if eligible <= 0:
+        eligible = int(frame["student_name"].nunique())
     out = frame.groupby("event_type", as_index=False).agg(
         **{
             "Student Count": ("student_name", "nunique"),
@@ -2320,9 +2326,36 @@ def summarize_event_types(events_df: pd.DataFrame, flag_col: str):
             "Event Occurrences": ("occurrence_key", "nunique"),
         }
     ).rename(columns={"event_type": "Event Type"})
-    total_done = float(out["Attendance Hits"].sum())
-    out["Attendance % of Done Activities"] = np.where(total_done > 0, out["Attendance Hits"] / total_done * 100, 0.0)
-    return out.sort_values(["Attendance % of Done Activities", "Attendance Hits", "Student Count"], ascending=[False, False, False]).reset_index(drop=True)
+    out["Avg Attendance per Occurrence"] = np.where(
+        out["Event Occurrences"] > 0,
+        out["Attendance Hits"] / out["Event Occurrences"],
+        0.0,
+    )
+    out["Unique Student Reach %"] = np.where(
+        eligible > 0,
+        out["Student Count"] / eligible * 100,
+        0.0,
+    )
+    out["Repeat Pull"] = np.where(
+        out["Student Count"] > 0,
+        out["Attendance Hits"] / out["Student Count"],
+        0.0,
+    )
+    score_components = [
+        ("Avg Attendance per Occurrence", 0.5),
+        ("Unique Student Reach %", 0.3),
+        ("Repeat Pull", 0.2),
+    ]
+    score = 0
+    for col, weight in score_components:
+        max_val = float(out[col].max()) if not out.empty else 0.0
+        norm = (out[col] / max_val) if max_val > 0 else 0.0
+        score = score + weight * norm
+    out["Performance Score"] = score * 100
+    return out.sort_values(
+        ["Performance Score", "Avg Attendance per Occurrence", "Unique Student Reach %", "Repeat Pull", "Attendance Hits"],
+        ascending=[False, False, False, False, False],
+    ).reset_index(drop=True)
 
 
 def render_distribution_block(title: str, series: pd.Series, key_prefix: str):
@@ -2345,8 +2378,8 @@ def render_distribution_block(title: str, series: pd.Series, key_prefix: str):
         st.dataframe(dist_df, use_container_width=True, height=260, key=f"{key_prefix}_disttable")
 
 
-def render_event_type_block(title: str, events_df: pd.DataFrame, flag_col: str, key_prefix: str):
-    summary = summarize_event_types(events_df, flag_col)
+def render_event_type_block(title: str, events_df: pd.DataFrame, flag_col: str, key_prefix: str, eligible_students: int | None = None):
+    summary = summarize_event_types(events_df, flag_col, eligible_students=eligible_students)
     st.markdown(f"#### {title}")
     if summary.empty:
         st.info(f"No event-type attendance found for {title}.")
@@ -2354,12 +2387,26 @@ def render_event_type_block(title: str, events_df: pd.DataFrame, flag_col: str, 
     top_row = summary.iloc[0]
     low_row = summary.iloc[-1]
     c1, c2 = st.columns(2)
-    c1.metric("Highest Attended Event Type", top_row["Event Type"], delta=f"{float(top_row['Attendance % of Done Activities']):.1f}% of done activities")
-    c2.metric("Least Attended Event Type", low_row["Event Type"], delta=f"{float(low_row['Attendance % of Done Activities']):.1f}% of done activities")
+    c1.metric(
+        "Best Performing Event Type",
+        top_row["Event Type"],
+        delta=f"Score {float(top_row['Performance Score']):.1f} | Avg/Occ {float(top_row['Avg Attendance per Occurrence']):.2f}"
+    )
+    c2.metric(
+        "Lowest Performing Event Type",
+        low_row["Event Type"],
+        delta=f"Score {float(low_row['Performance Score']):.1f} | Avg/Occ {float(low_row['Avg Attendance per Occurrence']):.2f}"
+    )
     v1, v2 = st.columns([1.35, 1])
     with v1:
         plot_df = summary.head(12).copy()
-        fig = px.bar(plot_df, x="Event Type", y="Attendance % of Done Activities", hover_data=["Student Count", "Attendance Hits", "Event Occurrences"], title=f"Event Type Attendance % · {title}")
+        fig = px.bar(
+            plot_df,
+            x="Event Type",
+            y="Performance Score",
+            hover_data=["Student Count", "Attendance Hits", "Event Occurrences", "Avg Attendance per Occurrence", "Unique Student Reach %", "Repeat Pull"],
+            title=f"Event Type Performance Score · {title}"
+        )
         fig.update_traces(marker_color=GREEN_2)
         st.plotly_chart(nice_layout(fig, height=340, x_tickangle=-25), use_container_width=True, key=f"{key_prefix}_etypeplot")
     with v2:
@@ -2382,19 +2429,19 @@ def render_retention_page(data):
     k3.metric("PG", f"{pg_total:,}")
 
     render_distribution_block("First 30 Days", summary_df["first30_count"], "ret_first30")
-    render_event_type_block("First 30 Days Event Type Attendance", events_df, "in_first30", "ret_first30")
+    render_event_type_block("First 30 Days Event Type Performance", events_df, "in_first30", "ret_first30", eligible_students=total)
 
     render_distribution_block("T-7", summary_df["tminus7_count"], "ret_tminus7")
-    render_event_type_block("T-7 Event Type Attendance", events_df, "in_tminus7", "ret_tminus7")
+    render_event_type_block("T-7 Event Type Performance", events_df, "in_tminus7", "ret_tminus7", eligible_students=total)
 
     render_distribution_block("T+7", summary_df["tplus7_count"], "ret_tplus7")
-    render_event_type_block("T+7 Event Type Attendance", events_df, "in_tplus7", "ret_tplus7")
+    render_event_type_block("T+7 Event Type Performance", events_df, "in_tplus7", "ret_tplus7", eligible_students=total)
 
     render_distribution_block("Post Payment Journey", summary_df["post_payment_count"], "ret_post")
     c1, c2 = st.columns(2)
     c1.metric("Students Active Post Payment", f"{int((summary_df['post_payment_count'] >= 1).sum()):,}")
     c2.metric("Students with 0 Post Payment Activities", f"{int((summary_df['post_payment_count'] == 0).sum()):,}")
-    render_event_type_block("Post Payment Journey Event Type Attendance", events_df, "post_payment", "ret_post")
+    render_event_type_block("Post Payment Journey Event Type Performance", events_df, "post_payment", "ret_post", eligible_students=total)
 def render_tetrx_page(data):
     st.subheader("Tetr-X")
     available = [s for s in TX_SHEETS if s in data["activities"]]
