@@ -197,6 +197,17 @@ def normalize_yes_no(x):
     return 1 if s in {"yes", "y", "1", "true", "present", "attended", "done"} else 0
 
 
+def map_profile_plot_event_type(event_type: str) -> str:
+    s = clean_text(event_type).strip().lower()
+    if s in {"general", "poll", "fun", "fun task"}:
+        return "General / Poll / Fun / Fun Task"
+    if s in {"competition", "hackathon"}:
+        return "Competition / Hackathon"
+    if s in {"masterclass", "skill bootcamp"}:
+        return "Masterclass / Skill Bootcamp"
+    return clean_text(event_type) or "Other"
+
+
 def normalize_community_status(x):
     s = clean_text(x).strip().lower()
     if s in {"tetr x", "tetrx", "added to term 0"}:
@@ -1556,13 +1567,17 @@ def render_student_profile(data):
                 total = type_df["count"].sum()
                 type_df["percentage"] = np.where(total > 0, type_df["count"] / total * 100, 0)
 
+                plot_type_df = type_df.copy()
+                plot_type_df["plot_event_type"] = plot_type_df["event_type"].apply(map_profile_plot_event_type)
+                plot_type_df = plot_type_df.groupby("plot_event_type", as_index=False)["count"].sum().sort_values("count", ascending=False)
+
                 x1, x2 = st.columns(2)
                 with x1:
-                    fig = px.bar(type_df, x="event_type", y="count", title="Event Type Participation")
+                    fig = px.bar(plot_type_df, x="plot_event_type", y="count", title="Event Type Participation")
                     fig.update_traces(marker_color=GREEN_2)
                     st.plotly_chart(nice_layout(fig, height=340, x_tickangle=-25), use_container_width=True, key=f"profile_type_bar_{i}")
                 with x2:
-                    fig = px.pie(type_df, names="event_type", values="count", hole=0.58, title="Event Type % Share")
+                    fig = px.pie(plot_type_df, names="plot_event_type", values="count", hole=0.58, title="Event Type % Share")
                     st.plotly_chart(nice_layout(fig, height=340), use_container_width=True, key=f"profile_type_pie_{i}")
 
                 timeline = profile_event_df.dropna(subset=["event_date"]).sort_values("event_date")
