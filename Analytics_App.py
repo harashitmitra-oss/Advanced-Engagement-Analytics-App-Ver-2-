@@ -27,6 +27,7 @@ UG_BATCH_SHEETS = ["UG - B1 to B4", "UG B5", "UG B6", "UG B7", "UG B8", "UG B9",
 PG_BATCH_SHEETS = ["PG - B1 & B2", "PG - B3 & B4", "PG B5"]
 TX_SHEETS = ["Tetr-X-UG", "Tetr-X-PG"]
 DATES_SHEET = "Dates"
+WINNER_SHEET = "Winner"
 ALL_REQUIRED = MASTER_SHEETS + UG_BATCH_SHEETS + PG_BATCH_SHEETS + TX_SHEETS
 
 GREEN = "#0b3d2e"
@@ -548,6 +549,51 @@ def find_student_dates_row(dates_df: pd.DataFrame, student_name: str, email_key:
     cand = cand.sort_values(["offered_date_parsed", "deadline_parsed"], na_position="last")
     return cand.iloc[0] if not cand.empty else None
 
+def parse_winner_sheet(raw: pd.DataFrame):
+    if raw is None or raw.empty:
+        return pd.DataFrame(columns=[
+            "challenge_name", "winner_name", "student_key", "email_key", "batch_key",
+            "amount_usd", "entry_type", "is_winner", "is_spotlight"
+        ])
+
+    header_row = 0
+    df = raw.iloc[1:].copy().reset_index(drop=True)
+    df.columns = make_unique(raw.iloc[header_row].tolist())
+    df = df.dropna(how="all")
+
+    challenge_col = next((c for c in df.columns if "challenge" in clean_text(c).lower()), None)
+    winner_name_col = next((c for c in df.columns if "winner name" in clean_text(c).lower()), None)
+    email_col = next((c for c in df.columns if "email" in clean_text(c).lower()), None)
+    batch_col = next((c for c in df.columns if "batch" in clean_text(c).lower()), None)
+    amount_col = next((c for c in df.columns if "amount" in clean_text(c).lower() and "usd" in clean_text(c).lower()), None)
+    type_col = next((c for c in df.columns if "winner/spotlight" in clean_text(c).lower()), None)
+
+    if winner_name_col is None and email_col is None:
+        return pd.DataFrame(columns=[
+            "challenge_name", "winner_name", "student_key", "email_key", "batch_key",
+            "amount_usd", "entry_type", "is_winner", "is_spotlight"
+        ])
+
+    out = pd.DataFrame()
+    out["challenge_name"] = df[challenge_col].map(clean_text) if challenge_col else ""
+    out["winner_name"] = df[winner_name_col].map(clean_text) if winner_name_col else ""
+    out["student_key"] = out["winner_name"].map(normalize_name)
+    out["email_key"] = df[email_col].map(normalize_email) if email_col else ""
+    out["batch_key"] = df[batch_col].map(normalize_batch_token) if batch_col else ""
+    if amount_col:
+        amt = df[amount_col].astype(str).str.replace(",", "", regex=False).str.extract(r'([-+]?\d*\.?\d+)')[0]
+        out["amount_usd"] = pd.to_numeric(amt, errors="coerce").fillna(0.0)
+    else:
+        out["amount_usd"] = 0.0
+    out["entry_type"] = df[type_col].map(clean_text) if type_col else ""
+    out["is_winner"] = out["entry_type"].astype(str).str.lower().eq("winner")
+    out["is_spotlight"] = out["entry_type"].astype(str).str.lower().eq("spotlight")
+
+    out = out[(out["winner_name"].apply(is_valid_student_name)) | (out["email_key"].astype(str).str.len() > 3)].copy()
+    out = out[out["challenge_name"].astype(str).str.strip().ne("") | out["is_winner"] | out["is_spotlight"]].copy()
+    return out.reset_index(drop=True)
+
+
 def parse_master_sheet(raw: pd.DataFrame, program: str, sheet_name: str):
     header_row = 0
     data_start = 3
@@ -844,6 +890,7 @@ def load_dashboard_data(source_mode: str, spreadsheet_id=None, file_bytes=None):
     masters, master_ctx = {}, {}
     activities, activity_ctx = {}, {}
     dates_df = pd.DataFrame()
+    winner_df = pd.DataFrame()
 
     for sheet in MASTER_SHEETS:
         if sheet in sheet_names:
@@ -858,6 +905,10 @@ def load_dashboard_data(source_mode: str, spreadsheet_id=None, file_bytes=None):
     if DATES_SHEET in sheet_names:
         raw = load_raw_sheet(source_mode, DATES_SHEET, spreadsheet_id, file_bytes)
         dates_df = parse_dates_sheet(raw)
+
+    if WINNER_SHEET in sheet_names:
+        raw = load_raw_sheet(source_mode, WINNER_SHEET, spreadsheet_id, file_bytes)
+        winner_df = parse_winner_sheet(raw)
 
     tx_df = pd.concat([activities[s] for s in TX_SHEETS if s in activities], ignore_index=True) if any(s in activities for s in TX_SHEETS) else pd.DataFrame()
     if not tx_df.empty:
@@ -898,6 +949,7 @@ def load_dashboard_data(source_mode: str, spreadsheet_id=None, file_bytes=None):
         "profile_df": profile_df,
         "tx_df": tx_df,
         "dates_df": dates_df,
+        "winner_df": winner_df,
     }
 
 
@@ -1482,6 +1534,25 @@ def render_student_profile(data):
                 related.append(part)
         related_df = pd.concat(related, ignore_index=True) if related else pd.DataFrame()
 
+
+        winner_df = data.get("winner_df", pd.DataFrame())
+        student_wins = pd.DataFrame()
+        if winner_df is not None and not winner_df.empty:
+            wmask = pd.Series(False, index=winner_df.index)
+            if email_key and "email_key" in winner_df.columns:
+                wmask = wmask | winner_df["email_key"].astype(str).eq(email_key)
+            if name_key and "student_key" in winner_df.columns:
+                wmask = wmask | winner_df["student_key"].astype(str).eq(name_key)
+            if master.get("Batch", "") and "batch_key" in winner_df.columns:
+                batch_key = normalize_batch_token(master.get("Batch", ""))
+                narrowed = winner_df.loc[wmask & winner_df["batch_key"].astype(str).eq(batch_key)].copy()
+                if not narrowed.empty:
+                    student_wins = narrowed
+                else:
+                    student_wins = winner_df.loc[wmask].copy()
+            else:
+                student_wins = winner_df.loc[wmask].copy()
+
         batch_only_df = related_df[~related_df["source_sheet"].isin(TX_SHEETS)].copy() if not related_df.empty and "source_sheet" in related_df.columns else pd.DataFrame()
         batch_comm = ""
         if not batch_only_df.empty and "community_status_value" in batch_only_df.columns:
@@ -1534,7 +1605,29 @@ def render_student_profile(data):
         after_paid_count = int(profile_event_df.loc[profile_event_df["after_paid"], "dedupe_key"].nunique()) if (not profile_event_df.empty and pd.notna(pay_dt)) else 0
         t7_count = int(stu_window.loc[stu_window["window"] == "T-7 to T-1", "dedupe_key"].nunique()) if not stu_window.empty else 0
         tp7_count = int(stu_window.loc[stu_window["window"] == "T+1 to T+7", "dedupe_key"].nunique()) if not stu_window.empty else 0
+
         total_events = int(profile_event_df["dedupe_key"].nunique()) if not profile_event_df.empty else 0
+
+        if student_wins is not None and not student_wins.empty:
+            winner_rows = student_wins[student_wins["is_winner"]].copy() if "is_winner" in student_wins.columns else pd.DataFrame()
+            spotlight_rows = student_wins[student_wins["is_spotlight"]].copy() if "is_spotlight" in student_wins.columns else pd.DataFrame()
+            winner_count = int(len(winner_rows))
+            total_money_won = float(winner_rows.get("amount_usd", pd.Series(dtype=float)).fillna(0).sum()) if not winner_rows.empty else 0.0
+            winner_challenges = ", ".join(sorted(dict.fromkeys([clean_text(x) for x in winner_rows.get("challenge_name", pd.Series(dtype=str)).tolist() if clean_text(x)])))
+            spotlight_count = int(len(spotlight_rows))
+            spotlight_challenges = ", ".join(sorted(dict.fromkeys([clean_text(x) for x in spotlight_rows.get("challenge_name", pd.Series(dtype=str)).tolist() if clean_text(x)])))
+            wc1, wc2, wc3, wc4 = st.columns(4)
+            wc1.metric("Winner Count", winner_count)
+            wc2.metric("Total Money Won (USD)", f"{total_money_won:,.0f}" if abs(total_money_won - round(total_money_won)) < 1e-9 else f"{total_money_won:,.2f}")
+            wc3.metric("Spotlight Count", spotlight_count)
+            wc4.metric("Recognition Entries", winner_count + spotlight_count)
+            win_info = []
+            if winner_challenges:
+                win_info.append({"Field": "Winner Challenges", "Value": winner_challenges})
+            if spotlight_challenges:
+                win_info.append({"Field": "Spotlight Challenges", "Value": spotlight_challenges})
+            if win_info:
+                st.dataframe(pd.DataFrame(win_info), use_container_width=True, hide_index=True, key=f"profile_winner_info_{i}")
 
         c1, c2 = st.columns([1.2, 1])
         with c1:
@@ -1552,6 +1645,14 @@ def render_student_profile(data):
                 "Deadline": format_date_display(deadline_dt),
                 "Community Status (Batch)": batch_comm,
             }
+            if student_wins is not None and not student_wins.empty:
+                winner_rows = student_wins[student_wins["is_winner"]].copy() if "is_winner" in student_wins.columns else pd.DataFrame()
+                spotlight_rows = student_wins[student_wins["is_spotlight"]].copy() if "is_spotlight" in student_wins.columns else pd.DataFrame()
+                master_display["Winner Count"] = int(len(winner_rows))
+                master_display["Total Money Won (USD)"] = float(winner_rows.get("amount_usd", pd.Series(dtype=float)).fillna(0).sum()) if not winner_rows.empty else 0.0
+                master_display["Winner Challenges"] = ", ".join(sorted(dict.fromkeys([clean_text(x) for x in winner_rows.get("challenge_name", pd.Series(dtype=str)).tolist() if clean_text(x)])))
+                master_display["Spotlight Count"] = int(len(spotlight_rows))
+                master_display["Spotlight Challenges"] = ", ".join(sorted(dict.fromkeys([clean_text(x) for x in spotlight_rows.get("challenge_name", pd.Series(dtype=str)).tolist() if clean_text(x)])))
             st.dataframe(pd.DataFrame(master_display.items(), columns=["Field", "Value"]), use_container_width=True, hide_index=True, key=f"profile_info_{i}")
         with c2:
             r1a, r1b = st.columns(2)
