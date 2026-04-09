@@ -200,11 +200,13 @@ def normalize_yes_no(x):
 def map_profile_plot_event_type(event_type: str) -> str:
     s = clean_text(event_type).strip().lower()
     if s in {"general", "poll", "fun", "fun task"}:
-        return "General"
+        return "General/Fun"
     if s in {"competition", "hackathon"}:
-        return "Competition"
+        return "Competitions"
     if s in {"masterclass", "skill bootcamp"}:
-        return "Masterclass"
+        return "Masterclasses"
+    if s == "online event":
+        return "Online AMAs"
     return clean_text(event_type) or "Other"
 
 
