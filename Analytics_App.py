@@ -1635,14 +1635,58 @@ def render_student_profile(data):
 
 
 
+
+
+def build_combined_activity_context(sheets, data):
+    available = [s for s in sheets if s in data.get("activities", {}) and not data["activities"][s].empty]
+    if not available:
+        return pd.DataFrame(), {"event_info": pd.DataFrame(columns=["column_name", "event_name", "event_type", "event_date", "sheet"]), "country_col": None}
+
+    frames = [data["activities"][s] for s in available]
+    combined_df = pd.concat(frames, ignore_index=True, sort=False)
+
+    event_infos = []
+    country_col = None
+    for s in available:
+        ctx = data.get("activity_ctx", {}).get(s, {})
+        ei = ctx.get("event_info", pd.DataFrame())
+        if ei is not None and not ei.empty:
+            event_infos.append(ei.copy())
+        if country_col is None and ctx.get("country_col"):
+            country_col = ctx.get("country_col")
+
+    if event_infos:
+        combined_event_info = pd.concat(event_infos, ignore_index=True, sort=False)
+        if "column_name" in combined_event_info.columns:
+            combined_event_info = combined_event_info.drop_duplicates(subset=["column_name"]).reset_index(drop=True)
+    else:
+        combined_event_info = pd.DataFrame(columns=["column_name", "event_name", "event_type", "event_date", "sheet"])
+
+    combined_ctx = {
+        "event_info": combined_event_info,
+        "country_col": country_col,
+    }
+    return combined_df, combined_ctx
+
+
+def render_combined_program_section(title, sheets, data, prefix):
+    combined_df, combined_ctx = build_combined_activity_context(sheets, data)
+    if combined_df.empty:
+        st.warning(f"No data available for {title}.")
+        return
+    render_sheet_detail(title, combined_df, combined_ctx, prefix, data=data)
 def render_program_page(title, sheets, data, page_prefix):
     st.subheader(title)
     available = [s for s in sheets if s in data["activities"]]
     if not available:
         st.warning("No sheets available for this section.")
         return
-    tabs = st.tabs(available)
-    for tab, sheet in zip(tabs, available):
+    combined_label = f"All {title}"
+    tab_labels = [combined_label] + available
+    tabs = st.tabs(tab_labels)
+    with tabs[0]:
+        render_combined_program_section(combined_label, sheets, data, f"{page_prefix}_combined")
+    for tab, sheet in zip(tabs[1:], available):
         with tab:
             render_sheet_detail(sheet, data["activities"][sheet], data["activity_ctx"][sheet], f"{page_prefix}_{sheet}", data=data)
 
