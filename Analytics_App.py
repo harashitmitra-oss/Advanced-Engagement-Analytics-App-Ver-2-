@@ -1644,28 +1644,26 @@ def render_student_profile(data):
         admitted_flag = clean_text(master.get("resolved_status", "")).lower() == "admitted"
         with c2:
             stat_row_1 = st.columns(3)
-            stat_row_1[0].metric("Total Participations So Far", total_events)
-            stat_row_1[1].metric("Total Participation in First 30 Days", first30_count)
-            stat_row_1[2].metric("Total Participation After Admitted/Paid", after_paid_count if admitted_flag else 0)
+            stat_row_1[0].metric("Total Participation", total_events)
+            stat_row_1[1].metric("First 30 Days", first30_count)
+            stat_row_1[2].metric("After Payment", after_paid_count if admitted_flag else 0)
 
             stat_row_2 = st.columns(2)
             stat_row_2[0].metric("T-7 Count", t7_count if admitted_flag else 0)
             stat_row_2[1].metric("T+7 Count", tp7_count if admitted_flag else 0)
 
-            has_winner_section = (winner_count > 0) or (spotlight_count > 0) or (abs(total_money_won) > 1e-9)
-            if has_winner_section:
-                stat_row_3 = st.columns(3)
-                stat_row_3[0].metric("Winner", winner_count)
-                stat_row_3[1].metric("Total Money Won (USD)", f"{total_money_won:,.0f}" if abs(total_money_won - round(total_money_won)) < 1e-9 else f"{total_money_won:,.2f}")
-                stat_row_3[2].metric("Spotlight", spotlight_count)
+            stat_row_3 = st.columns(3)
+            stat_row_3[0].metric("Winner", winner_count)
+            stat_row_3[1].metric("Shoutout", spotlight_count)
+            stat_row_3[2].metric("Money Won (USD)", f"{total_money_won:,.0f}" if abs(total_money_won - round(total_money_won)) < 1e-9 else f"{total_money_won:,.2f}")
 
-                win_info = []
-                if winner_challenges:
-                    win_info.append({"Field": "Winner Challenges", "Value": winner_challenges})
-                if spotlight_challenges:
-                    win_info.append({"Field": "Spotlight Challenges", "Value": spotlight_challenges})
-                if win_info:
-                    st.dataframe(pd.DataFrame(win_info), use_container_width=True, hide_index=True, key=f"profile_winner_info_{i}")
+            win_info = []
+            if winner_challenges:
+                win_info.append({"Field": "Winner Challenges", "Value": winner_challenges})
+            if spotlight_challenges:
+                win_info.append({"Field": "Spotlight Challenges", "Value": spotlight_challenges})
+            if win_info:
+                st.dataframe(pd.DataFrame(win_info), use_container_width=True, hide_index=True, key=f"profile_winner_info_{i}")
 
         if not related_df.empty:
             if not profile_event_df.empty:
