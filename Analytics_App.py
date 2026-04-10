@@ -1603,7 +1603,7 @@ def render_student_profile(data):
 
         first30_count = int(profile_event_df.loc[profile_event_df["in_first30"], "dedupe_key"].nunique()) if not profile_event_df.empty else 0
         after_paid_count = int(profile_event_df.loc[profile_event_df["after_paid"], "dedupe_key"].nunique()) if (not profile_event_df.empty and pd.notna(pay_dt)) else 0
-        t7_count = int(stu_window.loc[stu_window["window"] == "T-7 to T-1", "dedupe_key"].nunique()) if not stu_window.empty else 0
+        t7_count = int(stu_window.loc[stu_window["window"] == "T-7 to T", "dedupe_key"].nunique()) if not stu_window.empty else 0
         tp7_count = int(stu_window.loc[stu_window["window"] == "T+1 to T+7", "dedupe_key"].nunique()) if not stu_window.empty else 0
 
         total_events = int(profile_event_df["dedupe_key"].nunique()) if not profile_event_df.empty else 0
@@ -1698,7 +1698,7 @@ def render_student_profile(data):
                 if clean_text(master.get("resolved_status", "")).lower() == "admitted" and not stu_window.empty:
                     st.markdown("#### T-7 & T+7 Attendance")
                     detail_rows = []
-                    for label in ["T-7 to T-1", "T+1 to T+7"]:
+                    for label in ["T-7 to T", "T+1 to T+7"]:
                         partw = stu_window[stu_window["window"] == label].copy()
                         detail_rows.append({
                             "Window": label,
@@ -1972,8 +1972,8 @@ def build_t7_event_window_data(data):
                         continue
                     ev_date = ev_date.normalize()
                     delta = (ev_date - pay_dt).days
-                    if -7 <= delta <= -1:
-                        window = "T-7 to T-1"
+                    if -7 <= delta <= 0:
+                        window = "T-7 to T"
                     elif 1 <= delta <= 7:
                         window = "T+1 to T+7"
                     else:
@@ -2116,7 +2116,7 @@ def build_t7_student_summary_table(data):
                                       (source_group == "tetrx" and ev_date >= pay_dt))
                     # T+7 logic: both batch and tetrx after payment, merged later
                     in_tplus7 = 0 <= delta <= 7
-                    in_tminus7 = source_group == "batch" and -7 <= delta <= -1
+                    in_tminus7 = source_group == "batch" and -7 <= delta <= 0
                     if not (in_total30 or in_tplus7 or in_tminus7):
                         continue
                     ev_name = clean_text(ev.get("event_name", "")) or clean_text(col)
@@ -2204,7 +2204,7 @@ def render_t7_analysis_page(data):
 
     k1, k2, k3 = st.columns(3)
     k1.metric("Admitted Students", f"{admitted_total:,}")
-    k2.metric("Students with T-7 Activity", f"{int(window_df.loc[window_df['window'] == 'T-7 to T-1', 'student_name'].nunique()) if not window_df.empty else 0:,}")
+    k2.metric("Students with T-7 Activity", f"{int(window_df.loc[window_df['window'] == 'T-7 to T', 'student_name'].nunique()) if not window_df.empty else 0:,}")
     k3.metric("Students with T+7 Activity", f"{int(window_df.loc[window_df['window'] == 'T+1 to T+7', 'student_name'].nunique()) if not window_df.empty else 0:,}")
 
     if window_df.empty:
@@ -2257,7 +2257,7 @@ def render_t7_analysis_page(data):
             event_names=("event_name", lambda s: ", ".join(sorted(dict.fromkeys([clean_text(x) for x in s if clean_text(x)]))))
         )
     )
-    before = student_window[student_window["window"] == "T-7 to T-1"][["student_name", "program", "payment_date", "event_count", "event_names"]].rename(columns={"event_count": "T-7 Count", "event_names": "T-7 Events"})
+    before = student_window[student_window["window"] == "T-7 to T"][["student_name", "program", "payment_date", "event_count", "event_names"]].rename(columns={"event_count": "T-7 Count", "event_names": "T-7 Events"})
     after = student_window[student_window["window"] == "T+1 to T+7"][["student_name", "program", "payment_date", "event_count", "event_names"]].rename(columns={"event_count": "T+7 Count", "event_names": "T+7 Events"})
     student_view = admitted_df[["student_name", "Program", "resolved_payment_date"]].drop_duplicates().rename(columns={"Program": "program", "resolved_payment_date": "payment_date"})
     student_view = student_view.merge(before, on=["student_name", "program", "payment_date"], how="left")
@@ -2388,7 +2388,7 @@ def build_retention_data(data):
                     in_first30 = False
                     if pd.notna(offered_dt) and pd.notna(deadline_dt) and offered_dt.normalize() <= ev_date <= deadline_dt.normalize():
                         in_first30 = ((source_group == "batch" and ev_date < pay_dt) or (source_group == "tetrx" and ev_date >= pay_dt))
-                    in_tminus7 = source_group == "batch" and -7 <= delta <= -1
+                    in_tminus7 = source_group == "batch" and -7 <= delta <= 0
                     in_tplus7 = 0 <= delta <= 7
                     post_payment = ev_date >= pay_dt
                     if not (in_first30 or in_tminus7 or in_tplus7 or post_payment):
