@@ -1608,6 +1608,13 @@ def render_student_profile(data):
 
         total_events = int(profile_event_df["dedupe_key"].nunique()) if not profile_event_df.empty else 0
 
+        winner_rows = pd.DataFrame()
+        spotlight_rows = pd.DataFrame()
+        winner_count = 0
+        total_money_won = 0.0
+        winner_challenges = ""
+        spotlight_count = 0
+        spotlight_challenges = ""
         if student_wins is not None and not student_wins.empty:
             winner_rows = student_wins[student_wins["is_winner"]].copy() if "is_winner" in student_wins.columns else pd.DataFrame()
             spotlight_rows = student_wins[student_wins["is_spotlight"]].copy() if "is_spotlight" in student_wins.columns else pd.DataFrame()
@@ -1616,18 +1623,6 @@ def render_student_profile(data):
             winner_challenges = ", ".join(sorted(dict.fromkeys([clean_text(x) for x in winner_rows.get("challenge_name", pd.Series(dtype=str)).tolist() if clean_text(x)])))
             spotlight_count = int(len(spotlight_rows))
             spotlight_challenges = ", ".join(sorted(dict.fromkeys([clean_text(x) for x in spotlight_rows.get("challenge_name", pd.Series(dtype=str)).tolist() if clean_text(x)])))
-            wc1, wc2, wc3, wc4 = st.columns(4)
-            wc1.metric("Winner Count", winner_count)
-            wc2.metric("Total Money Won (USD)", f"{total_money_won:,.0f}" if abs(total_money_won - round(total_money_won)) < 1e-9 else f"{total_money_won:,.2f}")
-            wc3.metric("Spotlight Count", spotlight_count)
-            wc4.metric("Recognition Entries", winner_count + spotlight_count)
-            win_info = []
-            if winner_challenges:
-                win_info.append({"Field": "Winner Challenges", "Value": winner_challenges})
-            if spotlight_challenges:
-                win_info.append({"Field": "Spotlight Challenges", "Value": spotlight_challenges})
-            if win_info:
-                st.dataframe(pd.DataFrame(win_info), use_container_width=True, hide_index=True, key=f"profile_winner_info_{i}")
 
         c1, c2 = st.columns([1.2, 1])
         with c1:
@@ -1645,24 +1640,32 @@ def render_student_profile(data):
                 "Deadline": format_date_display(deadline_dt),
                 "Community Status (Batch)": batch_comm,
             }
-            if student_wins is not None and not student_wins.empty:
-                winner_rows = student_wins[student_wins["is_winner"]].copy() if "is_winner" in student_wins.columns else pd.DataFrame()
-                spotlight_rows = student_wins[student_wins["is_spotlight"]].copy() if "is_spotlight" in student_wins.columns else pd.DataFrame()
-                master_display["Winner Count"] = int(len(winner_rows))
-                master_display["Total Money Won (USD)"] = float(winner_rows.get("amount_usd", pd.Series(dtype=float)).fillna(0).sum()) if not winner_rows.empty else 0.0
-                master_display["Winner Challenges"] = ", ".join(sorted(dict.fromkeys([clean_text(x) for x in winner_rows.get("challenge_name", pd.Series(dtype=str)).tolist() if clean_text(x)])))
-                master_display["Spotlight Count"] = int(len(spotlight_rows))
-                master_display["Spotlight Challenges"] = ", ".join(sorted(dict.fromkeys([clean_text(x) for x in spotlight_rows.get("challenge_name", pd.Series(dtype=str)).tolist() if clean_text(x)])))
             st.dataframe(pd.DataFrame(master_display.items(), columns=["Field", "Value"]), use_container_width=True, hide_index=True, key=f"profile_info_{i}")
         with c2:
-            r1a, r1b = st.columns(2)
-            r2a, r2b = st.columns(2)
-            r3a = st.columns(1)[0]
-            r1a.metric("Total Participations So Far", total_events)
-            r1b.metric("Total Participation in First 30 Days", first30_count)
-            r2a.metric("Total Participation After Admitted/Paid", after_paid_count if clean_text(master.get("resolved_status", "")).lower() == "admitted" else 0)
-            r2b.metric("T-7 Count", t7_count if clean_text(master.get("resolved_status", "")).lower() == "admitted" else 0)
-            r3a.metric("T+7 Count", tp7_count if clean_text(master.get("resolved_status", "")).lower() == "admitted" else 0)
+            admitted_flag = clean_text(master.get("resolved_status", "")).lower() == "admitted"
+            top1, top2, top3 = st.columns(3)
+            top1.metric("Total Participations So Far", total_events)
+            top2.metric("Total Participation in First 30 Days", first30_count)
+            top3.metric("Total Participation After Admitted/Paid", after_paid_count if admitted_flag else 0)
+
+            mid1, mid2 = st.columns(2)
+            mid1.metric("T-7 Count", t7_count if admitted_flag else 0)
+            mid2.metric("T+7 Count", tp7_count if admitted_flag else 0)
+
+            if winner_count > 0 or spotlight_count > 0 or abs(total_money_won) > 1e-9:
+                low1, low2, low3 = st.columns(3)
+                low1.metric("Winner", winner_count)
+                low2.metric("Total Money Won (USD)", f"{total_money_won:,.0f}" if abs(total_money_won - round(total_money_won)) < 1e-9 else f"{total_money_won:,.2f}")
+                low3.metric("Spotlight", spotlight_count)
+
+        if winner_count > 0 or spotlight_count > 0:
+            win_info = []
+            if winner_challenges:
+                win_info.append({"Field": "Winner Challenges", "Value": winner_challenges})
+            if spotlight_challenges:
+                win_info.append({"Field": "Spotlight Challenges", "Value": spotlight_challenges})
+            if win_info:
+                st.dataframe(pd.DataFrame(win_info), use_container_width=True, hide_index=True, key=f"profile_winner_info_{i}")
 
         if not related_df.empty:
             if not profile_event_df.empty:
