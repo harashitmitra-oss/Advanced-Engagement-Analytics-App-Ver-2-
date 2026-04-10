@@ -1641,31 +1641,31 @@ def render_student_profile(data):
                 "Community Status (Batch)": batch_comm,
             }
             st.dataframe(pd.DataFrame(master_display.items(), columns=["Field", "Value"]), use_container_width=True, hide_index=True, key=f"profile_info_{i}")
+        admitted_flag = clean_text(master.get("resolved_status", "")).lower() == "admitted"
         with c2:
-            admitted_flag = clean_text(master.get("resolved_status", "")).lower() == "admitted"
-            top1, top2, top3 = st.columns(3)
-            top1.metric("Total Participations So Far", total_events)
-            top2.metric("Total Participation in First 30 Days", first30_count)
-            top3.metric("Total Participation After Admitted/Paid", after_paid_count if admitted_flag else 0)
+            stat_row_1 = st.columns(3)
+            stat_row_1[0].metric("Total Participations So Far", total_events)
+            stat_row_1[1].metric("Total Participation in First 30 Days", first30_count)
+            stat_row_1[2].metric("Total Participation After Admitted/Paid", after_paid_count if admitted_flag else 0)
 
-            mid1, mid2 = st.columns(2)
-            mid1.metric("T-7 Count", t7_count if admitted_flag else 0)
-            mid2.metric("T+7 Count", tp7_count if admitted_flag else 0)
+            stat_row_2 = st.columns(2)
+            stat_row_2[0].metric("T-7 Count", t7_count if admitted_flag else 0)
+            stat_row_2[1].metric("T+7 Count", tp7_count if admitted_flag else 0)
 
-            if winner_count > 0 or spotlight_count > 0 or abs(total_money_won) > 1e-9:
-                low1, low2, low3 = st.columns(3)
-                low1.metric("Winner", winner_count)
-                low2.metric("Total Money Won (USD)", f"{total_money_won:,.0f}" if abs(total_money_won - round(total_money_won)) < 1e-9 else f"{total_money_won:,.2f}")
-                low3.metric("Spotlight", spotlight_count)
+            has_winner_section = (winner_count > 0) or (spotlight_count > 0) or (abs(total_money_won) > 1e-9)
+            if has_winner_section:
+                stat_row_3 = st.columns(3)
+                stat_row_3[0].metric("Winner", winner_count)
+                stat_row_3[1].metric("Total Money Won (USD)", f"{total_money_won:,.0f}" if abs(total_money_won - round(total_money_won)) < 1e-9 else f"{total_money_won:,.2f}")
+                stat_row_3[2].metric("Spotlight", spotlight_count)
 
-        if winner_count > 0 or spotlight_count > 0:
-            win_info = []
-            if winner_challenges:
-                win_info.append({"Field": "Winner Challenges", "Value": winner_challenges})
-            if spotlight_challenges:
-                win_info.append({"Field": "Spotlight Challenges", "Value": spotlight_challenges})
-            if win_info:
-                st.dataframe(pd.DataFrame(win_info), use_container_width=True, hide_index=True, key=f"profile_winner_info_{i}")
+                win_info = []
+                if winner_challenges:
+                    win_info.append({"Field": "Winner Challenges", "Value": winner_challenges})
+                if spotlight_challenges:
+                    win_info.append({"Field": "Spotlight Challenges", "Value": spotlight_challenges})
+                if win_info:
+                    st.dataframe(pd.DataFrame(win_info), use_container_width=True, hide_index=True, key=f"profile_winner_info_{i}")
 
         if not related_df.empty:
             if not profile_event_df.empty:
