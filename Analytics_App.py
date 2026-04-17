@@ -23,8 +23,8 @@ except Exception:
 st.set_page_config(page_title="Tetr Analytics Dashboard", layout="wide")
 
 MASTER_SHEETS = ["Master UG", "Master PG"]
-UG_BATCH_SHEETS = ["UG - B1 to B4", "UG B5", "UG B6", "UG B7", "UG B8", "UG B9", "UG B10", "UG B11","UG B12"]
-PG_BATCH_SHEETS = ["PG - B1 & B2", "PG - B3 & B4", "PG B5","PG B6"]
+UG_BATCH_SHEETS = ["UG - B1 to B4", "UG B5", "UG B6", "UG B7", "UG B8", "UG B9", "UG B10", "UG B11"]
+PG_BATCH_SHEETS = ["PG - B1 & B2", "PG - B3 & B4", "PG B5"]
 TX_SHEETS = ["Tetr-X-UG", "Tetr-X-PG"]
 DATES_SHEET = "Dates"
 WINNER_SHEET = "Winner"
@@ -2641,22 +2641,25 @@ def build_recent_activity_data(data):
     recent_event_rows = []
     batch_student_recent = {}
 
+    def _empty_recent_df():
+        return pd.DataFrame(columns=["student_name", "email_key", "Batch", "Program", "recent_attendance_count", "recent_events"])
+
     batch_sheet_list = [s for s in (UG_BATCH_SHEETS + PG_BATCH_SHEETS) if s in activities and s in activity_ctx]
     for sheet in batch_sheet_list:
         df = activities.get(sheet, pd.DataFrame())
         ctx = activity_ctx.get(sheet, {})
         event_info = ctx.get("event_info", pd.DataFrame())
         if df is None or df.empty or event_info is None or event_info.empty:
-            batch_student_recent[sheet] = df.copy() if df is not None else pd.DataFrame()
+            batch_student_recent[sheet] = _empty_recent_df()
             continue
         recent_events = event_info[event_info["event_date"].notna()].copy()
         if recent_events.empty:
-            batch_student_recent[sheet] = df.copy()
+            batch_student_recent[sheet] = _empty_recent_df()
             continue
         recent_events["event_date"] = pd.to_datetime(recent_events["event_date"], errors="coerce").dt.normalize()
         recent_events = recent_events[recent_events["event_date"].between(start_date, today, inclusive="both")].copy()
         if recent_events.empty:
-            batch_student_recent[sheet] = df.copy()
+            batch_student_recent[sheet] = _empty_recent_df()
             continue
 
         active_rows = []
