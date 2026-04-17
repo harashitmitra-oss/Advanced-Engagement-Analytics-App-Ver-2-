@@ -24,7 +24,7 @@ st.set_page_config(page_title="Tetr Analytics Dashboard", layout="wide")
 
 MASTER_SHEETS = ["Master UG", "Master PG"]
 UG_BATCH_SHEETS = ["UG - B1 to B4", "UG B5", "UG B6", "UG B7", "UG B8", "UG B9", "UG B10", "UG B11","UG B12"]
-PG_BATCH_SHEETS = ["PG - B1 & B2", "PG - B3 & B4", "PG B5", "PG B6"]
+PG_BATCH_SHEETS = ["PG - B1 & B2", "PG - B3 & B4", "PG B5","PG B6"]
 TX_SHEETS = ["Tetr-X-UG", "Tetr-X-PG"]
 DATES_SHEET = "Dates"
 WINNER_SHEET = "Winner"
@@ -2627,13 +2627,220 @@ def render_tetrx_page(data):
             render_sheet_detail(sheet, data["activities"][sheet], data["activity_ctx"][sheet], f"tx_{sheet}", data=data)
 
 
+
+def get_today_ist():
+    return pd.Timestamp.now(tz="Asia/Kolkata").tz_localize(None).normalize()
+
+
+def build_recent_activity_data(data):
+    today = get_today_ist()
+    start_date = today - pd.Timedelta(days=6)
+    activities = data.get("activities", {})
+    activity_ctx = data.get("activity_ctx", {})
+
+    recent_event_rows = []
+    batch_student_recent = {}
+
+    batch_sheet_list = [s for s in (UG_BATCH_SHEETS + PG_BATCH_SHEETS) if s in activities and s in activity_ctx]
+    for sheet in batch_sheet_list:
+        df = activities.get(sheet, pd.DataFrame())
+        ctx = activity_ctx.get(sheet, {})
+        event_info = ctx.get("event_info", pd.DataFrame())
+        if df is None or df.empty or event_info is None or event_info.empty:
+            batch_student_recent[sheet] = df.copy() if df is not None else pd.DataFrame()
+            continue
+        recent_events = event_info[event_info["event_date"].notna()].copy()
+        if recent_events.empty:
+            batch_student_recent[sheet] = df.copy()
+            continue
+        recent_events["event_date"] = pd.to_datetime(recent_events["event_date"], errors="coerce").dt.normalize()
+        recent_events = recent_events[recent_events["event_date"].between(start_date, today, inclusive="both")].copy()
+        if recent_events.empty:
+            batch_student_recent[sheet] = df.copy()
+            continue
+
+        active_rows = []
+        for _, row in df.iterrows():
+            attended_names = []
+            for _, ev in recent_events.iterrows():
+                col = ev.get("column_name")
+                if not col or col not in row.index:
+                    continue
+                attended = pd.to_numeric(pd.Series([row.get(col, 0)]), errors="coerce").fillna(0).iloc[0]
+                if attended > 0:
+                    ev_name = clean_text(ev.get("event_name", "")) or clean_text(col)
+                    ev_type = clean_text(ev.get("event_type", "Other")) or "Other"
+                    ev_date = pd.to_datetime(ev.get("event_date", pd.NaT), errors="coerce")
+                    if pd.notna(ev_date):
+                        attended_names.append(f"{ev_name} ({ev_type}, {ev_date.strftime('%d-%b')})")
+                    else:
+                        attended_names.append(f"{ev_name} ({ev_type})")
+            active_rows.append({
+                "student_name": row.get("student_name", ""),
+                "email_key": row.get("email_key", ""),
+                "Batch": row.get("Batch", infer_batch_group_from_sheet_name(sheet)),
+                "Program": row.get("Program", infer_program_from_sheet(sheet)),
+                "recent_attendance_count": len(attended_names),
+                "recent_events": "; ".join(attended_names),
+            })
+        batch_student_recent[sheet] = pd.DataFrame(active_rows)
+
+        for _, ev in recent_events.iterrows():
+            col = ev.get("column_name")
+            if not col or col not in df.columns:
+                continue
+            attendees = int(pd.to_numeric(df[col], errors="coerce").fillna(0).sum())
+            recent_event_rows.append({
+                "sheet": sheet,
+                "program": infer_program_from_sheet(sheet),
+                "batch": infer_batch_group_from_sheet_name(sheet),
+                "event_name": clean_text(ev.get("event_name", "")) or clean_text(col),
+                "event_type": clean_text(ev.get("event_type", "Other")) or "Other",
+                "event_date": pd.to_datetime(ev.get("event_date", pd.NaT), errors="coerce"),
+                "attendance": attendees,
+            })
+
+    recent_events_df = pd.DataFrame(recent_event_rows)
+
+    recent_payments = []
+    dates_df = data.get("dates_df", pd.DataFrame())
+    tx_frames = []
+    for tx_sheet in TX_SHEETS:
+        tx_df = activities.get(tx_sheet, pd.DataFrame())
+        if tx_df is None or tx_df.empty:
+            continue
+        frame = tx_df.copy()
+        if "sheet_is_paid" in frame.columns:
+            frame = frame[frame["sheet_is_paid"]].copy()
+        else:
+            frame = frame[frame.get("status_value", pd.Series("", index=frame.index)).astype(str).str.strip().str.lower().eq("admitted")].copy()
+        if frame.empty:
+            continue
+        frame["payment_date_recent"] = pd.to_datetime(frame.get("payment_date_parsed", pd.NaT), errors="coerce").dt.normalize()
+        frame = frame[frame["payment_date_recent"].between(start_date, today, inclusive="both")].copy()
+        if frame.empty:
+            continue
+        frame["tx_sheet"] = tx_sheet
+        tx_frames.append(frame)
+
+    if tx_frames:
+        tx_all = pd.concat(tx_frames, ignore_index=True)
+        tx_all["recent_student_id"] = tx_all.apply(lambda r: clean_text(r.get("email_key", "")) or clean_text(r.get("student_key", "")) or normalize_name(r.get("student_name", "")), axis=1)
+        tx_all = tx_all.sort_values(["payment_date_recent", "student_name"]).drop_duplicates(subset=["recent_student_id"], keep="first")
+        for _, stu in tx_all.iterrows():
+            student_name = clean_text(stu.get("student_name", ""))
+            email_key = clean_text(stu.get("email_key", ""))
+            student_key = clean_text(stu.get("student_key", ""))
+            program = clean_text(stu.get("Program", "")) or infer_program_from_sheet(clean_text(stu.get("tx_sheet", "")))
+            batch = clean_text(stu.get("Batch", ""))
+            pay_dt = pd.to_datetime(stu.get("payment_date_recent", pd.NaT), errors="coerce")
+            dates_row = find_student_dates_row(dates_df, student_name, email_key, student_key, program, batch)
+            offered_dt = pd.to_datetime(dates_row.get("offered_date_parsed", pd.NaT), errors="coerce") if dates_row is not None else pd.NaT
+            deadline_dt = pd.to_datetime(dates_row.get("deadline_parsed", pd.NaT), errors="coerce") if dates_row is not None else pd.NaT
+            ev_df = collect_student_profile_events(data, email_key, student_key, student_name, pay_dt=pay_dt, offered_dt=offered_dt, deadline_dt=deadline_dt)
+            if not ev_df.empty:
+                ev_df = ev_df.sort_values(["event_date", "event_name"], na_position="last")
+                ev_disp = ev_df[["event_date", "event_name", "event_type", "source_sheets"]].copy()
+                ev_disp["event_date"] = ev_disp["event_date"].dt.strftime("%d-%b-%Y")
+            else:
+                ev_disp = pd.DataFrame(columns=["event_date", "event_name", "event_type", "source_sheets"])
+            recent_payments.append({
+                "student_name": student_name,
+                "program": program,
+                "batch": batch,
+                "email_key": email_key,
+                "payment_date": pay_dt,
+                "events_df": ev_disp,
+                "total_participation": int(ev_df["dedupe_key"].nunique()) if not ev_df.empty else 0,
+            })
+
+    return {
+        "today": today,
+        "start_date": start_date,
+        "batch_student_recent": batch_student_recent,
+        "recent_events_df": recent_events_df,
+        "recent_payments": recent_payments,
+    }
+
+
+def render_recent_activity_page(data):
+    st.subheader("Recent Activity")
+    recent = build_recent_activity_data(data)
+    today = recent["today"]
+    start_date = recent["start_date"]
+    st.caption(f"Showing activity from {start_date.strftime('%d %b %Y')} to {today.strftime('%d %b %Y')}")
+
+    tabs = st.tabs(["Recent Payments", "Recent Active Students", "Recent Inactive Students", "Recent Events"])
+
+    with tabs[0]:
+        recent_payments = recent.get("recent_payments", [])
+        if not recent_payments:
+            st.info("No admitted/paid students with payment dates in the last 7 days were found.")
+        else:
+            for idx, item in enumerate(recent_payments):
+                st.markdown(f"#### {item['student_name']}")
+                c1, c2, c3, c4 = st.columns(4)
+                c1.metric("Program", item.get("program", ""))
+                c2.metric("Batch", item.get("batch", ""))
+                c3.metric("Payment Date", item['payment_date'].strftime('%d-%b-%Y') if pd.notna(item.get('payment_date', pd.NaT)) else "-")
+                c4.metric("Total Participation", item.get("total_participation", 0))
+                if item["events_df"].empty:
+                    st.info("No attended events were found for this student.")
+                else:
+                    st.dataframe(item["events_df"], use_container_width=True, height=min(320, 80 + 35 * len(item["events_df"])), key=f"recentpay_{idx}")
+                st.markdown("---")
+
+    with tabs[1]:
+        any_active = False
+        for sheet in [s for s in (UG_BATCH_SHEETS + PG_BATCH_SHEETS) if s in recent["batch_student_recent"]]:
+            df = recent["batch_student_recent"][sheet]
+            if df.empty:
+                continue
+            active = df[df["recent_attendance_count"] > 0].copy().sort_values(["recent_attendance_count", "student_name"], ascending=[False, True])
+            if active.empty:
+                continue
+            any_active = True
+            st.markdown(f"#### {sheet}")
+            st.dataframe(active[["student_name", "Program", "Batch", "recent_attendance_count", "recent_events"]], use_container_width=True, height=min(360, 80 + 35 * len(active)), key=f"recentactive_{normalize_name(sheet)}")
+        if not any_active:
+            st.info("No active students were found in recently done events for the last 7 days.")
+
+    with tabs[2]:
+        any_inactive = False
+        for sheet in [s for s in (UG_BATCH_SHEETS + PG_BATCH_SHEETS) if s in recent["batch_student_recent"]]:
+            df = recent["batch_student_recent"][sheet]
+            if df.empty:
+                continue
+            inactive = df[df["recent_attendance_count"] <= 0].copy().sort_values(["student_name"])
+            if inactive.empty:
+                continue
+            any_inactive = True
+            st.markdown(f"#### {sheet}")
+            st.dataframe(inactive[["student_name", "Program", "Batch"]], use_container_width=True, height=min(360, 80 + 35 * len(inactive)), key=f"recentinactive_{normalize_name(sheet)}")
+        if not any_inactive:
+            st.info("No inactive students were found for the last 7 days.")
+
+    with tabs[3]:
+        recent_events_df = recent.get("recent_events_df", pd.DataFrame())
+        if recent_events_df.empty:
+            st.info("No recent events were found in the last 7 days.")
+        else:
+            summary = recent_events_df.groupby(["event_date", "event_name", "event_type", "sheet", "batch", "program"], as_index=False)["attendance"].sum().sort_values(["event_date", "program", "batch", "attendance"], ascending=[False, True, True, False])
+            disp = summary.copy()
+            disp["event_date"] = pd.to_datetime(disp["event_date"], errors="coerce").dt.strftime("%d-%b-%Y")
+            st.dataframe(disp.rename(columns={"event_date": "Date", "event_name": "Event Name", "event_type": "Event Type", "sheet": "Sheet", "batch": "Batch", "program": "UG/PG", "attendance": "Total Attendance"}), use_container_width=True, height=420, key="recentevents_table")
+            chart_df = summary.groupby(["batch"], as_index=False)["attendance"].sum().sort_values("attendance", ascending=False)
+            fig = px.bar(chart_df, x="batch", y="attendance", title="Recent Events Attendance by Batch")
+            fig.update_traces(marker_color=GREEN)
+            st.plotly_chart(nice_layout(fig, height=320), use_container_width=True, key="recentevents_batchchart")
+
 def main():
     cfg = resolve_source()
     render_header(cfg)
 
     with st.sidebar:
         st.markdown("## 🧭 Navigation")
-        default_pages = ["Overview", "Student Profile", "UG", "PG", "UG vs PG", "Tetr-X", "T-7 & T+7 Analysis", "Retention"]
+        default_pages = ["Overview", "Student Profile", "UG", "PG", "UG vs PG", "Tetr-X", "T-7 & T+7 Analysis", "Retention", "Recent Activity"]
         default_index = default_pages.index(st.session_state.get("nav_page", "Overview")) if st.session_state.get("nav_page", "Overview") in default_pages else 0
         page = st.radio("Go to", default_pages, index=default_index, label_visibility="collapsed", key="nav")
         st.session_state["nav_page"] = page
@@ -2671,6 +2878,8 @@ def main():
         render_t7_analysis_page(data)
     elif page == "Retention":
         render_retention_page(data)
+    elif page == "Recent Activity":
+        render_recent_activity_page(data)
 
 
 if __name__ == "__main__":
