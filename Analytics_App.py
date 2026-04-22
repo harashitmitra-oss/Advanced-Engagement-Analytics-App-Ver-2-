@@ -230,6 +230,154 @@ def parse_date_safe(x):
 def get_today_ist():
     return pd.Timestamp.now(tz="Asia/Kolkata").normalize().tz_localize(None)
 
+def build_recent_activity_data(data, start_date=None, end_date=None):
+    today = get_today_ist()
+    if start_date is None or pd.isna(start_date):
+        start_date = today - pd.Timedelta(days=6)
+    else:
+        start_date = pd.to_datetime(start_date, errors="coerce").normalize()
+        if pd.isna(start_date):
+            start_date = today - pd.Timedelta(days=6)
+    if end_date is None or pd.isna(end_date):
+        end_date = today
+    else:
+        end_date = pd.to_datetime(end_date, errors="coerce").normalize()
+        if pd.isna(end_date):
+            end_date = today
+    if start_date > end_date:
+        start_date, end_date = end_date, start_date
+
+    activities = data.get("activities", {})
+    activity_ctx = data.get("activity_ctx", {})
+
+    recent_event_rows = []
+    batch_student_recent = {}
+
+    def _empty_recent_df():
+        return pd.DataFrame(columns=["student_name", "email_key", "Batch", "Program", "recent_attendance_count", "recent_events"])
+
+    batch_sheet_list = [s for s in (UG_BATCH_SHEETS + PG_BATCH_SHEETS) if s in activities and s in activity_ctx]
+    for sheet in batch_sheet_list:
+        df = activities.get(sheet, pd.DataFrame())
+        ctx = activity_ctx.get(sheet, {})
+        event_info = ctx.get("event_info", pd.DataFrame())
+        if df is None or df.empty or event_info is None or event_info.empty:
+            batch_student_recent[sheet] = _empty_recent_df()
+            continue
+        recent_events = event_info[event_info["event_date"].notna()].copy()
+        if recent_events.empty:
+            batch_student_recent[sheet] = _empty_recent_df()
+            continue
+        recent_events["event_date"] = pd.to_datetime(recent_events["event_date"], errors="coerce").dt.normalize()
+        recent_events = recent_events[recent_events["event_date"].between(start_date, end_date, inclusive="both")].copy()
+        if recent_events.empty:
+            batch_student_recent[sheet] = _empty_recent_df()
+            continue
+
+        active_rows = []
+        for _, row in df.iterrows():
+            attended_names = []
+            for _, ev in recent_events.iterrows():
+                col = ev.get("column_name")
+                if not col or col not in row.index:
+                    continue
+                attended = pd.to_numeric(pd.Series([row.get(col, 0)]), errors="coerce").fillna(0).iloc[0]
+                if attended > 0:
+                    ev_name = clean_text(ev.get("event_name", "")) or clean_text(col)
+                    ev_type = clean_text(ev.get("event_type", "Other")) or "Other"
+                    ev_date = pd.to_datetime(ev.get("event_date", pd.NaT), errors="coerce")
+                    if pd.notna(ev_date):
+                        attended_names.append(f"{ev_name} ({ev_type}, {ev_date.strftime('%d-%b')})")
+                    else:
+                        attended_names.append(f"{ev_name} ({ev_type})")
+            active_rows.append({
+                "student_name": row.get("student_name", ""),
+                "email_key": row.get("email_key", ""),
+                "Batch": row.get("Batch", infer_batch_group_from_sheet_name(sheet)),
+                "Program": row.get("Program", infer_program_from_sheet(sheet)),
+                "recent_attendance_count": len(attended_names),
+                "recent_events": "; ".join(attended_names),
+            })
+        batch_student_recent[sheet] = pd.DataFrame(active_rows) if active_rows else _empty_recent_df()
+
+        for _, ev in recent_events.iterrows():
+            col = ev.get("column_name")
+            if not col or col not in df.columns:
+                continue
+            attendees = int(pd.to_numeric(df[col], errors="coerce").fillna(0).sum())
+            recent_event_rows.append({
+                "sheet": sheet,
+                "program": infer_program_from_sheet(sheet),
+                "batch": infer_batch_group_from_sheet_name(sheet),
+                "event_name": clean_text(ev.get("event_name", "")) or clean_text(col),
+                "event_type": clean_text(ev.get("event_type", "Other")) or "Other",
+                "event_date": pd.to_datetime(ev.get("event_date", pd.NaT), errors="coerce"),
+                "attendance": attendees,
+            })
+
+    recent_events_df = pd.DataFrame(recent_event_rows)
+
+    recent_payments = []
+    dates_df = data.get("dates_df", pd.DataFrame())
+    tx_frames = []
+    for tx_sheet in TX_SHEETS:
+        tx_df = activities.get(tx_sheet, pd.DataFrame())
+        if tx_df is None or tx_df.empty:
+            continue
+        frame = tx_df.copy()
+        if "sheet_is_paid" in frame.columns:
+            frame = frame[frame["sheet_is_paid"]].copy()
+        else:
+            frame = frame[frame.get("status_value", pd.Series("", index=frame.index)).astype(str).str.strip().str.lower().eq("admitted")].copy()
+        if frame.empty:
+            continue
+        frame["payment_date_recent"] = pd.to_datetime(frame.get("payment_date_parsed", pd.NaT), errors="coerce").dt.normalize()
+        frame = frame[frame["payment_date_recent"].between(start_date, end_date, inclusive="both")].copy()
+        if frame.empty:
+            continue
+        frame["tx_sheet"] = tx_sheet
+        tx_frames.append(frame)
+
+    if tx_frames:
+        tx_all = pd.concat(tx_frames, ignore_index=True)
+        tx_all["recent_student_id"] = tx_all.apply(lambda r: clean_text(r.get("email_key", "")) or clean_text(r.get("student_key", "")) or normalize_name(r.get("student_name", "")), axis=1)
+        tx_all = tx_all.sort_values(["payment_date_recent", "student_name"]).drop_duplicates(subset=["recent_student_id"], keep="first")
+        for _, stu in tx_all.iterrows():
+            student_name = clean_text(stu.get("student_name", ""))
+            email_key = clean_text(stu.get("email_key", ""))
+            student_key = clean_text(stu.get("student_key", ""))
+            program = clean_text(stu.get("Program", "")) or infer_program_from_sheet(clean_text(stu.get("tx_sheet", "")))
+            batch = clean_text(stu.get("Batch", ""))
+            pay_dt = pd.to_datetime(stu.get("payment_date_recent", pd.NaT), errors="coerce")
+            dates_row = find_student_dates_row(dates_df, student_name, email_key, student_key, program, batch)
+            offered_dt = pd.to_datetime(dates_row.get("offered_date_parsed", pd.NaT), errors="coerce") if dates_row is not None else pd.NaT
+            deadline_dt = pd.to_datetime(dates_row.get("deadline_parsed", pd.NaT), errors="coerce") if dates_row is not None else pd.NaT
+            ev_df = collect_student_profile_events(data, email_key, student_key, student_name, pay_dt=pay_dt, offered_dt=offered_dt, deadline_dt=deadline_dt)
+            if not ev_df.empty:
+                ev_df = ev_df.sort_values(["event_date", "event_name"], na_position="last")
+                ev_disp = ev_df[["event_date", "event_name", "event_type", "source_sheets"]].copy()
+                ev_disp["event_date"] = ev_disp["event_date"].dt.strftime("%d-%b-%Y")
+            else:
+                ev_disp = pd.DataFrame(columns=["event_date", "event_name", "event_type", "source_sheets"])
+            recent_payments.append({
+                "student_name": student_name,
+                "program": program,
+                "batch": batch,
+                "email_key": email_key,
+                "payment_date": pay_dt,
+                "events_df": ev_disp,
+                "total_participation": int(ev_df["dedupe_key"].nunique()) if not ev_df.empty else 0,
+            })
+
+    return {
+        "today": today,
+        "start_date": start_date,
+        "end_date": end_date,
+        "batch_student_recent": batch_student_recent,
+        "recent_events_df": recent_events_df,
+        "recent_payments": recent_payments,
+    }
+
 
 def map_ugpg_unique_plot_event_type(event_type: str) -> str:
     s = clean_text(event_type).strip().lower()
