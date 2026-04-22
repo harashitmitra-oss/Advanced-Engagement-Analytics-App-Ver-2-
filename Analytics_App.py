@@ -24,7 +24,7 @@ st.set_page_config(page_title="Tetr Analytics Dashboard", layout="wide")
 
 MASTER_SHEETS = ["Master UG", "Master PG"]
 UG_BATCH_SHEETS = ["UG - B1 to B4", "UG B5", "UG B6", "UG B7", "UG B8", "UG B9", "UG B10", "UG B11","UG B12"]
-PG_BATCH_SHEETS = ["PG - B1 & B2", "PG - B3 & B4", "PG B5", "PG B6"]
+PG_BATCH_SHEETS = ["PG - B1 & B2", "PG - B3 & B4", "PG B5","PG B6"]
 TX_SHEETS = ["Tetr-X-UG", "Tetr-X-PG"]
 DATES_SHEET = "Dates"
 WINNER_SHEET = "Winner"
@@ -225,6 +225,19 @@ def parse_date_safe(x):
         return pd.to_datetime(x, errors="coerce", dayfirst=True)
     except Exception:
         return pd.NaT
+
+
+def get_today_ist():
+    return pd.Timestamp.now(tz="Asia/Kolkata").normalize().tz_localize(None)
+
+
+def map_ugpg_unique_plot_event_type(event_type: str) -> str:
+    s = clean_text(event_type).strip().lower()
+    if s in {"hackathon", "competition", "competitions"}:
+        return "Competitions"
+    if s in {"fun", "fun task", "general", "poll"}:
+        return "General/Fun"
+    return clean_text(event_type) or "Other"
 
 
 
@@ -1908,7 +1921,9 @@ def render_ug_vs_pg_page(data):
                 rows.append({"Program": program_label, "Event Type": etype, "Unique Attendees": int(uniq)})
         if not rows:
             return pd.DataFrame(columns=["Program", "Event Type", "Unique Attendees"])
-        out = pd.DataFrame(rows).groupby(["Program", "Event Type"], as_index=False)["Unique Attendees"].sum()
+        out = pd.DataFrame(rows)
+        out["Event Type"] = out["Event Type"].apply(map_ugpg_unique_plot_event_type)
+        out = out.groupby(["Program", "Event Type"], as_index=False)["Unique Attendees"].sum()
         return out
 
     ua = pd.concat([
