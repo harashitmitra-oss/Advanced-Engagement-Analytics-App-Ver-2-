@@ -23,7 +23,7 @@ except Exception:
 st.set_page_config(page_title="Tetr Analytics Dashboard", layout="wide")
 
 MASTER_SHEETS = ["Master UG", "Master PG"]
-UG_BATCH_SHEETS = ["UG - B1 to B4", "UG B5", "UG B6", "UG B7", "UG B8", "UG B9", "UG B10", "UG B11","UG B12","UG B13"]
+UG_BATCH_SHEETS = ["UG - B1 to B4", "UG B5", "UG B6", "UG B7", "UG B8", "UG B9", "UG B10", "UG B11", "UG B12", "UG B13", "UG B14"]
 PG_BATCH_SHEETS = ["PG - B1 & B2", "PG - B3 & B4", "PG B5", "PG B6"]
 TX_SHEETS = ["Tetr-X-UG", "Tetr-X-PG"]
 DATES_SHEET = "Dates"
@@ -388,6 +388,57 @@ def map_ugpg_unique_plot_event_type(event_type: str) -> str:
     return clean_text(event_type) or "Other"
 
 
+
+
+def map_retention_bucket_event_type(event_type: str) -> str:
+    s = clean_text(event_type).strip().lower()
+    if s in {"online event", "online ama", "online amas", "ama", "masterclass", "skill bootcamp", "bootcamp"}:
+        return "Online Events & Masterclasses"
+    if s in {"competition", "competitions", "hackathon", "hackerthon"}:
+        return "Competitions & Hackathons"
+    if s in {"general", "poll", "fun", "fun task"}:
+        return "General/Fun"
+    return clean_text(event_type) or "Other"
+
+
+def student_unique_id_from_row(row) -> str:
+    return clean_text(row.get("email_key", "")) or clean_text(row.get("student_key", "")) or normalize_name(row.get("student_name", ""))
+
+
+def build_timeline_from_event_info(df: pd.DataFrame, event_info: pd.DataFrame) -> pd.DataFrame:
+    """Build a date-wise timeline that counts unique attendees per date, with event names in hover."""
+    if df is None or df.empty or event_info is None or event_info.empty:
+        return pd.DataFrame(columns=["event_date", "Participants", "Event Names", "Event Types"])
+    rows = []
+    for _, ev in event_info.iterrows():
+        col = ev.get("column_name")
+        ev_date = pd.to_datetime(ev.get("event_date", pd.NaT), errors="coerce")
+        if not col or col not in df.columns or pd.isna(ev_date):
+            continue
+        attended_mask = pd.to_numeric(df[col], errors="coerce").fillna(0) > 0
+        if not attended_mask.any():
+            continue
+        for _, stu in df.loc[attended_mask].iterrows():
+            sid = student_unique_id_from_row(stu)
+            if not sid:
+                continue
+            rows.append({
+                "event_date": ev_date.normalize(),
+                "student_id": sid,
+                "event_name": clean_text(ev.get("event_name", "")) or clean_text(col),
+                "event_type": clean_text(ev.get("event_type", "")) or "Other",
+            })
+    if not rows:
+        return pd.DataFrame(columns=["event_date", "Participants", "Event Names", "Event Types"])
+    long = pd.DataFrame(rows).drop_duplicates(subset=["event_date", "student_id", "event_name", "event_type"])
+    out = long.groupby("event_date", as_index=False).agg(
+        Participants=("student_id", "nunique"),
+        **{
+            "Event Names": ("event_name", lambda s: ", ".join(sorted(dict.fromkeys([clean_text(x) for x in s if clean_text(x)])))[:900]),
+            "Event Types": ("event_type", lambda s: ", ".join(sorted(dict.fromkeys([clean_text(x) for x in s if clean_text(x)]))))
+        }
+    ).sort_values("event_date")
+    return out
 
 def parse_numeric_percent(x):
     s = clean_text(x)
@@ -1465,7 +1516,7 @@ def render_sheet_detail(sheet_name, df, ctx, prefix, data=None):
                 col = r["column_name"]
                 participants.append(int(pd.to_numeric(df[col], errors="coerce").fillna(0).sum()))
             event_counts = event_info.assign(Participants=participants).sort_values("Participants", ascending=False).head(12)
-            fig = px.bar(event_counts, x="Participants", y="event_name", orientation="h", color="event_type", title="Top Events by Participation")
+            fig = px.bar(event_counts, x="Participants", y="event_name", orientation="h", color="event_type", title="Top Events by Participation", hover_name="event_name", hover_data={"event_name": False, "event_type": True, "event_date": True, "Participants": True})
             st.plotly_chart(nice_layout(fig, height=460), use_container_width=True, key=f"{prefix}_events")
     with d2:
         country_col = ctx.get("country_col")
@@ -1499,14 +1550,19 @@ def render_sheet_detail(sheet_name, df, ctx, prefix, data=None):
             st.dataframe(target, use_container_width=True, height=390, key=f"{prefix}_upgrade_df")
 
     if not event_info.empty and event_info["event_date"].notna().any():
-        participants = []
-        for _, r in event_info.iterrows():
-            col = r["column_name"]
-            participants.append(int(pd.to_numeric(df[col], errors="coerce").fillna(0).sum()))
-        timeline = event_info.assign(Participants=participants).dropna(subset=["event_date"]).sort_values("event_date")
-        fig = px.line(timeline, x="event_date", y="Participants", markers=True, title="Participation Timeline")
-        fig.update_traces(line_color=GREEN, marker_color=GREEN)
-        st.plotly_chart(nice_layout(fig, height=360), use_container_width=True, key=f"{prefix}_timeline")
+        timeline = build_timeline_from_event_info(df, event_info)
+        if not timeline.empty:
+            fig = px.line(
+                timeline,
+                x="event_date",
+                y="Participants",
+                markers=True,
+                title="Participation Timeline",
+                hover_name="Event Names",
+                hover_data={"Event Names": False, "Event Types": True, "event_date": True, "Participants": True},
+            )
+            fig.update_traces(line_color=GREEN, marker_color=GREEN)
+            st.plotly_chart(nice_layout(fig, height=360), use_container_width=True, key=f"{prefix}_timeline")
 
 
 
@@ -1922,23 +1978,34 @@ def build_combined_activity_context(sheets, data):
     if not available:
         return pd.DataFrame(), {"event_info": pd.DataFrame(columns=["column_name", "event_name", "event_type", "event_date", "sheet"]), "country_col": None}
 
-    frames = [data["activities"][s] for s in available]
-    combined_df = pd.concat(frames, ignore_index=True, sort=False)
-
+    frames = []
     event_infos = []
     country_col = None
+
     for s in available:
+        src_df = data["activities"][s].copy()
         ctx = data.get("activity_ctx", {}).get(s, {})
         ei = ctx.get("event_info", pd.DataFrame())
+        rename_map = {}
         if ei is not None and not ei.empty:
-            event_infos.append(ei.copy())
+            ei = ei.copy()
+            for idx, row in ei.iterrows():
+                old_col = row.get("column_name")
+                if old_col in src_df.columns:
+                    new_col = f"{normalize_name(s)}__{old_col}"
+                    rename_map[old_col] = new_col
+                    ei.at[idx, "column_name"] = new_col
+            event_infos.append(ei)
+        if rename_map:
+            src_df = src_df.rename(columns=rename_map)
+        frames.append(src_df)
         if country_col is None and ctx.get("country_col"):
             country_col = ctx.get("country_col")
 
+    combined_df = pd.concat(frames, ignore_index=True, sort=False)
     if event_infos:
         combined_event_info = pd.concat(event_infos, ignore_index=True, sort=False)
-        if "column_name" in combined_event_info.columns:
-            combined_event_info = combined_event_info.drop_duplicates(subset=["column_name"]).reset_index(drop=True)
+        combined_event_info = combined_event_info.drop_duplicates(subset=["column_name", "event_name", "event_type", "event_date", "sheet"]).reset_index(drop=True)
     else:
         combined_event_info = pd.DataFrame(columns=["column_name", "event_name", "event_type", "event_date", "sheet"])
 
@@ -1947,7 +2014,6 @@ def build_combined_activity_context(sheets, data):
         "country_col": country_col,
     }
     return combined_df, combined_ctx
-
 
 def render_combined_program_section(title, sheets, data, prefix):
     combined_df, combined_ctx = build_combined_activity_context(sheets, data)
@@ -2446,38 +2512,6 @@ def render_t7_analysis_page(data):
             key="t7_online_summary_table"
         )
 
-    st.markdown("#### Student-wise T-7 and T+7 Attendance")
-    student_window = (
-        window_df.groupby(["student_name", "program", "payment_date", "window"], as_index=False)
-        .agg(
-            event_count=("dedupe_key", "nunique"),
-            event_names=("event_name", lambda s: ", ".join(sorted(dict.fromkeys([clean_text(x) for x in s if clean_text(x)]))))
-        )
-    )
-    before = student_window[student_window["window"] == "T-7 to T"][["student_name", "program", "payment_date", "event_count", "event_names"]].rename(columns={"event_count": "T-7 Count", "event_names": "T-7 Events"})
-    after = student_window[student_window["window"] == "T+1 to T+7"][["student_name", "program", "payment_date", "event_count", "event_names"]].rename(columns={"event_count": "T+7 Count", "event_names": "T+7 Events"})
-    student_view = admitted_df[["student_name", "Program", "resolved_payment_date"]].drop_duplicates().rename(columns={"Program": "program", "resolved_payment_date": "payment_date"})
-    student_view = student_view.merge(before, on=["student_name", "program", "payment_date"], how="left")
-    student_view = student_view.merge(after, on=["student_name", "program", "payment_date"], how="left")
-    for col in ["T-7 Count", "T+7 Count"]:
-        student_view[col] = pd.to_numeric(student_view[col], errors="coerce").fillna(0).astype(int)
-    for col in ["T-7 Events", "T+7 Events"]:
-        student_view[col] = student_view[col].fillna("")
-    student_view["payment_date"] = pd.to_datetime(student_view["payment_date"], errors="coerce")
-    student_view = student_view.sort_values(["program", "student_name"]).reset_index(drop=True)
-
-    compact = student_view.copy()
-    compact["T-7"] = compact.apply(lambda r: f"{r['T-7 Count']} · {r['T-7 Events']}" if r['T-7 Events'] else str(r['T-7 Count']), axis=1)
-    compact["T+7"] = compact.apply(lambda r: f"{r['T+7 Count']} · {r['T+7 Events']}" if r['T+7 Events'] else str(r['T+7 Count']), axis=1)
-    st.dataframe(compact[["student_name", "program", "payment_date", "T-7", "T+7"]].rename(columns={"student_name": "Student", "program": "Program", "payment_date": "Payment Date"}),
-                 use_container_width=True, height=380, key="t7_student_table")
-
-    chart_df = student_view.melt(id_vars=["student_name", "program"], value_vars=["T-7 Count", "T+7 Count"], var_name="Window", value_name="Events")
-    chart_df["Window"] = chart_df["Window"].replace({"T-7 Count": "T-7", "T+7 Count": "T+7"})
-    fig = px.bar(chart_df, x="student_name", y="Events", color="Window", barmode="group", title="Each Student's Attendance Around Payment Date",
-                 hover_data={"program": True}, color_discrete_map={"T-7": GREEN, "T+7": GREEN_3})
-    st.plotly_chart(nice_layout(fig, height=360, x_tickangle=-45), use_container_width=True, key="t7_student_bar")
-
     st.markdown("#### Paid / Tetr X Student Activity Table")
     student_summary = build_t7_student_summary_table(data)
     if student_summary.empty:
@@ -2766,7 +2800,7 @@ def render_event_type_block(title: str, events_df: pd.DataFrame, flag_col: str, 
         st.dataframe(summary, use_container_width=True, height=320, key=f"{key_prefix}_etypetable")
 
 def render_retention_page(data):
-    st.subheader("Retention")
+    st.subheader("Conversion")
     summary_df, events_df = build_retention_data(data)
     if summary_df.empty:
         st.warning("No admitted/paid students with usable payment dates were found.")
@@ -2815,6 +2849,183 @@ def render_tetrx_page(data):
     for tab, sheet in zip(tabs, available):
         with tab:
             render_sheet_detail(sheet, data["activities"][sheet], data["activity_ctx"][sheet], f"tx_{sheet}", data=data)
+
+
+def build_retention_analytics_v2(data):
+    activities = data.get("activities", {})
+    activity_ctx = data.get("activity_ctx", {})
+    tx_rows = []
+    for tx_sheet in TX_SHEETS:
+        tx_df = activities.get(tx_sheet, pd.DataFrame())
+        if tx_df is None or tx_df.empty:
+            continue
+        program = "UG" if tx_sheet.endswith("UG") else "PG"
+        frame = tx_df.copy()
+        frame["program"] = program
+        frame["student_id"] = frame.apply(student_unique_id_from_row, axis=1)
+        frame["payment_date"] = pd.to_datetime(frame.get("payment_date_parsed", pd.NaT), errors="coerce")
+        tx_rows.append(frame)
+    if not tx_rows:
+        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), {}
+    tx_all = pd.concat(tx_rows, ignore_index=True)
+    paid_mask = tx_all["sheet_is_paid"].astype(bool) if "sheet_is_paid" in tx_all.columns else pd.Series(False, index=tx_all.index)
+    refunded_mask = tx_all["sheet_is_refunded"].astype(bool) if "sheet_is_refunded" in tx_all.columns else pd.Series(False, index=tx_all.index)
+    paid = tx_all[paid_mask].copy()
+    refunded = tx_all[refunded_mask].copy()
+    paid = paid[paid["student_id"].astype(str).ne("")].copy()
+    paid = paid.sort_values(["payment_date", "student_name"]).drop_duplicates("student_id", keep="first").reset_index(drop=True)
+    refunded = refunded[refunded["student_id"].astype(str).ne("")].copy()
+    refunded_ids = set(refunded["student_id"].astype(str).tolist())
+    paid["is_churned"] = paid["student_id"].astype(str).isin(refunded_ids)
+
+    event_rows = []
+    occurrence_rows = []
+    for _, stu in paid.iterrows():
+        sid = clean_text(stu.get("student_id", ""))
+        pay_dt = pd.to_datetime(stu.get("payment_date", pd.NaT), errors="coerce")
+        if not sid or pd.isna(pay_dt):
+            continue
+        pay_dt = pay_dt.normalize()
+        program = clean_text(stu.get("program", ""))
+        tx_sheet = "Tetr-X-UG" if program == "UG" else "Tetr-X-PG"
+        sdf = activities.get(tx_sheet, pd.DataFrame())
+        ctx = activity_ctx.get(tx_sheet, {})
+        ev_info = ctx.get("event_info", pd.DataFrame()) if ctx else pd.DataFrame()
+        if sdf is None or sdf.empty or ev_info is None or ev_info.empty:
+            continue
+        mask = pd.Series(False, index=sdf.index)
+        if clean_text(stu.get("email_key", "")) and "email_key" in sdf.columns:
+            mask = mask | sdf["email_key"].astype(str).eq(clean_text(stu.get("email_key", "")))
+        if clean_text(stu.get("student_key", "")) and "student_key" in sdf.columns:
+            mask = mask | sdf["student_key"].astype(str).eq(clean_text(stu.get("student_key", "")))
+        part = sdf.loc[mask].copy()
+        if part.empty:
+            continue
+        for _, ev in ev_info.iterrows():
+            col = ev.get("column_name")
+            ev_date = pd.to_datetime(ev.get("event_date", pd.NaT), errors="coerce")
+            if not col or col not in part.columns or pd.isna(ev_date):
+                continue
+            ev_date = ev_date.normalize()
+            event_type_raw = clean_text(ev.get("event_type", "")) or "Other"
+            event_bucket = map_retention_bucket_event_type(event_type_raw)
+            event_name = clean_text(ev.get("event_name", "")) or clean_text(col)
+            occ_key = f"{program}|{event_bucket.lower()}|{normalize_name(event_name)}|{ev_date.date()}"
+            occurrence_rows.append({"program": program, "event_name": event_name, "event_type": event_bucket, "event_date": ev_date, "occurrence_key": occ_key})
+            if not (pd.to_numeric(part[col], errors="coerce").fillna(0) > 0).any():
+                continue
+            event_rows.append({
+                "student_id": sid,
+                "student_name": clean_text(stu.get("student_name", "")),
+                "program": program,
+                "is_churned": sid in refunded_ids,
+                "payment_date": pay_dt,
+                "event_name": event_name,
+                "event_type": event_bucket,
+                "event_date": ev_date,
+                "dedupe_key": f"{sid}|{program}|{event_bucket.lower()}|{normalize_name(event_name)}|{ev_date.date()}",
+                "days_after_payment": int((ev_date - pay_dt).days),
+            })
+    events_df = pd.DataFrame(event_rows)
+    if not events_df.empty:
+        events_df = events_df.drop_duplicates(subset=["dedupe_key"]).copy()
+        events_df = events_df[events_df["days_after_payment"] >= 0].copy()
+    occurrences_df = pd.DataFrame(occurrence_rows).drop_duplicates(subset=["occurrence_key"]) if occurrence_rows else pd.DataFrame(columns=["program", "event_name", "event_type", "event_date", "occurrence_key"])
+    paid_ids = set(paid["student_id"].astype(str).tolist())
+    metrics = {
+        "paid_total": len(paid_ids),
+        "paid_ug": int((paid["program"] == "UG").sum()),
+        "paid_pg": int((paid["program"] == "PG").sum()),
+        "refunded_total": len(refunded_ids & paid_ids) if paid_ids else len(refunded_ids),
+        "retained_total": max(len(paid_ids) - len(refunded_ids & paid_ids), 0) if paid_ids else 0,
+    }
+    return paid, events_df, occurrences_df, metrics
+
+
+def build_retention_window_comparison(paid_df, events_df, total_occurrences):
+    if paid_df is None or paid_df.empty:
+        return pd.DataFrame()
+    rows = []
+    for label, max_day in [("15D", 15), ("30D", 30), ("45D", 45), ("60D", 60)]:
+        for churn_flag, group_name in [(False, "Retained"), (True, "Churned")]:
+            group_ids = set(paid_df.loc[paid_df.get("is_churned", False).astype(bool).eq(churn_flag), "student_id"].astype(str).tolist()) if "is_churned" in paid_df.columns else set()
+            if not group_ids:
+                rows.append({"Window": label, "User Type": group_name, "Avg Activities": 0.0, "Engagement %": 0.0})
+                continue
+            sub = events_df[(events_df["student_id"].astype(str).isin(group_ids)) & (events_df["days_after_payment"].between(0, max_day))] if events_df is not None and not events_df.empty else pd.DataFrame()
+            counts = sub.groupby("student_id")["dedupe_key"].nunique() if not sub.empty else pd.Series(dtype=int)
+            avg_count = float(counts.reindex(list(group_ids), fill_value=0).mean())
+            pct = (avg_count / total_occurrences * 100) if total_occurrences else 0.0
+            rows.append({"Window": label, "User Type": group_name, "Avg Activities": avg_count, "Engagement %": pct})
+    return pd.DataFrame(rows)
+
+def render_true_retention_page(data):
+    st.subheader("Retention")
+    paid_df, events_df, occurrences_df, metrics = build_retention_analytics_v2(data)
+    if paid_df.empty:
+        st.warning("No paid/admitted Tetr-X students were found for retention analytics.")
+        return
+    paid_total = int(metrics.get("paid_total", 0))
+    refunded_total = int(metrics.get("refunded_total", 0))
+    retained_total = max(paid_total - refunded_total, 0)
+    retention_rate = (retained_total / paid_total * 100) if paid_total else 0.0
+
+    st.markdown("### Success Metric")
+    c1, c2, c3 = st.columns(3)
+    c1.metric("No. of students paid", f"{paid_total:,}")
+    c2.metric("No. of students refunded", f"{refunded_total:,}")
+    c3.metric("Retention rate", f"{retention_rate:.1f}%")
+
+    total_occ = int(occurrences_df["occurrence_key"].nunique()) if not occurrences_df.empty else 0
+    occ_by_type = occurrences_df.groupby("event_type", as_index=False)["occurrence_key"].nunique().rename(columns={"occurrence_key": "Event Occurrences"}) if not occurrences_df.empty else pd.DataFrame(columns=["event_type", "Event Occurrences"])
+    st.markdown("### Engagement Metric · Tetr-X Group")
+    metric_cols = st.columns(4)
+    metric_cols[0].metric("Average no. of events/activities in post payment", f"{total_occ:,}")
+    for idx, label in enumerate(["Online Events & Masterclasses", "Competitions & Hackathons", "General/Fun"], start=1):
+        val = int(occ_by_type.loc[occ_by_type["event_type"].eq(label), "Event Occurrences"].sum()) if not occ_by_type.empty else 0
+        metric_cols[idx].metric(label, f"{val:,}")
+    if not occ_by_type.empty:
+        fig = px.bar(occ_by_type.sort_values("Event Occurrences", ascending=False), x="event_type", y="Event Occurrences", title="Tetr-X Event Occurrences by Activity Type")
+        fig.update_traces(marker_color=GREEN_2)
+        st.plotly_chart(nice_layout(fig, height=320, x_tickangle=-25), use_container_width=True, key="new_ret_occ_by_type")
+
+    st.markdown("### Retained vs Churn User Analytics")
+    if events_df.empty:
+        st.info("No post-payment Tetr-X attendance found for retained/churn comparison.")
+    else:
+        paid_ids = set(paid_df["student_id"].astype(str).unique())
+        churned_ids = set(paid_df.loc[paid_df.get("is_churned", False).astype(bool), "student_id"].astype(str).unique()) if "is_churned" in paid_df.columns else set()
+        retained_ids = paid_ids - churned_ids
+        def avg_eng(ids):
+            if not ids:
+                return 0.0, 0.0
+            counts = events_df[events_df["student_id"].astype(str).isin(ids)].groupby("student_id")["dedupe_key"].nunique()
+            avg = float(counts.reindex(list(ids), fill_value=0).mean())
+            pct = (avg / total_occ * 100) if total_occ else 0.0
+            return avg, pct
+        ret_avg, ret_pct = avg_eng(retained_ids)
+        churn_avg, churn_pct = avg_eng(churned_ids)
+        a, b = st.columns(2)
+        a.metric("Average engagement by retained student", f"{ret_avg:.1f}/{total_occ}", delta=f"{ret_pct:.1f}%")
+        b.metric("Average engagement of churned student", f"{churn_avg:.1f}/{total_occ}", delta=f"{churn_pct:.1f}%")
+        comp = build_retention_window_comparison(paid_df, events_df, total_occ)
+        if not comp.empty:
+            fig = px.bar(comp, x="Window", y="Engagement %", color="User Type", barmode="group", title="15/30/45/60 Days Comparison · Retained vs Churn", hover_data=["Avg Activities"])
+            st.plotly_chart(nice_layout(fig, height=340), use_container_width=True, key="new_retained_churn_chart")
+            st.dataframe(comp, use_container_width=True, height=220, key="new_retained_churn_table")
+
+    st.markdown("### Top Engagement Activities/Events · Tetr-X")
+    if events_df.empty:
+        st.info("No post-payment Tetr-X events found.")
+    else:
+        top_events = events_df.groupby(["event_name", "event_type"], as_index=False).agg(
+            Attendees=("student_id", "nunique"),
+            Attendance=("dedupe_key", "nunique"),
+            Dates=("event_date", lambda s: ", ".join([pd.to_datetime(x).strftime("%d-%b-%Y") for x in sorted(pd.to_datetime(s).dropna().unique())[:5]])),
+        ).sort_values(["Attendance", "Attendees"], ascending=False).head(20)
+        fig = px.bar(top_events.head(12), x="Attendance", y="event_name", color="event_type", orientation="h", title="Top Tetr-X Activities by Attendance", hover_data=["Dates", "Attendees"])
+        st.plotly_chart(nice_layout(fig, height=440), use_container_width=True, key="new_ret_top_events_chart")
+        st.dataframe(top_events.rename(columns={"event_name": "Event", "event_type": "Activity Type"}), use_container_width=True, height=360, key="new_ret_top_events_table")
 
 def render_recent_activity_page(data):
     st.subheader("Recent Activity")
@@ -2906,7 +3117,7 @@ def main():
 
     with st.sidebar:
         st.markdown("## 🧭 Navigation")
-        default_pages = ["Overview", "Student Profile", "UG", "PG", "UG vs PG", "Tetr-X", "T-7 & T+7 Analysis", "Retention", "Recent Activity"]
+        default_pages = ["Overview", "Recent Activity", "Student Profile", "UG", "PG", "UG vs PG", "Tetr-X", "T-7 & T+7 Analysis", "Conversion", "Retention"]
         default_index = default_pages.index(st.session_state.get("nav_page", "Overview")) if st.session_state.get("nav_page", "Overview") in default_pages else 0
         page = st.radio("Go to", default_pages, index=default_index, label_visibility="collapsed", key="nav")
         st.session_state["nav_page"] = page
@@ -2942,8 +3153,10 @@ def main():
         render_tetrx_page(data)
     elif page == "T-7 & T+7 Analysis":
         render_t7_analysis_page(data)
-    elif page == "Retention":
+    elif page == "Conversion":
         render_retention_page(data)
+    elif page == "Retention":
+        render_true_retention_page(data)
     elif page == "Recent Activity":
         render_recent_activity_page(data)
 
