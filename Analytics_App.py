@@ -2851,36 +2851,114 @@ def render_tetrx_page(data):
             render_sheet_detail(sheet, data["activities"][sheet], data["activity_ctx"][sheet], f"tx_{sheet}", data=data)
 
 
+
+
 def build_retention_analytics_v2(data):
+    """Build Retention-tab-only cohort and post-payment Tetr-X activity data.
+
+    Retention rules used here only:
+    - Cohort comes ONLY from Tetr-X sheets.
+    - Payment dates come ONLY from Tetr-X sheets.
+    - Paid cohort = rows where the Tetr-X Status is exactly "Admitted" OR the Status/refund fields contain refund.
+      Refund rows are included because they were paid/Tetr-X students who later churned.
+    - Churn = any Tetr-X status/refund text contains "refund".
+    - Retained = not churned AND completed 60 days from payment date.
+    - Post-payment opportunities = Tetr-X activities/events that happened on/after each student's payment date.
+    - Same event name + type + date is deduped across sheets/program within its program.
+    """
     activities = data.get("activities", {})
     activity_ctx = data.get("activity_ctx", {})
     tx_rows = []
+    today = get_today_ist().normalize() if "get_today_ist" in globals() else pd.Timestamp.today().normalize()
+
+    def _status_columns(frame: pd.DataFrame, ctx: dict | None = None):
+        ctx = ctx or {}
+        event_cols = set(ctx.get("event_cols", []) or [])
+        preferred = []
+        broader = []
+        for c in frame.columns:
+            if c in event_cols:
+                continue
+            cl = clean_text(c).lower()
+            if cl in {"status", "payment status"} or cl.endswith(" status"):
+                preferred.append(c)
+            if any(k in cl for k in ["status", "payment", "refund", "comment"]):
+                broader.append(c)
+        # Keep order, no duplicates
+        seen = set()
+        preferred = [c for c in preferred if not (c in seen or seen.add(c))]
+        seen = set()
+        broader = [c for c in broader if not (c in seen or seen.add(c))]
+        return preferred, broader
+
+    def _joined_text(frame: pd.DataFrame, cols) -> pd.Series:
+        cols = [c for c in cols if c in frame.columns]
+        if not cols:
+            return pd.Series("", index=frame.index)
+        return frame[cols].fillna("").astype(str).agg(" ".join, axis=1).str.lower().str.strip()
+
     for tx_sheet in TX_SHEETS:
         tx_df = activities.get(tx_sheet, pd.DataFrame())
         if tx_df is None or tx_df.empty:
             continue
         program = "UG" if tx_sheet.endswith("UG") else "PG"
         frame = tx_df.copy()
+        ctx = activity_ctx.get(tx_sheet, {})
         frame["program"] = program
         frame["student_id"] = frame.apply(student_unique_id_from_row, axis=1)
         frame["payment_date"] = pd.to_datetime(frame.get("payment_date_parsed", pd.NaT), errors="coerce")
+
+        preferred_status_cols, broad_status_cols = _status_columns(frame, ctx)
+        exact_status_text = _joined_text(frame, preferred_status_cols)
+        broad_status_text = _joined_text(frame, broad_status_cols)
+        if broad_status_text.eq("").all():
+            # final fallback: scan non-event metadata columns only, never attendance event columns
+            event_cols = set(ctx.get("event_cols", []) or [])
+            meta_cols = [c for c in frame.columns if c not in event_cols]
+            broad_status_text = _joined_text(frame, meta_cols)
+
+        # Refund/churn is intentionally broad: any refund/refunded/refund confirmed keyword in status-like metadata.
+        frame["retention_is_refunded"] = broad_status_text.str.contains(r"\brefund", regex=True, na=False)
+        # Paid is strict admitted from Status/payment-status. Refund rows are added to the cohort separately.
+        frame["retention_is_admitted"] = exact_status_text.str.strip().eq("admitted")
+        if "sheet_status_raw" in frame.columns:
+            raw_status = frame["sheet_status_raw"].fillna("").astype(str).str.strip().str.lower()
+            frame["retention_is_admitted"] = frame["retention_is_admitted"] | raw_status.eq("admitted")
+            frame["retention_is_refunded"] = frame["retention_is_refunded"] | raw_status.str.contains(r"\brefund", regex=True, na=False)
+        # Use existing parser flags as fallback only; exact Admitted rule remains strict.
+        if "sheet_is_refunded" in frame.columns:
+            frame["retention_is_refunded"] = frame["retention_is_refunded"] | frame["sheet_is_refunded"].fillna(False).astype(bool)
+        frame["retention_in_paid_cohort"] = frame["retention_is_admitted"] | frame["retention_is_refunded"]
         tx_rows.append(frame)
+
+    empty_paid = pd.DataFrame(columns=["student_id", "student_name", "program", "payment_date", "is_churned", "is_retained_60d"])
+    empty_events = pd.DataFrame(columns=["student_id", "student_name", "program", "is_churned", "payment_date", "event_name", "event_type", "event_date", "dedupe_key", "days_after_payment"])
+    empty_occ = pd.DataFrame(columns=["program", "event_name", "event_type", "event_date", "occurrence_key"])
+    empty_avail = pd.DataFrame(columns=["student_id", "program", "event_name", "event_type", "event_date", "occurrence_key", "student_occurrence_key", "days_after_payment"])
     if not tx_rows:
-        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), {}
+        return empty_paid, empty_events, empty_occ, empty_avail, {}
+
     tx_all = pd.concat(tx_rows, ignore_index=True)
-    paid_mask = tx_all["sheet_is_paid"].astype(bool) if "sheet_is_paid" in tx_all.columns else pd.Series(False, index=tx_all.index)
-    refunded_mask = tx_all["sheet_is_refunded"].astype(bool) if "sheet_is_refunded" in tx_all.columns else pd.Series(False, index=tx_all.index)
-    paid = tx_all[paid_mask].copy()
-    refunded = tx_all[refunded_mask].copy()
-    paid = paid[paid["student_id"].astype(str).ne("")].copy()
-    paid = paid.sort_values(["payment_date", "student_name"]).drop_duplicates("student_id", keep="first").reset_index(drop=True)
-    refunded = refunded[refunded["student_id"].astype(str).ne("")].copy()
-    refunded_ids = set(refunded["student_id"].astype(str).tolist())
-    paid["is_churned"] = paid["student_id"].astype(str).isin(refunded_ids)
+    tx_all = tx_all[tx_all["student_id"].astype(str).ne("")].copy()
+    cohort_all = tx_all[tx_all["retention_in_paid_cohort"].fillna(False).astype(bool)].copy()
+    if cohort_all.empty:
+        return empty_paid, empty_events, empty_occ, empty_avail, {}
+
+    # Churn/refund is any refund row for the student in Tetr-X. Keep one cohort row per student.
+    refunded_ids = set(cohort_all.loc[cohort_all["retention_is_refunded"].fillna(False).astype(bool), "student_id"].astype(str).tolist())
+    admitted_ids = set(cohort_all.loc[cohort_all["retention_is_admitted"].fillna(False).astype(bool), "student_id"].astype(str).tolist())
+    cohort_ids = admitted_ids | refunded_ids
+    cohort_all = cohort_all[cohort_all["student_id"].astype(str).isin(cohort_ids)].copy()
+    cohort = cohort_all.sort_values(["payment_date", "student_name"], na_position="last").drop_duplicates("student_id", keep="first").reset_index(drop=True)
+    cohort["is_churned"] = cohort["student_id"].astype(str).isin(refunded_ids)
+    cohort["completed_60_days"] = pd.to_datetime(cohort["payment_date"], errors="coerce").apply(lambda d: bool(pd.notna(d) and (today - d.normalize()).days >= 60))
+    cohort["is_retained_60d"] = (~cohort["is_churned"].astype(bool)) & cohort["completed_60_days"].astype(bool)
 
     event_rows = []
     occurrence_rows = []
-    for _, stu in paid.iterrows():
+    available_rows = []
+
+    for _, stu in cohort.iterrows():
         sid = clean_text(stu.get("student_id", ""))
         pay_dt = pd.to_datetime(stu.get("payment_date", pd.NaT), errors="coerce")
         if not sid or pd.isna(pay_dt):
@@ -2893,6 +2971,7 @@ def build_retention_analytics_v2(data):
         ev_info = ctx.get("event_info", pd.DataFrame()) if ctx else pd.DataFrame()
         if sdf is None or sdf.empty or ev_info is None or ev_info.empty:
             continue
+
         mask = pd.Series(False, index=sdf.index)
         if clean_text(stu.get("email_key", "")) and "email_key" in sdf.columns:
             mask = mask | sdf["email_key"].astype(str).eq(clean_text(stu.get("email_key", "")))
@@ -2901,17 +2980,32 @@ def build_retention_analytics_v2(data):
         part = sdf.loc[mask].copy()
         if part.empty:
             continue
+
         for _, ev in ev_info.iterrows():
             col = ev.get("column_name")
             ev_date = pd.to_datetime(ev.get("event_date", pd.NaT), errors="coerce")
             if not col or col not in part.columns or pd.isna(ev_date):
                 continue
             ev_date = ev_date.normalize()
+            days_after = int((ev_date - pay_dt).days)
+            if days_after < 0:
+                continue
             event_type_raw = clean_text(ev.get("event_type", "")) or "Other"
             event_bucket = map_retention_bucket_event_type(event_type_raw)
             event_name = clean_text(ev.get("event_name", "")) or clean_text(col)
             occ_key = f"{program}|{event_bucket.lower()}|{normalize_name(event_name)}|{ev_date.date()}"
+            student_occ_key = f"{sid}|{occ_key}"
             occurrence_rows.append({"program": program, "event_name": event_name, "event_type": event_bucket, "event_date": ev_date, "occurrence_key": occ_key})
+            available_rows.append({
+                "student_id": sid,
+                "program": program,
+                "event_name": event_name,
+                "event_type": event_bucket,
+                "event_date": ev_date,
+                "occurrence_key": occ_key,
+                "student_occurrence_key": student_occ_key,
+                "days_after_payment": days_after,
+            })
             if not (pd.to_numeric(part[col], errors="coerce").fillna(0) > 0).any():
                 continue
             event_rows.append({
@@ -2919,98 +3013,164 @@ def build_retention_analytics_v2(data):
                 "student_name": clean_text(stu.get("student_name", "")),
                 "program": program,
                 "is_churned": sid in refunded_ids,
+                "is_retained_60d": bool(stu.get("is_retained_60d", False)),
                 "payment_date": pay_dt,
                 "event_name": event_name,
                 "event_type": event_bucket,
                 "event_date": ev_date,
-                "dedupe_key": f"{sid}|{program}|{event_bucket.lower()}|{normalize_name(event_name)}|{ev_date.date()}",
-                "days_after_payment": int((ev_date - pay_dt).days),
+                "dedupe_key": student_occ_key,
+                "days_after_payment": days_after,
             })
-    events_df = pd.DataFrame(event_rows)
+
+    events_df = pd.DataFrame(event_rows) if event_rows else empty_events.copy()
     if not events_df.empty:
         events_df = events_df.drop_duplicates(subset=["dedupe_key"]).copy()
         events_df = events_df[events_df["days_after_payment"] >= 0].copy()
-    occurrences_df = pd.DataFrame(occurrence_rows).drop_duplicates(subset=["occurrence_key"]) if occurrence_rows else pd.DataFrame(columns=["program", "event_name", "event_type", "event_date", "occurrence_key"])
-    paid_ids = set(paid["student_id"].astype(str).tolist())
+    occurrences_df = pd.DataFrame(occurrence_rows).drop_duplicates(subset=["occurrence_key"]) if occurrence_rows else empty_occ.copy()
+    available_df = pd.DataFrame(available_rows).drop_duplicates(subset=["student_occurrence_key"]) if available_rows else empty_avail.copy()
+
+    cohort_ids = set(cohort["student_id"].astype(str).tolist())
+    refunded_cohort_ids = refunded_ids & cohort_ids
+    retained_ids = set(cohort.loc[cohort["is_retained_60d"].fillna(False).astype(bool), "student_id"].astype(str).tolist())
     metrics = {
-        "paid_total": len(paid_ids),
-        "paid_ug": int((paid["program"] == "UG").sum()),
-        "paid_pg": int((paid["program"] == "PG").sum()),
-        "refunded_total": len(refunded_ids & paid_ids) if paid_ids else len(refunded_ids),
-        "retained_total": max(len(paid_ids) - len(refunded_ids & paid_ids), 0) if paid_ids else 0,
+        "paid_total": len(cohort_ids),
+        "paid_ug": int((cohort["program"] == "UG").sum()),
+        "paid_pg": int((cohort["program"] == "PG").sum()),
+        "refunded_total": len(refunded_cohort_ids),
+        "retained_total": len(retained_ids),
+        "eligible_60d_total": len(retained_ids | refunded_cohort_ids),
     }
-    return paid, events_df, occurrences_df, metrics
+    return cohort, events_df, occurrences_df, available_df, metrics
 
 
-def build_retention_window_comparison(paid_df, events_df, total_occurrences):
+def build_retention_window_comparison(paid_df, events_df, available_df):
     if paid_df is None or paid_df.empty:
         return pd.DataFrame()
     rows = []
     for label, max_day in [("15D", 15), ("30D", 30), ("45D", 45), ("60D", 60)]:
-        for churn_flag, group_name in [(False, "Retained"), (True, "Churned")]:
-            group_ids = set(paid_df.loc[paid_df.get("is_churned", False).astype(bool).eq(churn_flag), "student_id"].astype(str).tolist()) if "is_churned" in paid_df.columns else set()
+        cohorts = []
+        if "is_retained_60d" in paid_df.columns:
+            cohorts.append((set(paid_df.loc[paid_df["is_retained_60d"].fillna(False).astype(bool), "student_id"].astype(str).tolist()), "Retained"))
+        else:
+            cohorts.append((set(), "Retained"))
+        if "is_churned" in paid_df.columns:
+            cohorts.append((set(paid_df.loc[paid_df["is_churned"].fillna(False).astype(bool), "student_id"].astype(str).tolist()), "Churned"))
+        else:
+            cohorts.append((set(), "Churned"))
+        for group_ids, group_name in cohorts:
             if not group_ids:
-                rows.append({"Window": label, "User Type": group_name, "Avg Activities": 0.0, "Engagement %": 0.0})
+                rows.append({"Window": label, "User Type": group_name, "Avg Activities": 0.0, "Avg Available Activities": 0.0, "Engagement %": 0.0})
                 continue
             sub = events_df[(events_df["student_id"].astype(str).isin(group_ids)) & (events_df["days_after_payment"].between(0, max_day))] if events_df is not None and not events_df.empty else pd.DataFrame()
+            avail_sub = available_df[(available_df["student_id"].astype(str).isin(group_ids)) & (available_df["days_after_payment"].between(0, max_day))] if available_df is not None and not available_df.empty else pd.DataFrame()
             counts = sub.groupby("student_id")["dedupe_key"].nunique() if not sub.empty else pd.Series(dtype=int)
+            avail_counts = avail_sub.groupby("student_id")["student_occurrence_key"].nunique() if not avail_sub.empty else pd.Series(dtype=int)
             avg_count = float(counts.reindex(list(group_ids), fill_value=0).mean())
-            pct = (avg_count / total_occurrences * 100) if total_occurrences else 0.0
-            rows.append({"Window": label, "User Type": group_name, "Avg Activities": avg_count, "Engagement %": pct})
+            avg_avail = float(avail_counts.reindex(list(group_ids), fill_value=0).mean())
+            pct = (avg_count / avg_avail * 100) if avg_avail else 0.0
+            rows.append({"Window": label, "User Type": group_name, "Avg Activities": avg_count, "Avg Available Activities": avg_avail, "Engagement %": pct})
     return pd.DataFrame(rows)
+
 
 def render_true_retention_page(data):
     st.subheader("Retention")
-    paid_df, events_df, occurrences_df, metrics = build_retention_analytics_v2(data)
+    paid_df, events_df, occurrences_df, available_df, metrics = build_retention_analytics_v2(data)
     if paid_df.empty:
-        st.warning("No paid/admitted Tetr-X students were found for retention analytics.")
+        st.warning("No paid/admitted/refunded Tetr-X students were found for retention analytics.")
         return
     paid_total = int(metrics.get("paid_total", 0))
     refunded_total = int(metrics.get("refunded_total", 0))
-    retained_total = max(paid_total - refunded_total, 0)
-    retention_rate = (retained_total / paid_total * 100) if paid_total else 0.0
+    retained_total = int(metrics.get("retained_total", 0))
+    eligible_60d_total = int(metrics.get("eligible_60d_total", retained_total + refunded_total))
+    retention_rate = (retained_total / eligible_60d_total * 100) if eligible_60d_total else 0.0
 
     st.markdown("### Success Metric")
-    c1, c2, c3 = st.columns(3)
+    c1, c2, c3, c4 = st.columns(4)
     c1.metric("No. of students paid", f"{paid_total:,}")
     c2.metric("No. of students refunded", f"{refunded_total:,}")
-    c3.metric("Retention rate", f"{retention_rate:.1f}%")
+    c3.metric("Retained students (60D)", f"{retained_total:,}")
+    c4.metric("Retention rate", f"{retention_rate:.1f}%")
 
-    total_occ = int(occurrences_df["occurrence_key"].nunique()) if not occurrences_df.empty else 0
-    occ_by_type = occurrences_df.groupby("event_type", as_index=False)["occurrence_key"].nunique().rename(columns={"occurrence_key": "Event Occurrences"}) if not occurrences_df.empty else pd.DataFrame(columns=["event_type", "Event Occurrences"])
+    paid_ids = set(paid_df["student_id"].astype(str).unique())
+    if available_df is not None and not available_df.empty:
+        avail_counts = available_df.groupby("student_id")["student_occurrence_key"].nunique()
+        avg_available_total = float(avail_counts.reindex(list(paid_ids), fill_value=0).mean()) if paid_ids else 0.0
+        avail_by_type_student = available_df.groupby(["student_id", "event_type"])["student_occurrence_key"].nunique().reset_index(name="Available")
+        avg_avail_by_type = (
+            avail_by_type_student.pivot_table(index="student_id", columns="event_type", values="Available", aggfunc="sum", fill_value=0)
+            .reindex(list(paid_ids), fill_value=0)
+            .mean()
+            .to_dict()
+        ) if paid_ids else {}
+    else:
+        avg_available_total = 0.0
+        avg_avail_by_type = {}
+
     st.markdown("### Engagement Metric · Tetr-X Group")
     metric_cols = st.columns(4)
-    metric_cols[0].metric("Average no. of events/activities in post payment", f"{total_occ:,}")
+    metric_cols[0].metric("Avg activities students could attend post payment", f"{avg_available_total:.1f}")
     for idx, label in enumerate(["Online Events & Masterclasses", "Competitions & Hackathons", "General/Fun"], start=1):
-        val = int(occ_by_type.loc[occ_by_type["event_type"].eq(label), "Event Occurrences"].sum()) if not occ_by_type.empty else 0
-        metric_cols[idx].metric(label, f"{val:,}")
-    if not occ_by_type.empty:
-        fig = px.bar(occ_by_type.sort_values("Event Occurrences", ascending=False), x="event_type", y="Event Occurrences", title="Tetr-X Event Occurrences by Activity Type")
+        metric_cols[idx].metric(label, f"{float(avg_avail_by_type.get(label, 0.0)):.1f}")
+
+    # Event type performance: attendance divided by actual post-payment student-level opportunities.
+    if available_df is not None and not available_df.empty:
+        available_type = available_df.groupby("event_type", as_index=False).agg(
+            Available_Opportunities=("student_occurrence_key", "nunique"),
+            Event_Occurrences=("occurrence_key", "nunique"),
+        )
+        attended_type = events_df.groupby("event_type", as_index=False).agg(
+            Attendance_Hits=("dedupe_key", "nunique"),
+            Unique_Attendees=("student_id", "nunique"),
+        ) if events_df is not None and not events_df.empty else pd.DataFrame(columns=["event_type", "Attendance_Hits", "Unique_Attendees"])
+        perf = available_type.merge(attended_type, on="event_type", how="left").fillna({"Attendance_Hits": 0, "Unique_Attendees": 0})
+        perf["Attendance Rate %"] = np.where(perf["Available_Opportunities"].gt(0), perf["Attendance_Hits"] / perf["Available_Opportunities"] * 100, 0)
+        perf["Avg Attendance per Paid Student"] = perf["Attendance_Hits"] / max(paid_total, 1)
+        perf = perf.sort_values(["Attendance Rate %", "Attendance_Hits"], ascending=False)
+        fig = px.bar(
+            perf,
+            x="event_type",
+            y="Attendance Rate %",
+            title="Tetr-X Post-Payment Attendance Rate by Activity Type",
+            hover_data=["Attendance_Hits", "Available_Opportunities", "Event_Occurrences", "Unique_Attendees", "Avg Attendance per Paid Student"],
+        )
         fig.update_traces(marker_color=GREEN_2)
-        st.plotly_chart(nice_layout(fig, height=320, x_tickangle=-25), use_container_width=True, key="new_ret_occ_by_type")
+        st.plotly_chart(nice_layout(fig, height=340, x_tickangle=-25), use_container_width=True, key="new_ret_att_rate_by_type")
+        st.dataframe(
+            perf.rename(columns={
+                "event_type": "Activity Type",
+                "Available_Opportunities": "Available Opportunities",
+                "Event_Occurrences": "Unique Event Occurrences",
+                "Attendance_Hits": "Attendance Hits",
+                "Unique_Attendees": "Unique Attendees",
+            }),
+            use_container_width=True,
+            height=260,
+            key="new_ret_att_rate_table",
+        )
 
     st.markdown("### Retained vs Churn User Analytics")
-    if events_df.empty:
+    if events_df.empty and (available_df is None or available_df.empty):
         st.info("No post-payment Tetr-X attendance found for retained/churn comparison.")
     else:
-        paid_ids = set(paid_df["student_id"].astype(str).unique())
         churned_ids = set(paid_df.loc[paid_df.get("is_churned", False).astype(bool), "student_id"].astype(str).unique()) if "is_churned" in paid_df.columns else set()
         retained_ids = paid_ids - churned_ids
         def avg_eng(ids):
             if not ids:
-                return 0.0, 0.0
-            counts = events_df[events_df["student_id"].astype(str).isin(ids)].groupby("student_id")["dedupe_key"].nunique()
+                return 0.0, 0.0, 0.0
+            counts = events_df[events_df["student_id"].astype(str).isin(ids)].groupby("student_id")["dedupe_key"].nunique() if events_df is not None and not events_df.empty else pd.Series(dtype=int)
+            avail_counts = available_df[available_df["student_id"].astype(str).isin(ids)].groupby("student_id")["student_occurrence_key"].nunique() if available_df is not None and not available_df.empty else pd.Series(dtype=int)
             avg = float(counts.reindex(list(ids), fill_value=0).mean())
-            pct = (avg / total_occ * 100) if total_occ else 0.0
-            return avg, pct
-        ret_avg, ret_pct = avg_eng(retained_ids)
-        churn_avg, churn_pct = avg_eng(churned_ids)
+            avg_avail = float(avail_counts.reindex(list(ids), fill_value=0).mean())
+            pct = (avg / avg_avail * 100) if avg_avail else 0.0
+            return avg, avg_avail, pct
+        ret_avg, ret_avail, ret_pct = avg_eng(retained_ids)
+        churn_avg, churn_avail, churn_pct = avg_eng(churned_ids)
         a, b = st.columns(2)
-        a.metric("Average engagement by retained student", f"{ret_avg:.1f}/{total_occ}", delta=f"{ret_pct:.1f}%")
-        b.metric("Average engagement of churned student", f"{churn_avg:.1f}/{total_occ}", delta=f"{churn_pct:.1f}%")
-        comp = build_retention_window_comparison(paid_df, events_df, total_occ)
+        a.metric("Average engagement by retained student", f"{ret_avg:.1f}/{ret_avail:.1f}", delta=f"{ret_pct:.1f}%")
+        b.metric("Average engagement of churned student", f"{churn_avg:.1f}/{churn_avail:.1f}", delta=f"{churn_pct:.1f}%")
+        comp = build_retention_window_comparison(paid_df, events_df, available_df)
         if not comp.empty:
-            fig = px.bar(comp, x="Window", y="Engagement %", color="User Type", barmode="group", title="15/30/45/60 Days Comparison · Retained vs Churn", hover_data=["Avg Activities"])
+            fig = px.bar(comp, x="Window", y="Engagement %", color="User Type", barmode="group", title="15/30/45/60 Days Comparison · Retained vs Churn", hover_data=["Avg Activities", "Avg Available Activities"])
             st.plotly_chart(nice_layout(fig, height=340), use_container_width=True, key="new_retained_churn_chart")
             st.dataframe(comp, use_container_width=True, height=220, key="new_retained_churn_table")
 
