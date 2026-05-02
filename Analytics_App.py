@@ -589,14 +589,14 @@ def _get_gsheets_client():
     return gspread.authorize(creds)
 
 
-@st.cache_data(show_spinner=False, ttl=180)
+@st.cache_data(show_spinner=False, ttl=600)
 def gsheets_get_sheet_names(spreadsheet_id: str):
     gc = _get_gsheets_client()
     sh = gc.open_by_key(spreadsheet_id)
     return [ws.title for ws in sh.worksheets()]
 
 
-@st.cache_data(show_spinner=False, ttl=180)
+@st.cache_data(show_spinner=False, ttl=600)
 def gsheets_read_raw_sheet(spreadsheet_id: str, sheet_name: str):
     gc = _get_gsheets_client()
     sh = gc.open_by_key(spreadsheet_id)
@@ -607,6 +607,48 @@ def gsheets_read_raw_sheet(spreadsheet_id: str, sheet_name: str):
     df = pd.DataFrame(values)
     df.replace("", np.nan, inplace=True)
     return df.dropna(how="all")
+
+
+def _values_to_raw_df(values):
+    if not values:
+        return pd.DataFrame()
+    df = pd.DataFrame(values)
+    df.replace("", np.nan, inplace=True)
+    return df.dropna(how="all")
+
+
+def _quote_sheet_range(sheet_name: str) -> str:
+    # Use an A1 range that pulls the whole tab. Sheet names with spaces need quotes.
+    safe = str(sheet_name).replace("'", "''")
+    return f"'{safe}'"
+
+
+@st.cache_data(show_spinner=False, ttl=600)
+def gsheets_read_raw_sheets_batch(spreadsheet_id: str, sheet_names_tuple: tuple):
+    """Read all needed Google Sheet tabs in one Sheets API batch request.
+
+    This avoids one API read per worksheet and prevents Google Sheets 429
+    read-quota errors while keeping the dashboard live via a short cache TTL.
+    """
+    sheet_names = list(sheet_names_tuple or [])
+    if not sheet_names:
+        return {}
+
+    gc = _get_gsheets_client()
+    sh = gc.open_by_key(spreadsheet_id)
+    ranges = [_quote_sheet_range(s) for s in sheet_names]
+
+    response = sh.values_batch_get(ranges=ranges)
+    value_ranges = response.get("valueRanges", []) if isinstance(response, dict) else []
+
+    out = {}
+    for sheet_name, vr in zip(sheet_names, value_ranges):
+        out[sheet_name] = _values_to_raw_df(vr.get("values", []))
+
+    # If Google returns fewer ranges for any reason, keep the keys predictable.
+    for sheet_name in sheet_names:
+        out.setdefault(sheet_name, pd.DataFrame())
+    return out
 
 
 @st.cache_data(show_spinner=False)
@@ -1094,7 +1136,7 @@ def reconcile_master_with_tx(master_df, tx_df):
     return out
 
 
-@st.cache_data(show_spinner=False, ttl=180)
+@st.cache_data(show_spinner=False, ttl=600)
 def load_dashboard_data(source_mode: str, spreadsheet_id=None, file_bytes=None):
     sheet_names = get_sheet_names(source_mode, spreadsheet_id, file_bytes)
     missing = [s for s in ALL_REQUIRED if s not in sheet_names]
@@ -1104,23 +1146,34 @@ def load_dashboard_data(source_mode: str, spreadsheet_id=None, file_bytes=None):
     dates_df = pd.DataFrame()
     winner_df = pd.DataFrame()
 
+    # Google Sheets quota fix: read all required tabs in a single values.batchGet
+    # call and reuse these raw frames for the whole dashboard build.
+    sheets_to_read = [
+        s for s in (MASTER_SHEETS + UG_BATCH_SHEETS + PG_BATCH_SHEETS + TX_SHEETS + [DATES_SHEET, WINNER_SHEET])
+        if s in sheet_names
+    ]
+    if source_mode == "gsheets":
+        raw_cache = gsheets_read_raw_sheets_batch(spreadsheet_id, tuple(sheets_to_read))
+    else:
+        raw_cache = {s: load_raw_sheet(source_mode, s, spreadsheet_id, file_bytes) for s in sheets_to_read}
+
     for sheet in MASTER_SHEETS:
-        if sheet in sheet_names:
-            raw = load_raw_sheet(source_mode, sheet, spreadsheet_id, file_bytes)
-            masters[sheet], master_ctx[sheet] = parse_master_sheet(raw, "UG" if sheet.endswith("UG") else "PG", sheet)
+        if sheet in raw_cache:
+            raw = raw_cache.get(sheet, pd.DataFrame())
+            if not raw.empty:
+                masters[sheet], master_ctx[sheet] = parse_master_sheet(raw, "UG" if sheet.endswith("UG") else "PG", sheet)
 
     for sheet in UG_BATCH_SHEETS + PG_BATCH_SHEETS + TX_SHEETS:
-        if sheet in sheet_names:
-            raw = load_raw_sheet(source_mode, sheet, spreadsheet_id, file_bytes)
-            activities[sheet], activity_ctx[sheet] = parse_activity_sheet(raw, sheet)
+        if sheet in raw_cache:
+            raw = raw_cache.get(sheet, pd.DataFrame())
+            if not raw.empty:
+                activities[sheet], activity_ctx[sheet] = parse_activity_sheet(raw, sheet)
 
-    if DATES_SHEET in sheet_names:
-        raw = load_raw_sheet(source_mode, DATES_SHEET, spreadsheet_id, file_bytes)
-        dates_df = parse_dates_sheet(raw)
+    if DATES_SHEET in raw_cache and not raw_cache[DATES_SHEET].empty:
+        dates_df = parse_dates_sheet(raw_cache[DATES_SHEET])
 
-    if WINNER_SHEET in sheet_names:
-        raw = load_raw_sheet(source_mode, WINNER_SHEET, spreadsheet_id, file_bytes)
-        winner_df = parse_winner_sheet(raw)
+    if WINNER_SHEET in raw_cache and not raw_cache[WINNER_SHEET].empty:
+        winner_df = parse_winner_sheet(raw_cache[WINNER_SHEET])
 
     tx_df = pd.concat([activities[s] for s in TX_SHEETS if s in activities], ignore_index=True) if any(s in activities for s in TX_SHEETS) else pd.DataFrame()
     if not tx_df.empty:
