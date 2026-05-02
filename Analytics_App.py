@@ -1691,7 +1691,7 @@ def collect_student_profile_events(data, email_key: str, student_key: str, stude
         norm_pay = pay_dt.normalize()
         ev_df["after_paid"] = ev_df["event_date"].ge(norm_pay)
         delta = (ev_df["event_date"] - norm_pay).dt.days
-        ev_df["in_t7"] = delta.between(-7, -1, inclusive="both")
+        ev_df["in_t7"] = delta.between(-7, 0, inclusive="both")
         ev_df["in_tplus7"] = delta.between(1, 7, inclusive="both")
     return ev_df
 
@@ -1782,7 +1782,8 @@ def render_student_profile(data):
         st.info("Search and select a student to view the profile.")
         return
 
-    profile_window_df = build_t7_event_window_data(data)
+    # Speed fix: do not build the full T-7/T+7 dataset for every Student Profile view.
+    # T-7/T+7 counts for selected students are computed from that student's deduped event list below.
     pdf_payloads = []
 
     for i, student_name in enumerate(final_names):
@@ -1797,12 +1798,24 @@ def render_student_profile(data):
         email_key = master.get("email_key", "")
         name_key = master.get("student_key", "")
 
-        related = []
-        for sheet, df in data["activities"].items():
-            part = df[(df["email_key"] == email_key) | (df["student_key"] == name_key)].copy()
-            if not part.empty:
-                related.append(part)
-        related_df = pd.concat(related, ignore_index=True) if related else pd.DataFrame()
+        # Speed fix: use the prebuilt profile table instead of scanning every sheet dataframe on every profile render.
+        profile_source_df = data.get("profile_df", pd.DataFrame())
+        if profile_source_df is not None and not profile_source_df.empty:
+            pmask = pd.Series(False, index=profile_source_df.index)
+            if email_key and "email_key" in profile_source_df.columns:
+                pmask = pmask | profile_source_df["email_key"].astype(str).eq(email_key)
+            if name_key and "student_key" in profile_source_df.columns:
+                pmask = pmask | profile_source_df["student_key"].astype(str).eq(name_key)
+            related_df = profile_source_df.loc[pmask].copy()
+            if "profile_source" in related_df.columns:
+                related_df = related_df[related_df["profile_source"].astype(str).ne("master")].copy()
+        else:
+            related = []
+            for sheet, df in data["activities"].items():
+                part = df[(df["email_key"] == email_key) | (df["student_key"] == name_key)].copy()
+                if not part.empty:
+                    related.append(part)
+            related_df = pd.concat(related, ignore_index=True) if related else pd.DataFrame()
 
 
         winner_df = data.get("winner_df", pd.DataFrame())
@@ -1849,15 +1862,22 @@ def render_student_profile(data):
 
         profile_event_df = collect_student_profile_events(data, email_key, name_key, master.get("student_name", ""), pay_dt=pay_dt, offered_dt=offered_dt, deadline_dt=deadline_dt)
 
-        wmask = pd.Series(False, index=profile_window_df.index)
-        if not profile_window_df.empty:
-            if email_key and "email_key" in profile_window_df.columns:
-                wmask = wmask | profile_window_df["email_key"].astype(str).eq(email_key)
-            if name_key and "student_key" in profile_window_df.columns:
-                wmask = wmask | profile_window_df["student_key"].astype(str).eq(name_key)
-            if not wmask.any():
-                wmask = profile_window_df["student_name"].astype(str).str.lower().eq(clean_text(master.get("student_name", "")).lower())
-        stu_window = profile_window_df.loc[wmask].copy() if not profile_window_df.empty else pd.DataFrame()
+        # Use this student's already-deduped events for T-window metrics instead of rebuilding all admitted students.
+        stu_window = pd.DataFrame()
+        if not profile_event_df.empty:
+            trows = []
+            if "in_t7" in profile_event_df.columns:
+                part = profile_event_df[profile_event_df["in_t7"]].copy()
+                if not part.empty:
+                    part["window"] = "T-7 to T"
+                    trows.append(part)
+            if "in_tplus7" in profile_event_df.columns:
+                part = profile_event_df[profile_event_df["in_tplus7"]].copy()
+                if not part.empty:
+                    part["window"] = "T+1 to T+7"
+                    trows.append(part)
+            if trows:
+                stu_window = pd.concat(trows, ignore_index=True)
 
         st.markdown("---")
         st.markdown(f"### {master['student_name']}")
