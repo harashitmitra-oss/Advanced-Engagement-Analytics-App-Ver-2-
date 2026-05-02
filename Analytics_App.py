@@ -1280,7 +1280,7 @@ def render_live_ist_clock(connected_ok: bool, connection_note: str):
       <div style="display:flex; flex-direction:column; align-items:flex-end; gap:8px;">
         <div id="ist-live-clock" style="padding:10px 14px; border-radius:999px; border:1px solid #dbeee0; background:#ffffff; color:#0b3d2e; font-weight:700; min-width:300px; text-align:center; box-shadow:0 2px 10px rgba(11, 61, 46, 0.05);">IST · --</div>
         <div style="display:inline-flex; align-items:center; gap:10px; padding:10px 14px; border-radius:999px; font-weight:800; border:1px solid {status_border}; color:{status_fg}; background:{status_bg}; white-space:nowrap;">
-          <span style="width:12px; height:12px; border-radius:50%; background:{status_dot}; display:inline-block;"></span>
+          {('<span style="position:relative; width:12px; height:12px; display:inline-block;"><span style="position:absolute; inset:0; border-radius:50%; background:rgba(27,181,92,0.30); animation:heartbeatPing 1.5s ease-out infinite;"></span><span style="position:absolute; inset:0; border-radius:50%; background:#1bb55c;"></span></span>' if connected_ok else '<span style="width:12px; height:12px; border-radius:50%; background:' + status_dot + '; display:inline-block;"></span>')}
           {status_text}
         </div>
       </div>
@@ -2892,10 +2892,31 @@ def build_retention_analytics_v2(data):
         return preferred, broader
 
     def _joined_text(frame: pd.DataFrame, cols) -> pd.Series:
+        """Safely join text across metadata/status columns.
+
+        Streamlit Cloud was crashing here because pandas' DataFrame.agg(" ".join, axis=1)
+        can still receive non-plain-string objects when duplicate column names or extension dtypes
+        are present. This helper normalizes every value explicitly and handles duplicate columns
+        without changing any retention logic.
+        """
         cols = [c for c in cols if c in frame.columns]
         if not cols:
             return pd.Series("", index=frame.index)
-        return frame[cols].fillna("").astype(str).agg(" ".join, axis=1).str.lower().str.strip()
+
+        joined = []
+        # Selecting by column name can return a DataFrame when duplicate headers exist, so iterate
+        # row positions after selecting the matching columns and flatten row values manually.
+        selected = frame.loc[:, cols].copy()
+        for _, row in selected.iterrows():
+            vals = []
+            for v in row.tolist():
+                if pd.isna(v):
+                    continue
+                s = clean_text(v)
+                if s:
+                    vals.append(s)
+            joined.append(" ".join(vals).lower().strip())
+        return pd.Series(joined, index=frame.index)
 
     for tx_sheet in TX_SHEETS:
         tx_df = activities.get(tx_sheet, pd.DataFrame())
