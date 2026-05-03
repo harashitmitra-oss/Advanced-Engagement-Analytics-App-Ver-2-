@@ -3721,6 +3721,30 @@ def render_success_metrics_page(data):
     ]
     st.dataframe(_success_metric_table(comp_rows, denoms), use_container_width=True, hide_index=True, key="success_comp_summary")
 
+    # Before-payment attendance depth for Competition & Hackathon.
+    # "Before payment" means all attended competition/hackathon activities on or before the payment date,
+    # not only the T-7 window. Stop displaying thresholds once the count becomes zero.
+    comp_before_payment = comp_att[comp_att.get("before_payment", False).fillna(False).astype(bool)].copy() if not comp_att.empty else pd.DataFrame()
+    comp_thresholds = []
+    if not comp_before_payment.empty:
+        comp_per_student = (
+            comp_before_payment.groupby(["student_id", "program"], as_index=False)["dedupe_key"]
+            .nunique()
+            .rename(columns={"dedupe_key": "attended_count"})
+        )
+        th = 1
+        while True:
+            sub = comp_per_student[comp_per_student["attended_count"] >= th]
+            if sub.empty:
+                break
+            comp_thresholds.append((f"Paid Students with ≥{th} Competition/Hackathon Before Payment", _group_sets_from_frame(sub), "paid"))
+            th += 1
+            if th > 100:  # safety guard for unexpected data issues
+                break
+    if comp_thresholds:
+        st.markdown("##### Before-payment attendance depth")
+        st.dataframe(_success_metric_table(comp_thresholds, denoms), use_container_width=True, hide_index=True, key="success_comp_thresholds")
+
     if not comp_att.empty:
         chart_df = comp_att.groupby(["program", "event_type"], as_index=False)["student_id"].nunique().rename(columns={"student_id": "Unique Students"})
         fig = px.bar(chart_df, x="program", y="Unique Students", color="program", title="Competition & Hackathon Unique Participants")
