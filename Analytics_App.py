@@ -3365,13 +3365,388 @@ def render_recent_activity_page(data):
             fig.update_traces(marker_color=GREEN)
             st.plotly_chart(nice_layout(fig, height=320), use_container_width=True, key="recentevents_batchchart")
 
+
+
+# ---------------- Success Metrics ----------------
+
+def map_success_event_bucket(event_type: str) -> str:
+    """Bucket event types only for Success Metrics."""
+    s = clean_text(event_type).strip().lower()
+    if s in {"online event", "online ama", "online amas", "ama", "masterclass", "skill bootcamp", "bootcamp"}:
+        return "Online Events + Masterclasses"
+    if s in {"competition", "competitions", "hackathon", "hackerthon"}:
+        return "Competition & Hackathon"
+    return "Other"
+
+
+def _fmt_count_pct(count, denom):
+    count = int(count or 0)
+    denom = int(denom or 0)
+    pct = (count / denom * 100) if denom else 0.0
+    return f"{count:,} ({pct:.1f}%)"
+
+
+def _student_id_from_values(email_key="", student_key="", student_name=""):
+    return clean_text(email_key) or clean_text(student_key) or normalize_name(student_name)
+
+
+def _program_denominators_for_success(data):
+    overview = data.get("overview_df", pd.DataFrame())
+    out = {"Total": set(), "UG": set(), "PG": set()}
+    if overview is None or overview.empty:
+        return out
+    for _, r in overview.iterrows():
+        sid = _student_id_from_values(r.get("email_key", ""), r.get("student_key", ""), r.get("student_name", ""))
+        if not sid:
+            continue
+        program = clean_text(r.get("Program", ""))
+        out["Total"].add(sid)
+        if program in {"UG", "PG"}:
+            out[program].add(sid)
+    return out
+
+
+def _paid_students_from_tetrx_for_success(data):
+    rows = []
+    activities = data.get("activities", {})
+    for tx_sheet in TX_SHEETS:
+        tx_df = activities.get(tx_sheet, pd.DataFrame())
+        if tx_df is None or tx_df.empty:
+            continue
+        program = "UG" if tx_sheet.endswith("UG") else "PG"
+        frame = tx_df.copy()
+        if "sheet_is_paid" in frame.columns:
+            frame = frame[frame["sheet_is_paid"].fillna(False).astype(bool)].copy()
+        elif "sheet_status_raw" in frame.columns:
+            frame = frame[frame["sheet_status_raw"].astype(str).str.strip().str.lower().eq("admitted")].copy()
+        else:
+            continue
+        for _, r in frame.iterrows():
+            sid = _student_id_from_values(r.get("email_key", ""), r.get("student_key", ""), r.get("student_name", ""))
+            if not sid:
+                continue
+            pay_dt = pd.to_datetime(r.get("payment_date_parsed", pd.NaT), errors="coerce")
+            rows.append({
+                "student_id": sid,
+                "student_name": clean_text(r.get("student_name", "")),
+                "program": program,
+                "payment_date": pay_dt.normalize() if pd.notna(pay_dt) else pd.NaT,
+            })
+    paid = pd.DataFrame(rows)
+    if paid.empty:
+        return pd.DataFrame(columns=["student_id", "student_name", "program", "payment_date"])
+    paid = paid.sort_values(["payment_date", "student_name"], na_position="last").drop_duplicates("student_id", keep="first").reset_index(drop=True)
+    return paid
+
+
+def _winner_ids_for_success(data):
+    winner_df = data.get("winner_df", pd.DataFrame())
+    if winner_df is None or winner_df.empty:
+        return set()
+    w = winner_df.copy()
+    if "is_winner" in w.columns:
+        w = w[w["is_winner"].fillna(False).astype(bool)].copy()
+    ids = set()
+    for _, r in w.iterrows():
+        sid = _student_id_from_values(r.get("email_key", ""), r.get("student_key", ""), r.get("winner_name", ""))
+        if sid:
+            ids.add(sid)
+    return ids
+
+
+def _success_activity_events_from_batch_sheets(data):
+    """Return attended student-event rows and deduped event occurrences from UG/PG batch sheets only."""
+    activities = data.get("activities", {})
+    activity_ctx = data.get("activity_ctx", {})
+    attendee_rows = []
+    occurrence_rows = []
+    for sheet in UG_BATCH_SHEETS + PG_BATCH_SHEETS:
+        df = activities.get(sheet, pd.DataFrame())
+        ctx = activity_ctx.get(sheet, {})
+        if df is None or df.empty or not ctx:
+            continue
+        event_info = ctx.get("event_info", pd.DataFrame())
+        if event_info is None or event_info.empty:
+            continue
+        program = infer_program_from_sheet(sheet)
+        batch = infer_batch_group_from_sheet_name(sheet)
+        for _, ev in event_info.iterrows():
+            col = ev.get("column_name")
+            if not col or col not in df.columns:
+                continue
+            ev_type_raw = clean_text(ev.get("event_type", "")) or "Other"
+            bucket = map_success_event_bucket(ev_type_raw)
+            if bucket == "Other":
+                continue
+            ev_date = pd.to_datetime(ev.get("event_date", pd.NaT), errors="coerce")
+            if pd.isna(ev_date):
+                continue
+            ev_date = ev_date.normalize()
+            ev_name = clean_text(ev.get("event_name", "")) or clean_text(col)
+            occurrence_key = "|".join([program, bucket.lower(), normalize_name(ev_name), ev_date.strftime("%Y-%m-%d")])
+            occurrence_rows.append({
+                "program": program,
+                "batch": batch,
+                "sheet": sheet,
+                "event_name": ev_name,
+                "event_type": bucket,
+                "event_type_raw": ev_type_raw,
+                "event_date": ev_date,
+                "occurrence_key": occurrence_key,
+            })
+            attended_mask = pd.to_numeric(df[col], errors="coerce").fillna(0) > 0
+            if not attended_mask.any():
+                continue
+            for _, r in df.loc[attended_mask].iterrows():
+                sid = _student_id_from_values(r.get("email_key", ""), r.get("student_key", ""), r.get("student_name", ""))
+                if not sid:
+                    continue
+                dedupe_key = "|".join([sid, occurrence_key])
+                attendee_rows.append({
+                    "student_id": sid,
+                    "student_name": clean_text(r.get("student_name", "")),
+                    "program": program,
+                    "batch": clean_text(r.get("Batch", "")) or batch,
+                    "sheet": sheet,
+                    "event_name": ev_name,
+                    "event_type": bucket,
+                    "event_type_raw": ev_type_raw,
+                    "event_date": ev_date,
+                    "occurrence_key": occurrence_key,
+                    "dedupe_key": dedupe_key,
+                })
+    attendees = pd.DataFrame(attendee_rows)
+    if not attendees.empty:
+        attendees = attendees.drop_duplicates("dedupe_key").reset_index(drop=True)
+    else:
+        attendees = pd.DataFrame(columns=["student_id", "student_name", "program", "batch", "sheet", "event_name", "event_type", "event_type_raw", "event_date", "occurrence_key", "dedupe_key"])
+    occurrences = pd.DataFrame(occurrence_rows)
+    if not occurrences.empty:
+        occurrences = occurrences.drop_duplicates("occurrence_key").reset_index(drop=True)
+    else:
+        occurrences = pd.DataFrame(columns=["program", "batch", "sheet", "event_name", "event_type", "event_type_raw", "event_date", "occurrence_key"])
+    return attendees, occurrences
+
+
+def _count_by_group(ids_by_program, denominators_by_program=None):
+    rows = []
+    for group in ["Total", "UG", "PG"]:
+        ids = set(ids_by_program.get(group, set()))
+        denom = len(set(denominators_by_program.get(group, set()))) if denominators_by_program else 0
+        rows.append({"Group": group, "Count": len(ids), "%": (len(ids) / denom * 100) if denom else 0.0})
+    return pd.DataFrame(rows)
+
+
+def _group_sets_from_frame(frame: pd.DataFrame, id_col="student_id"):
+    out = {"Total": set(), "UG": set(), "PG": set()}
+    if frame is None or frame.empty or id_col not in frame.columns:
+        return out
+    for _, r in frame.iterrows():
+        sid = clean_text(r.get(id_col, ""))
+        if not sid:
+            continue
+        program = clean_text(r.get("program", ""))
+        out["Total"].add(sid)
+        if program in {"UG", "PG"}:
+            out[program].add(sid)
+    return out
+
+
+def _pct_value(count, denom):
+    count = int(count or 0)
+    denom = int(denom or 0)
+    return round((count / denom * 100), 1) if denom else 0.0
+
+
+def _group_counts_from_sets(ids_by_group):
+    return {g: len(set(ids_by_group.get(g, set()))) for g in ["Total", "UG", "PG"]}
+
+
+def _share_denominator_from_metric(ids_by_group):
+    """Use total metric count as denominator, useful for UG/PG split of event occurrences."""
+    total = len(set(ids_by_group.get("Total", set())))
+    return {"Total": set(range(total)), "UG": set(range(total)), "PG": set(range(total))}
+
+
+def _success_metric_table(metrics, denominators):
+    """
+    Standard Success Metrics table.
+    Every row shows separate Total/UG/PG counts and percentages.
+
+    Denominator modes:
+      - students: all unique students by group
+      - paid: all paid/Tetr-X admitted students by group
+      - share_total: percentage contribution to that row's Total count
+      - any custom key added to denominators, e.g. comp_paid_attendees
+    """
+    rows = []
+    default_empty = {"Total": set(), "UG": set(), "PG": set()}
+    for label, ids_by_group, denom_mode in metrics:
+        ids_by_group = ids_by_group or default_empty
+        counts = _group_counts_from_sets(ids_by_group)
+
+        if denom_mode == "share_total":
+            total_denom = max(counts.get("Total", 0), 0)
+            denom_counts = {"Total": total_denom, "UG": total_denom, "PG": total_denom}
+        else:
+            denom_sets = denominators.get(denom_mode, denominators.get("students", default_empty))
+            denom_counts = {g: len(set(denom_sets.get(g, set()))) for g in ["Total", "UG", "PG"]}
+
+        rows.append({
+            "Metric": label,
+            "Total": counts["Total"],
+            "Total %": _pct_value(counts["Total"], denom_counts["Total"]),
+            "UG": counts["UG"],
+            "UG %": _pct_value(counts["UG"], denom_counts["UG"]),
+            "PG": counts["PG"],
+            "PG %": _pct_value(counts["PG"], denom_counts["PG"]),
+        })
+    return pd.DataFrame(rows)
+
+
+def build_success_metrics_data(data):
+    student_denoms = _program_denominators_for_success(data)
+    paid_df = _paid_students_from_tetrx_for_success(data)
+    paid_sets = _group_sets_from_frame(paid_df)
+    paid_lookup = paid_df.set_index("student_id")["payment_date"].to_dict() if not paid_df.empty else {}
+    winner_ids = _winner_ids_for_success(data)
+    attendees, occurrences = _success_activity_events_from_batch_sheets(data)
+
+    if not attendees.empty:
+        attendees = attendees.copy()
+        attendees["payment_date"] = attendees["student_id"].map(paid_lookup)
+        attendees["is_paid"] = attendees["student_id"].isin(set(paid_lookup.keys()))
+        attendees["event_date"] = pd.to_datetime(attendees["event_date"], errors="coerce").dt.normalize()
+        attendees["payment_date"] = pd.to_datetime(attendees["payment_date"], errors="coerce").dt.normalize()
+        attendees["before_payment"] = attendees["is_paid"] & attendees["payment_date"].notna() & (attendees["event_date"] <= attendees["payment_date"])
+        attendees["before_7_payment"] = attendees["is_paid"] & attendees["payment_date"].notna() & attendees["event_date"].between(attendees["payment_date"] - pd.Timedelta(days=7), attendees["payment_date"], inclusive="both")
+        attendees["is_winner"] = attendees["student_id"].isin(winner_ids)
+
+    return {
+        "student_denoms": student_denoms,
+        "paid_df": paid_df,
+        "paid_sets": paid_sets,
+        "winner_ids": winner_ids,
+        "attendees": attendees,
+        "occurrences": occurrences,
+    }
+
+
+def _render_success_summary_table(title, rows, key):
+    st.markdown(f"#### {title}")
+    table = pd.DataFrame(rows)
+    if table.empty:
+        st.info("No matching data found for this section.")
+        return
+    st.dataframe(table, use_container_width=True, hide_index=True, key=key)
+
+
+def render_success_metrics_page(data):
+    st.subheader("Success Metrics")
+    st.caption("All event/activity attendance is deduped by same student + same event name + same event type + same date. Event occurrences are deduped by program + event name + event type + date, so duplicated events across batch sheets count once.")
+    sm = build_success_metrics_data(data)
+    attendees = sm["attendees"]
+    occurrences = sm["occurrences"]
+    denoms = {"students": sm["student_denoms"], "paid": sm["paid_sets"]}
+
+    total_students = len(sm["student_denoms"].get("Total", set()))
+    total_paid = len(sm["paid_sets"].get("Total", set()))
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Total Unique Students", f"{total_students:,}")
+    c2.metric("Paid / Admitted Students", f"{total_paid:,}")
+    c3.metric("Winner Students", f"{len(sm['winner_ids']):,}")
+
+    st.markdown("---")
+    st.markdown("### Online Events + Masterclasses")
+    online_occ = occurrences[occurrences["event_type"].eq("Online Events + Masterclasses")].copy() if not occurrences.empty else pd.DataFrame()
+    online_att = attendees[attendees["event_type"].eq("Online Events + Masterclasses")].copy() if not attendees.empty else pd.DataFrame()
+
+    occ_by_group = {"Total": set(online_occ.get("occurrence_key", pd.Series(dtype=str)).astype(str).tolist()) if not online_occ.empty else set(),
+                    "UG": set(online_occ.loc[online_occ.get("program", pd.Series(dtype=str)).eq("UG"), "occurrence_key"].astype(str).tolist()) if not online_occ.empty else set(),
+                    "PG": set(online_occ.loc[online_occ.get("program", pd.Series(dtype=str)).eq("PG"), "occurrence_key"].astype(str).tolist()) if not online_occ.empty else set()}
+    online_att_sets = _group_sets_from_frame(online_att)
+    online_paid_att = online_att[online_att.get("is_paid", False).fillna(False).astype(bool)].copy() if not online_att.empty else pd.DataFrame()
+    online_paid_att_sets = _group_sets_from_frame(online_paid_att)
+    online_before_payment = online_att[online_att.get("before_payment", False).fillna(False).astype(bool)].copy() if not online_att.empty else pd.DataFrame()
+    online_before_payment_sets = _group_sets_from_frame(online_before_payment)
+    online_before7 = online_att[online_att.get("before_7_payment", False).fillna(False).astype(bool)].copy() if not online_att.empty else pd.DataFrame()
+    online_before7_sets = _group_sets_from_frame(online_before7)
+
+    metric_rows = [
+        ("Events / Masterclasses Done", occ_by_group, "share_total"),
+        ("Total Unique Students Attended", online_att_sets, "students"),
+        ("At least 1 Before Payment", online_before_payment_sets, "paid"),
+        ("Paid Students Attended", online_paid_att_sets, "paid"),
+        ("Paid Students Attended in T-7 to T", online_before7_sets, "paid"),
+    ]
+    st.dataframe(_success_metric_table(metric_rows, denoms), use_container_width=True, hide_index=True, key="success_online_summary")
+
+    # at least 1 / 3 / 5 online events before payment
+    thresholds = []
+    if not online_before_payment.empty:
+        per_student = online_before_payment.groupby(["student_id", "program"])["dedupe_key"].nunique().reset_index(name="attended_count")
+        for th in [1, 3, 5]:
+            sub = per_student[per_student["attended_count"] >= th]
+            thresholds.append((f"Paid Students with ≥{th} Online/Masterclass Before Payment", _group_sets_from_frame(sub), "paid"))
+    if thresholds:
+        st.markdown("##### Before-payment attendance depth")
+        st.dataframe(_success_metric_table(thresholds, denoms), use_container_width=True, hide_index=True, key="success_online_thresholds")
+
+    if not online_occ.empty:
+        chart_df = online_occ.groupby(["program", "event_type"], as_index=False)["occurrence_key"].nunique().rename(columns={"occurrence_key": "Event Occurrences"})
+        fig = px.bar(chart_df, x="program", y="Event Occurrences", color="program", title="Online Events + Masterclasses Done by Program")
+        st.plotly_chart(nice_layout(fig, height=320), use_container_width=True, key="success_online_occ_chart")
+
+    st.markdown("---")
+    st.markdown("### Competition & Hackathon")
+    comp_occ = occurrences[occurrences["event_type"].eq("Competition & Hackathon")].copy() if not occurrences.empty else pd.DataFrame()
+    comp_att = attendees[attendees["event_type"].eq("Competition & Hackathon")].copy() if not attendees.empty else pd.DataFrame()
+    comp_att_sets = _group_sets_from_frame(comp_att)
+    comp_paid_att = comp_att[comp_att.get("is_paid", False).fillna(False).astype(bool)].copy() if not comp_att.empty else pd.DataFrame()
+    comp_paid_att_sets = _group_sets_from_frame(comp_paid_att)
+    comp_paid_winners = comp_paid_att[comp_paid_att.get("is_winner", False).fillna(False).astype(bool)].copy() if not comp_paid_att.empty else pd.DataFrame()
+    comp_paid_winner_sets = _group_sets_from_frame(comp_paid_winners)
+    comp_before7 = comp_att[comp_att.get("before_7_payment", False).fillna(False).astype(bool)].copy() if not comp_att.empty else pd.DataFrame()
+    comp_before7_sets = _group_sets_from_frame(comp_before7)
+    comp_before7_winners = comp_before7[comp_before7.get("is_winner", False).fillna(False).astype(bool)].copy() if not comp_before7.empty else pd.DataFrame()
+    comp_before7_winner_sets = _group_sets_from_frame(comp_before7_winners)
+    denoms["comp_paid_attendees"] = comp_paid_att_sets
+    denoms["comp_before7_attendees"] = comp_before7_sets
+    comp_rows = [
+        ("Unique Students Participated", comp_att_sets, "students"),
+        ("Unique Students Participated and Paid", comp_paid_att_sets, "paid"),
+        ("Paid Students Participated and Won", comp_paid_winner_sets, "comp_paid_attendees"),
+        ("Paid Students Attended Competition in T-7 to T", comp_before7_sets, "paid"),
+        ("Paid Students Attended and Won Competition in T-7 to T", comp_before7_winner_sets, "comp_before7_attendees"),
+    ]
+    st.dataframe(_success_metric_table(comp_rows, denoms), use_container_width=True, hide_index=True, key="success_comp_summary")
+
+    if not comp_att.empty:
+        chart_df = comp_att.groupby(["program", "event_type"], as_index=False)["student_id"].nunique().rename(columns={"student_id": "Unique Students"})
+        fig = px.bar(chart_df, x="program", y="Unique Students", color="program", title="Competition & Hackathon Unique Participants")
+        st.plotly_chart(nice_layout(fig, height=320), use_container_width=True, key="success_comp_participants_chart")
+
+    with st.expander("Audit tables: deduped event occurrences and attendees"):
+        a, b = st.tabs(["Event Occurrences", "Attended Student Events"])
+        with a:
+            disp = occurrences.copy()
+            if not disp.empty:
+                disp["event_date"] = pd.to_datetime(disp["event_date"], errors="coerce").dt.strftime("%d-%b-%Y")
+            st.dataframe(disp, use_container_width=True, height=320, key="success_occ_audit")
+        with b:
+            disp = attendees.copy()
+            if not disp.empty:
+                disp["event_date"] = pd.to_datetime(disp["event_date"], errors="coerce").dt.strftime("%d-%b-%Y")
+            st.dataframe(disp[[c for c in ["student_name", "program", "batch", "event_name", "event_type", "event_date", "is_paid", "before_payment", "before_7_payment", "is_winner"] if c in disp.columns]], use_container_width=True, height=360, key="success_att_audit")
+
+
 def main():
     cfg = resolve_source()
     render_header(cfg)
 
     with st.sidebar:
         st.markdown("## 🧭 Navigation")
-        default_pages = ["Overview", "Recent Activity", "Student Profile", "UG", "PG", "UG vs PG", "Tetr-X", "T-7 & T+7 Analysis", "Conversion", "Retention"]
+        default_pages = ["Overview", "Recent Activity", "Success Metrics", "Student Profile", "UG", "PG", "UG vs PG", "Tetr-X", "T-7 & T+7 Analysis", "Conversion", "Retention"]
         default_index = default_pages.index(st.session_state.get("nav_page", "Overview")) if st.session_state.get("nav_page", "Overview") in default_pages else 0
         page = st.radio("Go to", default_pages, index=default_index, label_visibility="collapsed", key="nav")
         st.session_state["nav_page"] = page
@@ -3395,6 +3770,8 @@ def main():
 
     if page == "Overview":
         render_overview(data)
+    elif page == "Success Metrics":
+        render_success_metrics_page(data)
     elif page == "Student Profile":
         render_student_profile(data)
     elif page == "UG":
