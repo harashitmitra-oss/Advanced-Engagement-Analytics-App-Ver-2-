@@ -4277,26 +4277,43 @@ def build_tetrx_student_base_for_refunds(data):
 
 
 def collect_tetrx_events_for_refund_student(data, student_row, window_days=60):
-    """Collect deduped Tetr-X attended events after payment for one student."""
+    """Collect deduped refund-analytics activity for one Tetr-X student.
+
+    Accuracy rule used for Refund Analytics:
+    - Batch sheets: count attendance before/on payment date.
+    - Tetr-X sheet: count attendance after/on payment date, up to window_days after payment.
+    - Same student + event name + event type + event date is merged as 1 across sheets.
+    """
     sid = clean_text(student_row.get("student_id", ""))
     email_key = clean_text(student_row.get("email_key", "")) or normalize_email(student_row.get("Email", ""))
     student_key = clean_text(student_row.get("student_key", "")) or normalize_name(student_row.get("Student Name", ""))
     program = clean_text(student_row.get("UG/PG", ""))
     pay_dt = pd.to_datetime(student_row.get("Payment Date", pd.NaT), errors="coerce")
+    base_cols = ["student_id", "Student Name", "UG/PG", "Batch", "event_date", "event_type", "event_name", "source_sheet", "source_group", "dedupe_key"]
     rows = []
     if pd.isna(pay_dt):
-        return pd.DataFrame(columns=["event_date", "event_type", "event_name", "source_sheet", "dedupe_key"])
+        return pd.DataFrame(columns=base_cols)
     pay_dt = pay_dt.normalize()
     max_dt = pay_dt + pd.Timedelta(days=window_days) if window_days is not None else pd.NaT
 
-    for sheet in TX_SHEETS:
+    if program == "UG":
+        candidate_sheets = [s for s in UG_BATCH_SHEETS if s in data.get("activities", {})] + ["Tetr-X-UG"]
+    elif program == "PG":
+        candidate_sheets = [s for s in PG_BATCH_SHEETS if s in data.get("activities", {})] + ["Tetr-X-PG"]
+    else:
+        candidate_sheets = [s for s in (UG_BATCH_SHEETS + PG_BATCH_SHEETS + TX_SHEETS) if s in data.get("activities", {})]
+
+    for sheet in candidate_sheets:
+        if sheet not in data.get("activities", {}) or sheet not in data.get("activity_ctx", {}):
+            continue
         if program and infer_program_from_sheet(sheet) != program:
             continue
         sdf = data.get("activities", {}).get(sheet, pd.DataFrame())
         ctx = data.get("activity_ctx", {}).get(sheet, {})
         event_info = ctx.get("event_info", pd.DataFrame()) if isinstance(ctx, dict) else pd.DataFrame()
-        if sdf is None or sdf.empty or event_info.empty:
+        if sdf is None or sdf.empty or event_info is None or event_info.empty:
             continue
+
         mask = pd.Series(False, index=sdf.index)
         if email_key and "email_key" in sdf.columns:
             mask = mask | sdf["email_key"].astype(str).eq(email_key)
@@ -4305,6 +4322,9 @@ def collect_tetrx_events_for_refund_student(data, student_row, window_days=60):
         part = sdf.loc[mask]
         if part.empty:
             continue
+
+        is_tx = sheet in TX_SHEETS
+        source_group = "Tetr-X post-payment" if is_tx else "Batch pre-payment"
         for _, prow in part.iterrows():
             for _, ev in event_info.iterrows():
                 col = ev.get("column_name")
@@ -4317,10 +4337,17 @@ def collect_tetrx_events_for_refund_student(data, student_row, window_days=60):
                 if pd.isna(ev_date):
                     continue
                 ev_date = ev_date.normalize()
-                if ev_date < pay_dt:
-                    continue
-                if pd.notna(max_dt) and ev_date > max_dt:
-                    continue
+
+                if is_tx:
+                    if ev_date < pay_dt:
+                        continue
+                    if pd.notna(max_dt) and ev_date > max_dt:
+                        continue
+                else:
+                    # Batch-sheet attendance is used for the pre-payment part of the refund journey.
+                    if ev_date > pay_dt:
+                        continue
+
                 ev_name = clean_text(ev.get("event_name", "")) or clean_text(col)
                 ev_type = clean_text(ev.get("event_type", "Other")) or "Other"
                 date_key = ev_date.strftime("%Y-%m-%d")
@@ -4334,14 +4361,14 @@ def collect_tetrx_events_for_refund_student(data, student_row, window_days=60):
                     "event_type": ev_type,
                     "event_name": ev_name,
                     "source_sheet": sheet,
+                    "source_group": source_group,
                     "dedupe_key": dedupe_key,
                 })
     out = pd.DataFrame(rows)
     if out.empty:
-        return pd.DataFrame(columns=["student_id", "Student Name", "UG/PG", "Batch", "event_date", "event_type", "event_name", "source_sheet", "dedupe_key"])
+        return pd.DataFrame(columns=base_cols)
     out = out.sort_values(["event_date", "event_name", "source_sheet"]).drop_duplicates(subset=["dedupe_key"]).reset_index(drop=True)
     return out
-
 
 def build_refund_activity_summary(data, tx_students, window_days=60):
     summary_rows = []
@@ -4402,7 +4429,7 @@ def render_refund_analytics_page(data):
     for tab, prog in [(ug_tab, "UG"), (pg_tab, "PG")]:
         with tab:
             sub = refunded[refunded["UG/PG"].eq(prog)].copy()
-            st.caption(f"Refunded students from Tetr-X-{prog}. Activity counts use deduped Tetr-X events in the first 60 days after payment.")
+            st.caption(f"Refunded students from Tetr-X-{prog}. Activity counts use deduped batch-sheet pre-payment events plus Tetr-X events in the first 60 days after payment.")
             if sub.empty:
                 st.info(f"No {prog} refunded students found.")
                 continue
@@ -4420,53 +4447,61 @@ def render_refund_analytics_page(data):
 
     st.markdown("---")
     st.markdown("### 60-Day Non-Refunded Activity Distribution")
-    st.caption("Admitted Tetr-X students who completed 60 days after payment and did not refund. Counts use deduped Tetr-X activities in the first 60 days after payment.")
-    retained_summary, _ = build_refund_activity_summary(data, retained_pool, window_days=60)
-    dist_non_refund = pd.DataFrame()
-    if not retained_summary.empty:
-        counts = pd.to_numeric(retained_summary["Activities in first 60 days after payment"], errors="coerce").fillna(0).astype(int)
-        max_count = int(counts.max()) if not counts.empty else 0
-        dist_rows = []
-        for n in range(0, max_count + 1):
-            cnt = int((counts == n).sum())
-            if cnt > 0:
-                dist_rows.append({"Activity Bucket": f"did {n} activity but didn't refund in 60 days", "Students": cnt})
-        dist_non_refund = pd.DataFrame(dist_rows)
-    if dist_non_refund.empty:
-        st.info("No admitted students with completed 60-day non-refund windows found yet.")
-    else:
-        a, b = st.columns([1, 1])
-        with a:
-            st.dataframe(dist_non_refund, use_container_width=True, hide_index=True, key="refund_non_refund_dist")
-        with b:
-            fig = px.bar(dist_non_refund, x="Activity Bucket", y="Students", title="Non-Refunded Students by 60-Day Activity Count")
-            fig.update_traces(marker_color=GREEN_2)
-            st.plotly_chart(nice_layout(fig, height=360, x_tickangle=-25), use_container_width=True, key="refund_non_refund_chart")
+    st.caption("Admitted Tetr-X students who completed 60 days after payment and did not refund. Counts use deduped batch-sheet pre-payment activities plus Tetr-X activities in the first 60 days after payment. Shown separately for UG and PG.")
+    nr_ug_tab, nr_pg_tab = st.tabs(["UG Non-Refunded", "PG Non-Refunded"])
+    for tab, prog in [(nr_ug_tab, "UG"), (nr_pg_tab, "PG")]:
+        with tab:
+            retained_sub = retained_pool[retained_pool["UG/PG"].eq(prog)].copy()
+            retained_summary, _ = build_refund_activity_summary(data, retained_sub, window_days=60)
+            dist_non_refund = pd.DataFrame()
+            if not retained_summary.empty:
+                counts = pd.to_numeric(retained_summary["Activities in first 60 days after payment"], errors="coerce").fillna(0).astype(int)
+                max_count = int(counts.max()) if not counts.empty else 0
+                dist_rows = []
+                for n in range(0, max_count + 1):
+                    cnt = int((counts == n).sum())
+                    if cnt > 0:
+                        dist_rows.append({"Activity Bucket": f"did {n} activity but didn't refund in 60 days", "Students": cnt})
+                dist_non_refund = pd.DataFrame(dist_rows)
+            if dist_non_refund.empty:
+                st.info(f"No {prog} admitted students with completed 60-day non-refund windows found yet.")
+            else:
+                a, b = st.columns([1, 1])
+                with a:
+                    st.dataframe(dist_non_refund, use_container_width=True, hide_index=True, key=f"refund_non_refund_dist_{prog}")
+                with b:
+                    fig = px.bar(dist_non_refund, x="Activity Bucket", y="Students", title=f"{prog} Non-Refunded Students by Activity Count")
+                    fig.update_traces(marker_color=GREEN_2)
+                    st.plotly_chart(nice_layout(fig, height=360, x_tickangle=-25), use_container_width=True, key=f"refund_non_refund_chart_{prog}")
 
     st.markdown("---")
     st.markdown("### Refunded Students by Activity Count")
-    st.caption("Refunded Tetr-X students. Counts use deduped Tetr-X activities in the first 60 days after payment.")
-    refund_summary, _ = build_refund_activity_summary(data, refunded, window_days=60)
-    dist_refund = pd.DataFrame()
-    if not refund_summary.empty:
-        counts = pd.to_numeric(refund_summary["Activities in first 60 days after payment"], errors="coerce").fillna(0).astype(int)
-        max_count = int(counts.max()) if not counts.empty else 0
-        dist_rows = []
-        for n in range(max_count, -1, -1):
-            cnt = int((counts == n).sum())
-            if cnt > 0:
-                dist_rows.append({"Activity Bucket": f"did {n} activity still refunded", "Students": cnt})
-        dist_refund = pd.DataFrame(dist_rows)
-    if dist_refund.empty:
-        st.info("No refunded students found for this distribution.")
-    else:
-        a, b = st.columns([1, 1])
-        with a:
-            st.dataframe(dist_refund, use_container_width=True, hide_index=True, key="refund_refund_dist")
-        with b:
-            fig = px.bar(dist_refund, x="Activity Bucket", y="Students", title="Refunded Students by Activity Count")
-            fig.update_traces(marker_color=RED)
-            st.plotly_chart(nice_layout(fig, height=360, x_tickangle=-25), use_container_width=True, key="refund_refund_chart")
+    st.caption("Refunded Tetr-X students. Counts use deduped batch-sheet pre-payment activities plus Tetr-X activities in the first 60 days after payment. Shown separately for UG and PG.")
+    r_ug_tab, r_pg_tab = st.tabs(["UG Refunded", "PG Refunded"])
+    for tab, prog in [(r_ug_tab, "UG"), (r_pg_tab, "PG")]:
+        with tab:
+            refunded_sub = refunded[refunded["UG/PG"].eq(prog)].copy()
+            refund_summary, _ = build_refund_activity_summary(data, refunded_sub, window_days=60)
+            dist_refund = pd.DataFrame()
+            if not refund_summary.empty:
+                counts = pd.to_numeric(refund_summary["Activities in first 60 days after payment"], errors="coerce").fillna(0).astype(int)
+                max_count = int(counts.max()) if not counts.empty else 0
+                dist_rows = []
+                for n in range(max_count, -1, -1):
+                    cnt = int((counts == n).sum())
+                    if cnt > 0:
+                        dist_rows.append({"Activity Bucket": f"did {n} activity still refunded", "Students": cnt})
+                dist_refund = pd.DataFrame(dist_rows)
+            if dist_refund.empty:
+                st.info(f"No {prog} refunded students found for this distribution.")
+            else:
+                a, b = st.columns([1, 1])
+                with a:
+                    st.dataframe(dist_refund, use_container_width=True, hide_index=True, key=f"refund_refund_dist_{prog}")
+                with b:
+                    fig = px.bar(dist_refund, x="Activity Bucket", y="Students", title=f"{prog} Refunded Students by Activity Count")
+                    fig.update_traces(marker_color=RED)
+                    st.plotly_chart(nice_layout(fig, height=360, x_tickangle=-25), use_container_width=True, key=f"refund_refund_chart_{prog}")
 
 def main():
     cfg = resolve_source()
