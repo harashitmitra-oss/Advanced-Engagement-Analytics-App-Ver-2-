@@ -4208,13 +4208,273 @@ def render_success_metrics_page(data):
             st.dataframe(disp[[c for c in ["student_name", "program", "batch", "event_name", "event_type", "event_date", "is_paid", "before_payment", "before_7_payment", "is_winner"] if c in disp.columns]], use_container_width=True, height=360, key="success_att_audit")
 
 
+# ---------------- Refund Analytics ----------------
+
+def _student_id_from_row(row):
+    email = clean_text(row.get("email_key", ""))
+    name = clean_text(row.get("student_key", "")) or normalize_name(row.get("student_name", ""))
+    return email or name
+
+
+def build_tetrx_student_base_for_refunds(data):
+    """One row per unique Tetr-X student for refund analytics."""
+    rows = []
+    activities = data.get("activities", {})
+    for sheet in TX_SHEETS:
+        df = activities.get(sheet, pd.DataFrame())
+        if df is None or df.empty:
+            continue
+        for _, r in df.iterrows():
+            sid = _student_id_from_row(r)
+            if not sid:
+                continue
+            status_raw = clean_text(r.get("sheet_status_raw", ""))
+            pay_dt = pd.to_datetime(r.get("payment_date_parsed", pd.NaT), errors="coerce")
+            rows.append({
+                "student_id": sid,
+                "Student Name": clean_text(r.get("student_name", "")),
+                "Email": clean_text(r.get("email_key", "")),
+                "UG/PG": clean_text(r.get("Program", infer_program_from_sheet(sheet))) or infer_program_from_sheet(sheet),
+                "Batch": clean_text(r.get("Batch", "")),
+                "Country": clean_text(r.get("Country", r.get("country", ""))),
+                "Income": clean_text(r.get("Income", r.get("income", ""))),
+                "Payment Date": pay_dt,
+                "Status": status_raw,
+                "is_refunded": "refund" in status_raw.lower(),
+                "is_admitted": status_raw.strip().lower() == "admitted",
+                "source_sheet": sheet,
+                "email_key": clean_text(r.get("email_key", "")),
+                "student_key": clean_text(r.get("student_key", "")),
+            })
+    base = pd.DataFrame(rows)
+    if base.empty:
+        return base
+
+    # Collapse duplicate rows safely. Refund wins if any matching row is refunded; admitted wins if any is admitted.
+    base = base.sort_values(["Payment Date", "Student Name"], ascending=[False, True], na_position="last")
+    grouped = []
+    for sid, g in base.groupby("student_id", dropna=False):
+        g = g.copy()
+        first = g.iloc[0].to_dict()
+        pay_dates = pd.to_datetime(g["Payment Date"], errors="coerce").dropna()
+        first["Payment Date"] = pay_dates.min() if not pay_dates.empty else pd.NaT
+        first["is_refunded"] = bool(g["is_refunded"].fillna(False).any())
+        first["is_admitted"] = bool(g["is_admitted"].fillna(False).any())
+        statuses = [clean_text(x) for x in g["Status"].tolist() if clean_text(x)]
+        first["Status"] = ", ".join(sorted(dict.fromkeys(statuses)))
+        sheets = [clean_text(x) for x in g["source_sheet"].tolist() if clean_text(x)]
+        first["source_sheet"] = ", ".join(sorted(dict.fromkeys(sheets)))
+        # Prefer non-empty stable fields from any row.
+        for col in ["Student Name", "Email", "UG/PG", "Batch", "Country", "Income", "email_key", "student_key"]:
+            vals = [clean_text(x) for x in g[col].tolist() if clean_text(x)] if col in g.columns else []
+            if vals:
+                first[col] = vals[0]
+        grouped.append(first)
+    out = pd.DataFrame(grouped)
+    if not out.empty:
+        out["Payment Date"] = pd.to_datetime(out["Payment Date"], errors="coerce")
+    return out
+
+
+def collect_tetrx_events_for_refund_student(data, student_row, window_days=60):
+    """Collect deduped Tetr-X attended events after payment for one student."""
+    sid = clean_text(student_row.get("student_id", ""))
+    email_key = clean_text(student_row.get("email_key", "")) or normalize_email(student_row.get("Email", ""))
+    student_key = clean_text(student_row.get("student_key", "")) or normalize_name(student_row.get("Student Name", ""))
+    program = clean_text(student_row.get("UG/PG", ""))
+    pay_dt = pd.to_datetime(student_row.get("Payment Date", pd.NaT), errors="coerce")
+    rows = []
+    if pd.isna(pay_dt):
+        return pd.DataFrame(columns=["event_date", "event_type", "event_name", "source_sheet", "dedupe_key"])
+    pay_dt = pay_dt.normalize()
+    max_dt = pay_dt + pd.Timedelta(days=window_days) if window_days is not None else pd.NaT
+
+    for sheet in TX_SHEETS:
+        if program and infer_program_from_sheet(sheet) != program:
+            continue
+        sdf = data.get("activities", {}).get(sheet, pd.DataFrame())
+        ctx = data.get("activity_ctx", {}).get(sheet, {})
+        event_info = ctx.get("event_info", pd.DataFrame()) if isinstance(ctx, dict) else pd.DataFrame()
+        if sdf is None or sdf.empty or event_info.empty:
+            continue
+        mask = pd.Series(False, index=sdf.index)
+        if email_key and "email_key" in sdf.columns:
+            mask = mask | sdf["email_key"].astype(str).eq(email_key)
+        if student_key and "student_key" in sdf.columns:
+            mask = mask | sdf["student_key"].astype(str).eq(student_key)
+        part = sdf.loc[mask]
+        if part.empty:
+            continue
+        for _, prow in part.iterrows():
+            for _, ev in event_info.iterrows():
+                col = ev.get("column_name")
+                if not col or col not in prow.index:
+                    continue
+                attended = pd.to_numeric(pd.Series([prow.get(col, 0)]), errors="coerce").fillna(0).iloc[0]
+                if attended <= 0:
+                    continue
+                ev_date = pd.to_datetime(ev.get("event_date", pd.NaT), errors="coerce")
+                if pd.isna(ev_date):
+                    continue
+                ev_date = ev_date.normalize()
+                if ev_date < pay_dt:
+                    continue
+                if pd.notna(max_dt) and ev_date > max_dt:
+                    continue
+                ev_name = clean_text(ev.get("event_name", "")) or clean_text(col)
+                ev_type = clean_text(ev.get("event_type", "Other")) or "Other"
+                date_key = ev_date.strftime("%Y-%m-%d")
+                dedupe_key = "|".join([sid or email_key or student_key, normalize_name(ev_name), normalize_name(ev_type), date_key])
+                rows.append({
+                    "student_id": sid,
+                    "Student Name": clean_text(student_row.get("Student Name", "")),
+                    "UG/PG": program,
+                    "Batch": clean_text(student_row.get("Batch", "")),
+                    "event_date": ev_date,
+                    "event_type": ev_type,
+                    "event_name": ev_name,
+                    "source_sheet": sheet,
+                    "dedupe_key": dedupe_key,
+                })
+    out = pd.DataFrame(rows)
+    if out.empty:
+        return pd.DataFrame(columns=["student_id", "Student Name", "UG/PG", "Batch", "event_date", "event_type", "event_name", "source_sheet", "dedupe_key"])
+    out = out.sort_values(["event_date", "event_name", "source_sheet"]).drop_duplicates(subset=["dedupe_key"]).reset_index(drop=True)
+    return out
+
+
+def build_refund_activity_summary(data, tx_students, window_days=60):
+    summary_rows = []
+    event_rows = []
+    for _, stu in tx_students.iterrows():
+        ev = collect_tetrx_events_for_refund_student(data, stu, window_days=window_days)
+        count = int(ev["dedupe_key"].nunique()) if not ev.empty else 0
+        event_types = ", ".join(ev.groupby("event_type")["dedupe_key"].nunique().sort_values(ascending=False).index.tolist()) if not ev.empty else ""
+        event_names = ", ".join(ev.sort_values("event_date")["event_name"].dropna().astype(str).drop_duplicates().head(30).tolist()) if not ev.empty else ""
+        summary_rows.append({
+            "Student Name": clean_text(stu.get("Student Name", "")),
+            "Email": clean_text(stu.get("Email", "")),
+            "UG/PG": clean_text(stu.get("UG/PG", "")),
+            "Batch": clean_text(stu.get("Batch", "")),
+            "Payment Date": pd.to_datetime(stu.get("Payment Date", pd.NaT), errors="coerce"),
+            "Status": clean_text(stu.get("Status", "")),
+            "Activities in first 60 days after payment": count,
+            "Event Types": event_types,
+            "Event Names": event_names,
+        })
+        if not ev.empty:
+            event_rows.append(ev.assign(Status=clean_text(stu.get("Status", ""))))
+    summary = pd.DataFrame(summary_rows)
+    events = pd.concat(event_rows, ignore_index=True) if event_rows else pd.DataFrame(columns=["student_id", "Student Name", "UG/PG", "Batch", "event_date", "event_type", "event_name", "source_sheet", "dedupe_key", "Status"])
+    return summary, events
+
+
+def _activity_distribution_table(summary_df, label):
+    if summary_df is None or summary_df.empty:
+        return pd.DataFrame(columns=[label, "Students"])
+    counts = pd.to_numeric(summary_df["Activities in first 60 days after payment"], errors="coerce").fillna(0).astype(int)
+    dist = counts.value_counts().sort_index().reset_index()
+    dist.columns = ["Activities", "Students"]
+    dist[label] = dist["Activities"].apply(lambda n: f"did {int(n)} activity but didn't refund in 60 days" if "didn't refund" in label.lower() else f"did {int(n)} activity still refunded")
+    return dist[[label, "Students"]]
+
+
+def render_refund_analytics_page(data):
+    st.subheader("Refund Analytics")
+    tx_students = build_tetrx_student_base_for_refunds(data)
+    if tx_students.empty:
+        st.warning("No Tetr-X students found for refund analytics.")
+        return
+
+    refunded = tx_students[tx_students["is_refunded"]].copy()
+    today = get_today_ist()
+    tx_students["days_since_payment"] = (today - pd.to_datetime(tx_students["Payment Date"], errors="coerce").dt.normalize()).dt.days
+    retained_pool = tx_students[(~tx_students["is_refunded"]) & (tx_students["is_admitted"]) & (tx_students["days_since_payment"].ge(60))].copy()
+
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Total Students Refunded", f"{refunded['student_id'].nunique():,}")
+    c2.metric("UG Refunds", f"{refunded.loc[refunded['UG/PG'].eq('UG'), 'student_id'].nunique():,}")
+    c3.metric("PG Refunds", f"{refunded.loc[refunded['UG/PG'].eq('PG'), 'student_id'].nunique():,}")
+
+    st.markdown("---")
+    st.markdown("### Refunded Student Activity")
+    ug_tab, pg_tab = st.tabs(["UG Refunds", "PG Refunds"])
+    for tab, prog in [(ug_tab, "UG"), (pg_tab, "PG")]:
+        with tab:
+            sub = refunded[refunded["UG/PG"].eq(prog)].copy()
+            st.caption(f"Refunded students from Tetr-X-{prog}. Activity counts use deduped Tetr-X events in the first 60 days after payment.")
+            if sub.empty:
+                st.info(f"No {prog} refunded students found.")
+                continue
+            summary, events = build_refund_activity_summary(data, sub, window_days=60)
+            show = summary.copy()
+            if "Payment Date" in show.columns:
+                show["Payment Date"] = pd.to_datetime(show["Payment Date"], errors="coerce").dt.strftime("%d-%b-%Y")
+            st.dataframe(show.sort_values(["Payment Date", "Student Name"], ascending=[False, True], na_position="last"), use_container_width=True, height=360, key=f"refund_{prog}_summary")
+            with st.expander(f"{prog} refunded students · detailed event list"):
+                evshow = events.copy()
+                if not evshow.empty:
+                    evshow["event_date"] = pd.to_datetime(evshow["event_date"], errors="coerce").dt.strftime("%d-%b-%Y")
+                cols = [c for c in ["Student Name", "UG/PG", "Batch", "event_date", "event_type", "event_name", "source_sheet"] if c in evshow.columns]
+                st.dataframe(evshow[cols] if cols else evshow, use_container_width=True, height=420, key=f"refund_{prog}_events")
+
+    st.markdown("---")
+    st.markdown("### 60-Day Non-Refunded Activity Distribution")
+    st.caption("Admitted Tetr-X students who completed 60 days after payment and did not refund. Counts use deduped Tetr-X activities in the first 60 days after payment.")
+    retained_summary, _ = build_refund_activity_summary(data, retained_pool, window_days=60)
+    dist_non_refund = pd.DataFrame()
+    if not retained_summary.empty:
+        counts = pd.to_numeric(retained_summary["Activities in first 60 days after payment"], errors="coerce").fillna(0).astype(int)
+        max_count = int(counts.max()) if not counts.empty else 0
+        dist_rows = []
+        for n in range(0, max_count + 1):
+            cnt = int((counts == n).sum())
+            if cnt > 0:
+                dist_rows.append({"Activity Bucket": f"did {n} activity but didn't refund in 60 days", "Students": cnt})
+        dist_non_refund = pd.DataFrame(dist_rows)
+    if dist_non_refund.empty:
+        st.info("No admitted students with completed 60-day non-refund windows found yet.")
+    else:
+        a, b = st.columns([1, 1])
+        with a:
+            st.dataframe(dist_non_refund, use_container_width=True, hide_index=True, key="refund_non_refund_dist")
+        with b:
+            fig = px.bar(dist_non_refund, x="Activity Bucket", y="Students", title="Non-Refunded Students by 60-Day Activity Count")
+            fig.update_traces(marker_color=GREEN_2)
+            st.plotly_chart(nice_layout(fig, height=360, x_tickangle=-25), use_container_width=True, key="refund_non_refund_chart")
+
+    st.markdown("---")
+    st.markdown("### Refunded Students by Activity Count")
+    st.caption("Refunded Tetr-X students. Counts use deduped Tetr-X activities in the first 60 days after payment.")
+    refund_summary, _ = build_refund_activity_summary(data, refunded, window_days=60)
+    dist_refund = pd.DataFrame()
+    if not refund_summary.empty:
+        counts = pd.to_numeric(refund_summary["Activities in first 60 days after payment"], errors="coerce").fillna(0).astype(int)
+        max_count = int(counts.max()) if not counts.empty else 0
+        dist_rows = []
+        for n in range(max_count, -1, -1):
+            cnt = int((counts == n).sum())
+            if cnt > 0:
+                dist_rows.append({"Activity Bucket": f"did {n} activity still refunded", "Students": cnt})
+        dist_refund = pd.DataFrame(dist_rows)
+    if dist_refund.empty:
+        st.info("No refunded students found for this distribution.")
+    else:
+        a, b = st.columns([1, 1])
+        with a:
+            st.dataframe(dist_refund, use_container_width=True, hide_index=True, key="refund_refund_dist")
+        with b:
+            fig = px.bar(dist_refund, x="Activity Bucket", y="Students", title="Refunded Students by Activity Count")
+            fig.update_traces(marker_color=RED)
+            st.plotly_chart(nice_layout(fig, height=360, x_tickangle=-25), use_container_width=True, key="refund_refund_chart")
+
 def main():
     cfg = resolve_source()
     render_header(cfg)
 
     with st.sidebar:
         st.markdown("## 🧭 Navigation")
-        default_pages = ["Overview", "Recent Activity", "Success Metrics", "Student Profile", "UG", "PG", "UG vs PG", "Tetr-X", "T-7 & T+7 Analysis", "Conversion", "Retention"]
+        default_pages = ["Overview", "Recent Activity", "Success Metrics", "Student Profile", "UG", "PG", "UG vs PG", "Tetr-X", "T-7 & T+7 Analysis", "Conversion", "Retention", "Refund Analytics"]
         default_index = default_pages.index(st.session_state.get("nav_page", "Overview")) if st.session_state.get("nav_page", "Overview") in default_pages else 0
         page = st.radio("Go to", default_pages, index=default_index, label_visibility="collapsed", key="nav")
         st.session_state["nav_page"] = page
@@ -4258,6 +4518,8 @@ def main():
         render_true_retention_page(data)
     elif page == "Recent Activity":
         render_recent_activity_page(data)
+    elif page == "Refund Analytics":
+        render_refund_analytics_page(data)
 
 
 if __name__ == "__main__":
