@@ -2902,6 +2902,307 @@ def render_retention_page(data):
     c2.metric("Students with 0 Post Payment Activities", f"{int((summary_df['post_payment_count'] == 0).sum()):,}")
     render_event_type_block("Post Payment Journey Event Type Performance", events_df, "post_payment", "ret_post", eligible_students=total)
 
+
+# ---------------- Tetr-X Analytics Additions ----------------
+
+def _first_existing_col_like(frame: pd.DataFrame, keywords):
+    if frame is None or frame.empty:
+        return None
+    for c in frame.columns:
+        cl = clean_text(c).lower()
+        if any(k in cl for k in keywords):
+            return c
+    return None
+
+
+def _tx_scope_sheets(scope_label: str):
+    if scope_label == "Tetr-X-UG":
+        return ["Tetr-X-UG"]
+    if scope_label == "Tetr-X-PG":
+        return ["Tetr-X-PG"]
+    return TX_SHEETS[:]
+
+
+def _tx_master_lookup(data):
+    overview = data.get("overview_df", pd.DataFrame())
+    lookup = {}
+    if overview is None or overview.empty:
+        return lookup
+    country_col = _first_existing_col_like(overview, ["country"])
+    income_col = _first_existing_col_like(overview, ["income"])
+    for _, r in overview.iterrows():
+        sid = _student_id_from_values(r.get("email_key", ""), r.get("student_key", ""), r.get("student_name", ""))
+        if not sid or sid in lookup:
+            continue
+        lookup[sid] = {
+            "Country": clean_text(r.get(country_col, "")) if country_col else "",
+            "Income": clean_text(r.get(income_col, "")) if income_col else "",
+            "Email": clean_text(r.get("email_key", "")),
+        }
+    return lookup
+
+
+def build_tetrx_analytics_students(data, scope_label="Total"):
+    """Student list + metrics for the Tetr X Analytics subsection."""
+    rows = []
+    master_lookup = _tx_master_lookup(data)
+    today = get_today_ist()
+    for sheet in _tx_scope_sheets(scope_label):
+        tx_df = data.get("activities", {}).get(sheet, pd.DataFrame())
+        if tx_df is None or tx_df.empty:
+            continue
+        program = "UG" if sheet.endswith("UG") else "PG"
+        country_col = _first_existing_col_like(tx_df, ["country"])
+        income_col = _first_existing_col_like(tx_df, ["income"])
+        email_col = _first_existing_col_like(tx_df, ["email"])
+        for _, r in tx_df.iterrows():
+            sid = _student_id_from_values(r.get("email_key", ""), r.get("student_key", ""), r.get("student_name", ""))
+            if not sid:
+                continue
+            pay_dt = pd.to_datetime(r.get("payment_date_parsed", pd.NaT), errors="coerce")
+            pay_dt = pay_dt.normalize() if pd.notna(pay_dt) else pd.NaT
+            raw_status = clean_text(r.get("sheet_status_raw", ""))
+            status_text = raw_status.lower()
+            is_refund = bool(r.get("sheet_is_refunded", False)) or ("refund" in status_text)
+            # In-group follows the existing normalized community mapping. This includes Tetr X / Tetrx / Added to term 0.
+            in_group = clean_text(r.get("community_status_value", "")) == "Tetr X"
+            days_left = ""
+            if pd.notna(pay_dt):
+                days_left = max(0, 60 - int((today - pay_dt).days))
+            m = master_lookup.get(sid, {})
+            email_val = clean_text(r.get("email_key", "")) or clean_text(r.get(email_col, "")) if email_col else clean_text(r.get("email_key", ""))
+            rows.append({
+                "student_id": sid,
+                "Name": clean_text(r.get("student_name", "")),
+                "Email": email_val,
+                "UG/PG": program,
+                "Country": clean_text(r.get(country_col, "")) if country_col else m.get("Country", ""),
+                "Income": clean_text(r.get(income_col, "")) if income_col else m.get("Income", ""),
+                "Payment Date": pay_dt,
+                "Tetr X/Term 0 Status": "Added to term 0 / Tetr X" if in_group else clean_text(r.get("community_status_value", "")) or "Out",
+                "Refund Status": "Refunded" if is_refund else "Not Refunded",
+                "Days left to ask refund": days_left,
+                "source_sheet": sheet,
+                "is_refunded": is_refund,
+                "in_group": in_group,
+            })
+    out = pd.DataFrame(rows)
+    if out.empty:
+        return pd.DataFrame(columns=["Name", "Email", "Country", "Income", "Payment Date", "Tetr X/Term 0 Status", "Refund Status", "Days left to ask refund"]), {}
+    # One row per student, latest/recent payment first.
+    out = out.sort_values(["Payment Date", "Name"], ascending=[False, True], na_position="last")
+    out = out.drop_duplicates("student_id", keep="first").reset_index(drop=True)
+    paid_total = len(out)
+    refunded = int(out["is_refunded"].sum())
+    paid_in_group = int(((~out["is_refunded"]) & out["in_group"]).sum())
+    refunded_in_group = int((out["is_refunded"] & out["in_group"]).sum())
+    paid_not_in_group = int(((~out["is_refunded"]) & (~out["in_group"])).sum())
+    metrics = {
+        "Total paid students": paid_total,
+        "Refunded": refunded,
+        "Paid & in group": paid_in_group,
+        "Refunded & in group": refunded_in_group,
+        "Paid & not in group": paid_not_in_group,
+    }
+    return out, metrics
+
+
+def _tx_online_masterclass_rows(data, scope_label="Total"):
+    """Per-event post-payment engagement for Online Events + Masterclasses in Tetr-X sheets."""
+    student_table, _ = build_tetrx_analytics_students(data, scope_label)
+    if student_table.empty:
+        return pd.DataFrame()
+    paid_by_program = {}
+    for program, frame in student_table.groupby("UG/PG"):
+        tmp = frame[["student_id", "Payment Date"]].copy()
+        tmp["Payment Date"] = pd.to_datetime(tmp["Payment Date"], errors="coerce").dt.normalize()
+        paid_by_program[program] = tmp
+
+    rows = []
+    # Accumulate attendees by occurrence so duplicates are merged.
+    occurrence_map = {}
+    for sheet in _tx_scope_sheets(scope_label):
+        df = data.get("activities", {}).get(sheet, pd.DataFrame())
+        ctx = data.get("activity_ctx", {}).get(sheet, {})
+        ev_info = ctx.get("event_info", pd.DataFrame()) if ctx else pd.DataFrame()
+        if df is None or df.empty or ev_info is None or ev_info.empty:
+            continue
+        program = "UG" if sheet.endswith("UG") else "PG"
+        for _, ev in ev_info.iterrows():
+            ev_type_raw = clean_text(ev.get("event_type", ""))
+            bucket = map_retention_bucket_event_type(ev_type_raw)
+            if bucket != "Online Events & Masterclasses":
+                continue
+            col = ev.get("column_name")
+            ev_date = pd.to_datetime(ev.get("event_date", pd.NaT), errors="coerce")
+            if not col or col not in df.columns or pd.isna(ev_date):
+                continue
+            ev_date = ev_date.normalize()
+            ev_name = clean_text(ev.get("event_name", "")) or clean_text(col)
+            occ_key = f"{program}|{normalize_name(ev_name)}|{ev_date.date()}|online_masterclass"
+            if occ_key not in occurrence_map:
+                paid_frame = paid_by_program.get(program, pd.DataFrame())
+                paid_at_event = 0
+                if not paid_frame.empty:
+                    paid_at_event = int((paid_frame["Payment Date"].notna() & (paid_frame["Payment Date"] <= ev_date)).sum())
+                occurrence_map[occ_key] = {
+                    "Program": program,
+                    "Event Name": ev_name,
+                    "Event Date": ev_date,
+                    "Month": ev_date.strftime("%b %Y"),
+                    "Paid at Event Date": paid_at_event,
+                    "attendee_ids": set(),
+                }
+            attended = df[pd.to_numeric(df[col], errors="coerce").fillna(0) > 0].copy()
+            if attended.empty:
+                continue
+            for _, r in attended.iterrows():
+                sid = _student_id_from_values(r.get("email_key", ""), r.get("student_key", ""), r.get("student_name", ""))
+                if not sid:
+                    continue
+                pay_dt = pd.to_datetime(r.get("payment_date_parsed", pd.NaT), errors="coerce")
+                if pd.notna(pay_dt) and ev_date >= pay_dt.normalize():
+                    occurrence_map[occ_key]["attendee_ids"].add(sid)
+
+    for item in occurrence_map.values():
+        attendance = len(item.pop("attendee_ids"))
+        paid_at_event = int(item.get("Paid at Event Date", 0) or 0)
+        item["Attendance"] = attendance
+        item["Attendance %"] = (attendance / paid_at_event * 100) if paid_at_event else 0.0
+        rows.append(item)
+    out = pd.DataFrame(rows)
+    if out.empty:
+        return out
+    return out.sort_values(["Event Date", "Program", "Event Name"]).reset_index(drop=True)
+
+
+def _tx_top_engaged_students(data, scope_label="Total"):
+    """Top Tetr-X students by attended post-payment events / eligible post-payment events."""
+    student_table, _ = build_tetrx_analytics_students(data, scope_label)
+    if student_table.empty:
+        return pd.DataFrame()
+    rows = []
+    for _, stu in student_table.iterrows():
+        sid = clean_text(stu.get("student_id", ""))
+        program = clean_text(stu.get("UG/PG", ""))
+        pay_dt = pd.to_datetime(stu.get("Payment Date", pd.NaT), errors="coerce")
+        if not sid or pd.isna(pay_dt):
+            continue
+        pay_dt = pay_dt.normalize()
+        sheet = "Tetr-X-UG" if program == "UG" else "Tetr-X-PG"
+        df = data.get("activities", {}).get(sheet, pd.DataFrame())
+        ctx = data.get("activity_ctx", {}).get(sheet, {})
+        ev_info = ctx.get("event_info", pd.DataFrame()) if ctx else pd.DataFrame()
+        if df is None or df.empty or ev_info is None or ev_info.empty:
+            continue
+        mask = pd.Series(False, index=df.index)
+        if clean_text(stu.get("Email", "")) and "email_key" in df.columns:
+            mask = mask | df["email_key"].astype(str).eq(normalize_email(stu.get("Email", "")))
+        # student_id can be email or normalized name; use both defensively.
+        if "student_key" in df.columns:
+            mask = mask | df["student_key"].astype(str).eq(sid)
+        if "email_key" in df.columns:
+            mask = mask | df["email_key"].astype(str).eq(sid)
+        part = df.loc[mask].copy()
+        if part.empty:
+            continue
+        eligible = set()
+        attended = set()
+        type_counts = {}
+        for _, ev in ev_info.iterrows():
+            col = ev.get("column_name")
+            ev_date = pd.to_datetime(ev.get("event_date", pd.NaT), errors="coerce")
+            if not col or col not in part.columns or pd.isna(ev_date):
+                continue
+            ev_date = ev_date.normalize()
+            if ev_date < pay_dt:
+                continue
+            ev_name = clean_text(ev.get("event_name", "")) or clean_text(col)
+            ev_type = map_retention_bucket_event_type(clean_text(ev.get("event_type", "")) or "Other")
+            occ_key = f"{program}|{normalize_name(ev_name)}|{normalize_name(ev_type)}|{ev_date.date()}"
+            eligible.add(occ_key)
+            if (pd.to_numeric(part[col], errors="coerce").fillna(0) > 0).any():
+                attended.add(occ_key)
+                type_counts[ev_type] = type_counts.get(ev_type, 0) + 1
+        eligible_count = len(eligible)
+        attended_count = len(attended)
+        rows.append({
+            "Name": stu.get("Name", ""),
+            "Email": stu.get("Email", ""),
+            "UG/PG": program,
+            "Payment Date": pay_dt,
+            "Eligible Events": eligible_count,
+            "Attended Events": attended_count,
+            "Engagement %": (attended_count / eligible_count * 100) if eligible_count else 0.0,
+            "Top Event Types": ", ".join([f"{k}: {v}" for k, v in sorted(type_counts.items(), key=lambda x: x[1], reverse=True)[:4]]),
+        })
+    out = pd.DataFrame(rows)
+    if out.empty:
+        return out
+    return out.sort_values(["Engagement %", "Attended Events", "Name"], ascending=[False, False, True]).reset_index(drop=True)
+
+
+def render_tetrx_analytics_scope(data, scope_label: str, key_prefix: str):
+    students, metrics = build_tetrx_analytics_students(data, scope_label)
+    st.markdown(f"### {scope_label}")
+    if students.empty:
+        st.info(f"No Tetr-X students found for {scope_label}.")
+        return
+    c = st.columns(5)
+    c[0].metric("Total paid students", f"{metrics.get('Total paid students', 0):,}")
+    c[1].metric("Refunded", f"{metrics.get('Refunded', 0):,}")
+    c[2].metric("Paid & in group", f"{metrics.get('Paid & in group', 0):,}")
+    c[3].metric("Refunded & in group", f"{metrics.get('Refunded & in group', 0):,}")
+    c[4].metric("Paid & not in group", f"{metrics.get('Paid & not in group', 0):,}")
+
+    st.markdown("#### Names of students in Tetr X")
+    display = students[["Name", "Email", "Country", "Income", "Payment Date", "Tetr X/Term 0 Status", "Refund Status", "Days left to ask refund"]].copy()
+    display["Payment Date"] = pd.to_datetime(display["Payment Date"], errors="coerce").dt.strftime("%d-%b-%Y")
+    st.dataframe(display, use_container_width=True, height=360, hide_index=True, key=f"{key_prefix}_students")
+
+    st.markdown("#### Post-Payment Engagement (Online Events + Masterclasses)")
+    eng = _tx_online_masterclass_rows(data, scope_label)
+    if eng.empty:
+        st.info("No dated post-payment Online Event / Masterclass attendance found.")
+    else:
+        chart_df = eng.copy()
+        chart_df["Date Label"] = pd.to_datetime(chart_df["Event Date"], errors="coerce").dt.strftime("%d %b")
+        fig = px.bar(
+            chart_df,
+            x="Date Label",
+            y="Attendance %",
+            color="Month",
+            hover_name="Event Name",
+            hover_data={"Paid at Event Date": True, "Attendance": True, "Attendance %": ':.1f', "Program": True, "Date Label": False},
+            title="Post-Payment Engagement (Online Events + Masterclasses)",
+        )
+        fig.update_traces(texttemplate="%{y:.1f}%", textposition="outside")
+        st.plotly_chart(nice_layout(fig, height=390, x_tickangle=-25), use_container_width=True, key=f"{key_prefix}_postpay_online_chart")
+        table = eng.copy()
+        table["Event Date"] = pd.to_datetime(table["Event Date"], errors="coerce").dt.strftime("%d-%b-%Y")
+        st.dataframe(table[["Program", "Event Date", "Event Name", "Paid at Event Date", "Attendance", "Attendance %"]], use_container_width=True, hide_index=True, height=260, key=f"{key_prefix}_postpay_online_table")
+
+    st.markdown("#### Top engaged students in Tetr X")
+    top = _tx_top_engaged_students(data, scope_label)
+    if top.empty:
+        st.info("No eligible post-payment event data found for top engaged students.")
+    else:
+        chart_top = top.head(15).copy()
+        fig = px.bar(chart_top, x="Engagement %", y="Name", orientation="h", hover_data=["Attended Events", "Eligible Events", "Top Event Types"], title="Top Engaged Students by Eligible Post-Payment Attendance %")
+        fig.update_traces(marker_color=GREEN)
+        st.plotly_chart(nice_layout(fig, height=460), use_container_width=True, key=f"{key_prefix}_top_engaged_chart")
+        disp = top.copy()
+        disp["Payment Date"] = pd.to_datetime(disp["Payment Date"], errors="coerce").dt.strftime("%d-%b-%Y")
+        st.dataframe(disp, use_container_width=True, hide_index=True, height=360, key=f"{key_prefix}_top_engaged_table")
+
+
+def render_tetrx_analytics(data):
+    st.markdown("## Tetr X Analytics")
+    subtabs = st.tabs(["Total", "Tetr-X-UG", "Tetr-X-PG"])
+    for tab, scope in zip(subtabs, ["Total", "Tetr-X-UG", "Tetr-X-PG"]):
+        with tab:
+            render_tetrx_analytics_scope(data, scope, f"txanalytics_{scope.replace('-', '_').replace(' ', '_')}")
+
 def render_tetrx_page(data):
     st.subheader("Tetr-X")
     available = [s for s in TX_SHEETS if s in data["activities"]]
@@ -2918,10 +3219,15 @@ def render_tetrx_page(data):
     k2.metric("Active Students", f"{tx_active:,}", delta=f"{(tx_active/tx_students*100 if tx_students else 0):.1f}%")
     k3.metric("Admitted / Paid", f"{tx_paid:,}", delta=f"{(tx_paid/tx_students*100 if tx_students else 0):.1f}%")
     k4.metric("Refunded", f"{tx_refunded:,}", delta=f"{(tx_refunded/tx_students*100 if tx_students else 0):.1f}%")
-    tabs = st.tabs(available)
-    for tab, sheet in zip(tabs, available):
+
+    tab_labels = available + ["Tetr X Analytics"]
+    tabs = st.tabs(tab_labels)
+    for tab, label in zip(tabs, tab_labels):
         with tab:
-            render_sheet_detail(sheet, data["activities"][sheet], data["activity_ctx"][sheet], f"tx_{sheet}", data=data)
+            if label == "Tetr X Analytics":
+                render_tetrx_analytics(data)
+            else:
+                render_sheet_detail(label, data["activities"][label], data["activity_ctx"][label], f"tx_{label}", data=data)
 
 
 
@@ -3641,6 +3947,45 @@ def _render_success_summary_table(title, rows, key):
     st.dataframe(table, use_container_width=True, hide_index=True, key=key)
 
 
+
+
+def _winner_challenge_lookup(data):
+    winner_df = data.get("winner_df", pd.DataFrame())
+    out = {}
+    if winner_df is None or winner_df.empty:
+        return out
+    w = winner_df[winner_df.get("is_winner", False).fillna(False).astype(bool)].copy() if "is_winner" in winner_df.columns else winner_df.copy()
+    for _, r in w.iterrows():
+        sid = _student_id_from_values(r.get("email_key", ""), r.get("student_key", ""), r.get("winner_name", ""))
+        if not sid:
+            continue
+        out.setdefault(sid, set()).add(clean_text(r.get("challenge_name", "")))
+    return {k: sorted([x for x in v if x]) for k, v in out.items()}
+
+
+def render_success_comp_t7_student_list(comp_before7: pd.DataFrame, data):
+    st.markdown("##### Paid Students Attended Competition in T-7 to T · Student List")
+    if comp_before7 is None or comp_before7.empty:
+        st.info("No paid students attended Competition/Hackathon in T-7 to T.")
+        return
+    win_lookup = _winner_challenge_lookup(data)
+    rows = []
+    for sid, g in comp_before7.groupby("student_id"):
+        event_names = sorted(dict.fromkeys([clean_text(x) for x in g.get("event_name", pd.Series(dtype=str)).tolist() if clean_text(x)]))
+        winner_challenges = win_lookup.get(sid, [])
+        first = g.iloc[0]
+        rows.append({
+            "Student Name": clean_text(first.get("student_name", "")),
+            "UG/PG": clean_text(first.get("program", "")),
+            "Batch": clean_text(first.get("batch", "")),
+            "Events Attended in T-7 to T": len(set(g.get("dedupe_key", pd.Series(dtype=str)).astype(str).tolist())),
+            "Event Names": ", ".join(event_names),
+            "Winner Status": "Won" if winner_challenges else "Not Won",
+            "Winner Challenge(s)": ", ".join(winner_challenges),
+        })
+    out = pd.DataFrame(rows).sort_values(["Winner Status", "Events Attended in T-7 to T", "Student Name"], ascending=[True, False, True])
+    st.dataframe(out, use_container_width=True, hide_index=True, height=300, key="success_comp_t7_student_list")
+
 def render_success_metrics_page(data):
     st.subheader("Success Metrics")
     st.caption("All event/activity attendance is deduped by same student + same event name + same event type + same date. Event occurrences are deduped by program + event name + event type + date, so duplicated events across batch sheets count once.")
@@ -3720,6 +4065,7 @@ def render_success_metrics_page(data):
         ("Paid Students Attended and Won Competition in T-7 to T", comp_before7_winner_sets, "comp_before7_attendees"),
     ]
     st.dataframe(_success_metric_table(comp_rows, denoms), use_container_width=True, hide_index=True, key="success_comp_summary")
+    render_success_comp_t7_student_list(comp_before7, data)
 
     # Before-payment attendance depth for Competition & Hackathon.
     # "Before payment" means all attended competition/hackathon activities on or before the payment date,
