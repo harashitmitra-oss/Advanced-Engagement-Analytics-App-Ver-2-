@@ -4484,13 +4484,23 @@ def render_refund_analytics_page(data):
             refund_summary, _ = build_refund_activity_summary(data, refunded_sub, window_days=60)
             dist_refund = pd.DataFrame()
             if not refund_summary.empty:
-                counts = pd.to_numeric(refund_summary["Activities in first 60 days after payment"], errors="coerce").fillna(0).astype(int)
+                refund_summary = refund_summary.copy()
+                refund_summary["_activity_count_bucket"] = pd.to_numeric(
+                    refund_summary["Activities in first 60 days after payment"], errors="coerce"
+                ).fillna(0).astype(int)
+                counts = refund_summary["_activity_count_bucket"]
                 max_count = int(counts.max()) if not counts.empty else 0
                 dist_rows = []
                 for n in range(max_count, -1, -1):
-                    cnt = int((counts == n).sum())
+                    bucket_students = refund_summary.loc[counts == n, "Student Name"].dropna().astype(str).map(clean_text)
+                    bucket_students = [x for x in bucket_students.tolist() if x]
+                    cnt = len(bucket_students)
                     if cnt > 0:
-                        dist_rows.append({"Activity Bucket": f"did {n} activity still refunded", "Students": cnt})
+                        dist_rows.append({
+                            "Activity Bucket": f"did {n} activity still refunded",
+                            "Students": cnt,
+                            "Student Names": ", ".join(sorted(dict.fromkeys(bucket_students))),
+                        })
                 dist_refund = pd.DataFrame(dist_rows)
             if dist_refund.empty:
                 st.info(f"No {prog} refunded students found for this distribution.")
