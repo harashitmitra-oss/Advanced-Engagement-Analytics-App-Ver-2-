@@ -864,8 +864,8 @@ def parse_master_sheet(raw: pd.DataFrame, program: str, sheet_name: str):
     status_col = best_matching_col(df, ["status"])
     payment_col = best_matching_col(df, ["payment"])
     payment_date_col = best_matching_col(df, ["payment date", "date of payment", "paid date"])
-    community_status_col = best_matching_col(df, ["community status", "admitted group"])
-    term_zero_col = best_matching_col(df, ["term zero group"])
+    community_status_col = best_matching_col(df, ["tetr x/term 0 status", "tetr x term 0 status", "term 0 status", "community status", "admitted group"])
+    term_zero_col = best_matching_col(df, ["tetr x/term 0 status", "tetr x term 0 status", "term 0 status", "term zero group", "added to term 0"])
 
     if not name_col:
         raise ValueError(f"Name column not found in {sheet_name}")
@@ -993,8 +993,8 @@ def parse_activity_sheet(raw: pd.DataFrame, sheet_name: str):
     country_col = best_matching_col(df, ["country"])
     income_col = best_matching_col(df, ["income"])
     mobile_col = best_matching_col(df, ["mobile"])
-    community_status_col = best_matching_col(df, ["community status", "admitted group"])
-    term_zero_col = best_matching_col(df, ["term zero group"])
+    community_status_col = best_matching_col(df, ["tetr x/term 0 status", "tetr x term 0 status", "term 0 status", "community status", "admitted group"])
+    term_zero_col = best_matching_col(df, ["tetr x/term 0 status", "tetr x term 0 status", "term 0 status", "term zero group", "added to term 0"])
     payment_status_col = best_matching_col(df, ["payment status", "status"])
     payment_date_col = best_matching_col(df, ["payment date", "community join date"])
     engagement_pct_col = best_matching_col(df, ["overall engagement %", "engagement %"])
@@ -2955,6 +2955,10 @@ def build_tetrx_analytics_students(data, scope_label="Total"):
         country_col = _first_existing_col_like(tx_df, ["country"])
         income_col = _first_existing_col_like(tx_df, ["income"])
         email_col = _first_existing_col_like(tx_df, ["email"])
+        term_status_col = _first_existing_col_like(tx_df, [
+            "tetr x/term 0 status", "tetr x term 0 status", "term 0 status",
+            "term zero", "added to term 0", "community status", "admitted group"
+        ])
         for _, r in tx_df.iterrows():
             sid = _student_id_from_values(r.get("email_key", ""), r.get("student_key", ""), r.get("student_name", ""))
             if not sid:
@@ -2964,8 +2968,15 @@ def build_tetrx_analytics_students(data, scope_label="Total"):
             raw_status = clean_text(r.get("sheet_status_raw", ""))
             status_text = raw_status.lower()
             is_refund = bool(r.get("sheet_is_refunded", False)) or ("refund" in status_text)
-            # In-group follows the existing normalized community mapping. This includes Tetr X / Tetrx / Added to term 0.
-            in_group = clean_text(r.get("community_status_value", "")) == "Tetr X"
+            # In Tetr-X Analytics, "in group" is based on the actual Tetr X/Term 0 Status column.
+            # User rule: if the value is "Added to term 0" then the student is in group; otherwise not in group.
+            term_status_raw = clean_text(r.get(term_status_col, "")) if term_status_col else ""
+            term_status_lower = term_status_raw.lower().strip()
+            in_group = term_status_lower == "added to term 0" or "added to term 0" in term_status_lower
+            # Fallback only for older sheets where the raw Term 0 column could not be detected.
+            if not term_status_col:
+                in_group = clean_text(r.get("community_status_value", "")) == "Tetr X"
+                term_status_raw = "Added to term 0" if in_group else clean_text(r.get("community_status_value", ""))
             days_left = ""
             if pd.notna(pay_dt):
                 days_left = max(0, 60 - int((today - pay_dt).days))
@@ -2979,7 +2990,7 @@ def build_tetrx_analytics_students(data, scope_label="Total"):
                 "Country": clean_text(r.get(country_col, "")) if country_col else m.get("Country", ""),
                 "Income": clean_text(r.get(income_col, "")) if income_col else m.get("Income", ""),
                 "Payment Date": pay_dt,
-                "Tetr X/Term 0 Status": "Added to term 0 / Tetr X" if in_group else clean_text(r.get("community_status_value", "")) or "Out",
+                "Tetr X/Term 0 Status": term_status_raw or ("Added to term 0" if in_group else "Out"),
                 "Refund Status": "Refunded" if is_refund else "Not Refunded",
                 "Days left to ask refund": days_left,
                 "source_sheet": sheet,
@@ -3007,16 +3018,47 @@ def build_tetrx_analytics_students(data, scope_label="Total"):
     return out, metrics
 
 
+def _tx_payment_lookup_by_program(data, scope_label="Total"):
+    """Unique Tetr-X students by program with their first/actual payment date.
+    Used only for Tetr X Analytics 'Total Paid Students at the Event Date'.
+    Rule: at an event date, paid students = unique Tetr-X students whose payment date is on/before that event date.
+    Refunded students are still counted as already paid if their payment date was before the event.
+    """
+    rows = []
+    for sheet in _tx_scope_sheets(scope_label):
+        df = data.get("activities", {}).get(sheet, pd.DataFrame())
+        if df is None or df.empty:
+            continue
+        program = "UG" if sheet.endswith("UG") else "PG"
+        for _, r in df.iterrows():
+            sid = _student_id_from_values(r.get("email_key", ""), r.get("student_key", ""), r.get("student_name", ""))
+            if not sid:
+                continue
+            pay_dt = pd.to_datetime(r.get("payment_date_parsed", pd.NaT), errors="coerce")
+            if pd.isna(pay_dt):
+                # defensive fallback: look for any payment/community-join date column on the row
+                for c in df.columns:
+                    cl = clean_text(c).lower()
+                    if "payment" in cl or "community join" in cl:
+                        pay_dt = pd.to_datetime(r.get(c, pd.NaT), errors="coerce")
+                        if pd.notna(pay_dt):
+                            break
+            if pd.isna(pay_dt):
+                continue
+            rows.append({"student_id": sid, "Program": program, "Payment Date": pay_dt.normalize()})
+    out = pd.DataFrame(rows)
+    if out.empty:
+        return {"UG": pd.DataFrame(columns=["student_id", "Payment Date"]), "PG": pd.DataFrame(columns=["student_id", "Payment Date"])}
+    # If a student appears multiple times, use earliest payment date for "already paid by event date".
+    out = out.sort_values("Payment Date").drop_duplicates(["Program", "student_id"], keep="first")
+    return {program: frame[["student_id", "Payment Date"]].copy() for program, frame in out.groupby("Program")}
+
+
 def _tx_online_masterclass_rows(data, scope_label="Total"):
     """Per-event post-payment engagement for Online Events + Masterclasses in Tetr-X sheets."""
-    student_table, _ = build_tetrx_analytics_students(data, scope_label)
-    if student_table.empty:
+    paid_by_program = _tx_payment_lookup_by_program(data, scope_label)
+    if not any(not frame.empty for frame in paid_by_program.values()):
         return pd.DataFrame()
-    paid_by_program = {}
-    for program, frame in student_table.groupby("UG/PG"):
-        tmp = frame[["student_id", "Payment Date"]].copy()
-        tmp["Payment Date"] = pd.to_datetime(tmp["Payment Date"], errors="coerce").dt.normalize()
-        paid_by_program[program] = tmp
 
     rows = []
     # Accumulate attendees by occurrence so duplicates are merged.
@@ -3043,14 +3085,15 @@ def _tx_online_masterclass_rows(data, scope_label="Total"):
             if occ_key not in occurrence_map:
                 paid_frame = paid_by_program.get(program, pd.DataFrame())
                 paid_at_event = 0
-                if not paid_frame.empty:
-                    paid_at_event = int((paid_frame["Payment Date"].notna() & (paid_frame["Payment Date"] <= ev_date)).sum())
+                if paid_frame is not None and not paid_frame.empty:
+                    paid_dates = pd.to_datetime(paid_frame["Payment Date"], errors="coerce").dt.normalize()
+                    paid_at_event = int((paid_dates.notna() & (paid_dates <= ev_date)).sum())
                 occurrence_map[occ_key] = {
                     "Program": program,
                     "Event Name": ev_name,
                     "Event Date": ev_date,
                     "Month": ev_date.strftime("%b %Y"),
-                    "Paid at Event Date": paid_at_event,
+                    "Total Paid Students at the Event Date": paid_at_event,
                     "attendee_ids": set(),
                 }
             attended = df[pd.to_numeric(df[col], errors="coerce").fillna(0) > 0].copy()
@@ -3066,7 +3109,7 @@ def _tx_online_masterclass_rows(data, scope_label="Total"):
 
     for item in occurrence_map.values():
         attendance = len(item.pop("attendee_ids"))
-        paid_at_event = int(item.get("Paid at Event Date", 0) or 0)
+        paid_at_event = int(item.get("Total Paid Students at the Event Date", 0) or 0)
         item["Attendance"] = attendance
         item["Attendance %"] = (attendance / paid_at_event * 100) if paid_at_event else 0.0
         rows.append(item)
@@ -3074,7 +3117,6 @@ def _tx_online_masterclass_rows(data, scope_label="Total"):
     if out.empty:
         return out
     return out.sort_values(["Event Date", "Program", "Event Name"]).reset_index(drop=True)
-
 
 def _tx_top_engaged_students(data, scope_label="Total"):
     """Top Tetr-X students by attended post-payment events / eligible post-payment events."""
@@ -3173,14 +3215,14 @@ def render_tetrx_analytics_scope(data, scope_label: str, key_prefix: str):
             y="Attendance %",
             color="Month",
             hover_name="Event Name",
-            hover_data={"Paid at Event Date": True, "Attendance": True, "Attendance %": ':.1f', "Program": True, "Date Label": False},
+            hover_data={"Total Paid Students at the Event Date": True, "Attendance": True, "Attendance %": ':.1f', "Program": True, "Date Label": False},
             title="Post-Payment Engagement (Online Events + Masterclasses)",
         )
         fig.update_traces(texttemplate="%{y:.1f}%", textposition="outside")
         st.plotly_chart(nice_layout(fig, height=390, x_tickangle=-25), use_container_width=True, key=f"{key_prefix}_postpay_online_chart")
         table = eng.copy()
         table["Event Date"] = pd.to_datetime(table["Event Date"], errors="coerce").dt.strftime("%d-%b-%Y")
-        st.dataframe(table[["Program", "Event Date", "Event Name", "Paid at Event Date", "Attendance", "Attendance %"]], use_container_width=True, hide_index=True, height=260, key=f"{key_prefix}_postpay_online_table")
+        st.dataframe(table[["Program", "Event Date", "Event Name", "Total Paid Students at the Event Date", "Attendance", "Attendance %"]], use_container_width=True, hide_index=True, height=260, key=f"{key_prefix}_postpay_online_table")
 
     st.markdown("#### Top engaged students in Tetr X")
     top = _tx_top_engaged_students(data, scope_label)
