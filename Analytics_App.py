@@ -3019,10 +3019,14 @@ def build_tetrx_analytics_students(data, scope_label="Total"):
 
 
 def _tx_payment_lookup_by_program(data, scope_label="Total"):
-    """Unique Tetr-X students by program with their first/actual payment date.
-    Used only for Tetr X Analytics 'Total Paid Students at the Event Date'.
-    Rule: at an event date, paid students = unique Tetr-X students whose payment date is on/before that event date.
-    Refunded students are still counted as already paid if their payment date was before the event.
+    """Unique admitted Tetr-X students by program with their payment date.
+
+    Used only for Tetr X Analytics → "Total Paid Students at the Event Date".
+    User rule for this metric:
+      - Total paid students at an event date = students in the Tetr-X sheet whose Status is exactly "Admitted"
+      - and whose payment date is on or before that event date.
+
+    Refunded / non-admitted rows are intentionally excluded from this denominator.
     """
     rows = []
     for sheet in _tx_scope_sheets(scope_label):
@@ -3030,10 +3034,27 @@ def _tx_payment_lookup_by_program(data, scope_label="Total"):
         if df is None or df.empty:
             continue
         program = "UG" if sheet.endswith("UG") else "PG"
+
+        # Identify the exact Status column as a fallback, but prefer parser-created flags.
+        status_col = _first_existing_col_like(df, ["status", "payment status", "conversion status"])
+
         for _, r in df.iterrows():
             sid = _student_id_from_values(r.get("email_key", ""), r.get("student_key", ""), r.get("student_name", ""))
             if not sid:
                 continue
+
+            # Strict paid rule: only exact Status == Admitted counts in the denominator.
+            if "sheet_is_paid" in df.columns:
+                is_admitted = bool(r.get("sheet_is_paid", False))
+            else:
+                raw_status = clean_text(r.get("sheet_status_raw", ""))
+                if not raw_status and status_col:
+                    raw_status = clean_text(r.get(status_col, ""))
+                is_admitted = raw_status.strip().lower() == "admitted"
+
+            if not is_admitted:
+                continue
+
             pay_dt = pd.to_datetime(r.get("payment_date_parsed", pd.NaT), errors="coerce")
             if pd.isna(pay_dt):
                 # defensive fallback: look for any payment/community-join date column on the row
@@ -3046,16 +3067,24 @@ def _tx_payment_lookup_by_program(data, scope_label="Total"):
             if pd.isna(pay_dt):
                 continue
             rows.append({"student_id": sid, "Program": program, "Payment Date": pay_dt.normalize()})
+
     out = pd.DataFrame(rows)
     if out.empty:
         return {"UG": pd.DataFrame(columns=["student_id", "Payment Date"]), "PG": pd.DataFrame(columns=["student_id", "Payment Date"])}
-    # If a student appears multiple times, use earliest payment date for "already paid by event date".
+    # If a student appears multiple times, use earliest admitted payment date for "already paid by event date".
     out = out.sort_values("Payment Date").drop_duplicates(["Program", "student_id"], keep="first")
     return {program: frame[["student_id", "Payment Date"]].copy() for program, frame in out.groupby("Program")}
 
 
 def _tx_online_masterclass_rows(data, scope_label="Total"):
-    """Per-event post-payment engagement for Online Events + Masterclasses in Tetr-X sheets."""
+    """Per-event post-payment engagement for Online Events + Masterclasses in Tetr-X sheets.
+
+    Denominator rule:
+      - For Tetr-X-UG: admitted UG students whose payment date is on/before the event date.
+      - For Tetr-X-PG: admitted PG students whose payment date is on/before the event date.
+      - For Total: if the same event name + date exists in both UG and PG, merge it into one row
+        and add both the UG and PG denominators and attendance.
+    """
     paid_by_program = _tx_payment_lookup_by_program(data, scope_label)
     if not any(not frame.empty for frame in paid_by_program.values()):
         return pd.DataFrame()
@@ -3063,6 +3092,8 @@ def _tx_online_masterclass_rows(data, scope_label="Total"):
     rows = []
     # Accumulate attendees by occurrence so duplicates are merged.
     occurrence_map = {}
+    is_total_scope = clean_text(scope_label).lower() == "total"
+
     for sheet in _tx_scope_sheets(scope_label):
         df = data.get("activities", {}).get(sheet, pd.DataFrame())
         ctx = data.get("activity_ctx", {}).get(sheet, {})
@@ -3081,21 +3112,35 @@ def _tx_online_masterclass_rows(data, scope_label="Total"):
                 continue
             ev_date = ev_date.normalize()
             ev_name = clean_text(ev.get("event_name", "")) or clean_text(col)
-            occ_key = f"{program}|{normalize_name(ev_name)}|{ev_date.date()}|online_masterclass"
+
+            # For Total, merge UG + PG when same event name and date match.
+            # For individual UG/PG sections, keep program-specific rows.
+            occ_key_program_part = "TOTAL" if is_total_scope else program
+            occ_key = f"{occ_key_program_part}|{normalize_name(ev_name)}|{ev_date.date()}|online_masterclass"
+
             if occ_key not in occurrence_map:
+                occurrence_map[occ_key] = {
+                    "Program": "Total" if is_total_scope else program,
+                    "Event Name": ev_name,
+                    "Event Date": ev_date,
+                    "Month": ev_date.strftime("%b %Y"),
+                    "Total Paid Students at the Event Date": 0,
+                    "attendee_ids": set(),
+                    "_denominator_programs_added": set(),
+                }
+
+            # Add this program's denominator once per merged occurrence. This is what makes Total
+            # equal UG denominator + PG denominator for same event name/date.
+            denom_added = occurrence_map[occ_key]["_denominator_programs_added"]
+            if program not in denom_added:
                 paid_frame = paid_by_program.get(program, pd.DataFrame())
                 paid_at_event = 0
                 if paid_frame is not None and not paid_frame.empty:
                     paid_dates = pd.to_datetime(paid_frame["Payment Date"], errors="coerce").dt.normalize()
                     paid_at_event = int((paid_dates.notna() & (paid_dates <= ev_date)).sum())
-                occurrence_map[occ_key] = {
-                    "Program": program,
-                    "Event Name": ev_name,
-                    "Event Date": ev_date,
-                    "Month": ev_date.strftime("%b %Y"),
-                    "Total Paid Students at the Event Date": paid_at_event,
-                    "attendee_ids": set(),
-                }
+                occurrence_map[occ_key]["Total Paid Students at the Event Date"] += paid_at_event
+                denom_added.add(program)
+
             attended = df[pd.to_numeric(df[col], errors="coerce").fillna(0) > 0].copy()
             if attended.empty:
                 continue
@@ -3105,10 +3150,12 @@ def _tx_online_masterclass_rows(data, scope_label="Total"):
                     continue
                 pay_dt = pd.to_datetime(r.get("payment_date_parsed", pd.NaT), errors="coerce")
                 if pd.notna(pay_dt) and ev_date >= pay_dt.normalize():
-                    occurrence_map[occ_key]["attendee_ids"].add(sid)
+                    attendee_key = f"{program}|{sid}" if is_total_scope else sid
+                    occurrence_map[occ_key]["attendee_ids"].add(attendee_key)
 
     for item in occurrence_map.values():
-        attendance = len(item.pop("attendee_ids"))
+        attendance = len(item.pop("attendee_ids", set()))
+        item.pop("_denominator_programs_added", None)
         paid_at_event = int(item.get("Total Paid Students at the Event Date", 0) or 0)
         item["Attendance"] = attendance
         item["Attendance %"] = (attendance / paid_at_event * 100) if paid_at_event else 0.0
