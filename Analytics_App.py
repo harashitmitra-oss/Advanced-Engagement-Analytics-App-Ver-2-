@@ -2966,8 +2966,10 @@ def build_tetrx_analytics_students(data, scope_label="Total"):
             pay_dt = pd.to_datetime(r.get("payment_date_parsed", pd.NaT), errors="coerce")
             pay_dt = pay_dt.normalize() if pd.notna(pay_dt) else pd.NaT
             raw_status = clean_text(r.get("sheet_status_raw", ""))
-            status_text = raw_status.lower()
+            status_text = raw_status.lower().strip()
             is_refund = bool(r.get("sheet_is_refunded", False)) or ("refund" in status_text)
+            # Current paid in Tetr-X Analytics must mean exactly Status == Admitted.
+            is_current_paid = status_text == "admitted"
             # In Tetr-X Analytics, "in group" is based on the actual Tetr X/Term 0 Status column.
             # User rule: if the value is "Added to term 0" then the student is in group; otherwise not in group.
             term_status_raw = clean_text(r.get(term_status_col, "")) if term_status_col else ""
@@ -2995,6 +2997,7 @@ def build_tetrx_analytics_students(data, scope_label="Total"):
                 "Days left to ask refund": days_left,
                 "source_sheet": sheet,
                 "is_refunded": is_refund,
+                "is_current_paid": is_current_paid,
                 "in_group": in_group,
             })
     out = pd.DataFrame(rows)
@@ -3003,13 +3006,18 @@ def build_tetrx_analytics_students(data, scope_label="Total"):
     # One row per student, latest/recent payment first.
     out = out.sort_values(["Payment Date", "Name"], ascending=[False, True], na_position="last")
     out = out.drop_duplicates("student_id", keep="first").reset_index(drop=True)
-    paid_total = len(out)
-    refunded = int(out["is_refunded"].sum())
-    paid_in_group = int(((~out["is_refunded"]) & out["in_group"]).sum())
-    refunded_in_group = int((out["is_refunded"] & out["in_group"]).sum())
-    paid_not_in_group = int(((~out["is_refunded"]) & (~out["in_group"])).sum())
+    paid_total = len(out)  # all rows/students present in the selected Tetr-X sheet(s)
+    current_paid = int(out["is_current_paid"].fillna(False).astype(bool).sum())
+    refunded = int(out["is_refunded"].fillna(False).astype(bool).sum())
+    in_group = out["in_group"].fillna(False).astype(bool)
+    current_paid_mask = out["is_current_paid"].fillna(False).astype(bool)
+    refunded_mask = out["is_refunded"].fillna(False).astype(bool)
+    paid_in_group = int((current_paid_mask & in_group).sum())
+    refunded_in_group = int((refunded_mask & in_group).sum())
+    paid_not_in_group = int((current_paid_mask & (~in_group)).sum())
     metrics = {
         "Total paid students": paid_total,
+        "Current Paid Students": current_paid,
         "Refunded": refunded,
         "Paid & in group": paid_in_group,
         "Refunded & in group": refunded_in_group,
@@ -3237,12 +3245,13 @@ def render_tetrx_analytics_scope(data, scope_label: str, key_prefix: str):
     if students.empty:
         st.info(f"No Tetr-X students found for {scope_label}.")
         return
-    c = st.columns(5)
+    c = st.columns(6)
     c[0].metric("Total paid students", f"{metrics.get('Total paid students', 0):,}")
-    c[1].metric("Refunded", f"{metrics.get('Refunded', 0):,}")
-    c[2].metric("Paid & in group", f"{metrics.get('Paid & in group', 0):,}")
-    c[3].metric("Refunded & in group", f"{metrics.get('Refunded & in group', 0):,}")
-    c[4].metric("Paid & not in group", f"{metrics.get('Paid & not in group', 0):,}")
+    c[1].metric("Current Paid Students", f"{metrics.get('Current Paid Students', 0):,}")
+    c[2].metric("Refunded", f"{metrics.get('Refunded', 0):,}")
+    c[3].metric("Paid & in group", f"{metrics.get('Paid & in group', 0):,}")
+    c[4].metric("Refunded & in group", f"{metrics.get('Refunded & in group', 0):,}")
+    c[5].metric("Paid & not in group", f"{metrics.get('Paid & not in group', 0):,}")
 
     st.markdown("#### Names of students in Tetr X")
     display = students[["Name", "Email", "Country", "Income", "Payment Date", "Tetr X/Term 0 Status", "Refund Status", "Days left to ask refund"]].copy()
