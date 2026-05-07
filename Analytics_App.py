@@ -24,7 +24,7 @@ st.set_page_config(page_title="Tetr Analytics Dashboard", layout="wide")
 
 MASTER_SHEETS = ["Master UG", "Master PG"]
 UG_BATCH_SHEETS = ["UG - B1 to B4", "UG B5", "UG B6", "UG B7", "UG B8", "UG B9", "UG B10", "UG B11", "UG B12", "UG B13", "UG B14"]
-PG_BATCH_SHEETS = ["PG - B1 & B2", "PG - B3 & B4", "PG B5", "PG B6"]
+PG_BATCH_SHEETS = ["PG - B1 & B2", "PG - B3 & B4", "PG B5", "PG B6","PG B7"]
 TX_SHEETS = ["Tetr-X-UG", "Tetr-X-PG"]
 DATES_SHEET = "Dates"
 WINNER_SHEET = "Winner"
@@ -497,6 +497,45 @@ def best_matching_col(df: pd.DataFrame, candidates):
             if cand in low:
                 return col
     return None
+
+
+def exact_matching_col(df: pd.DataFrame, candidates):
+    """Return the first column whose cleaned lowercase header exactly matches a candidate."""
+    normalized = {clean_text(c).lower(): c for c in df.columns}
+    for cand in candidates:
+        key = clean_text(cand).lower()
+        if key in normalized:
+            return normalized[key]
+    return None
+
+
+def select_payment_date_col(df: pd.DataFrame, sheet_name: str):
+    """Payment-date priority rules.
+
+    For Tetr-X sheets, the first source of truth is fixed by sheet:
+    - Tetr-X-UG: `Payment date (c3)`
+    - Tetr-X-PG: `Payment date`
+
+    Only if the exact source-of-truth column is absent do we fall back to the
+    older generic payment/community-join detection so existing non-Tetr-X sheets
+    keep working unchanged.
+    """
+    sheet = clean_text(sheet_name).lower()
+    if sheet == "tetr-x-ug":
+        col = exact_matching_col(df, ["Payment date (c3)"])
+        if col:
+            return col
+        # last-resort fallback for minor header spacing/case variations
+        for c in df.columns:
+            low = clean_text(c).lower().replace(" ", "")
+            if low == "paymentdate(c3)":
+                return c
+    elif sheet == "tetr-x-pg":
+        col = exact_matching_col(df, ["Payment date"])
+        if col:
+            return col
+
+    return best_matching_col(df, ["payment date", "date of payment", "paid date", "community join date"])
 
 
 def infer_program_from_sheet(sheet_name):
@@ -996,7 +1035,7 @@ def parse_activity_sheet(raw: pd.DataFrame, sheet_name: str):
     community_status_col = best_matching_col(df, ["tetr x/term 0 status", "tetr x term 0 status", "term 0 status", "community status", "admitted group"])
     term_zero_col = best_matching_col(df, ["tetr x/term 0 status", "tetr x term 0 status", "term 0 status", "term zero group", "added to term 0"])
     payment_status_col = best_matching_col(df, ["payment status", "status"])
-    payment_date_col = best_matching_col(df, ["payment date", "community join date"])
+    payment_date_col = select_payment_date_col(df, sheet_name)
     engagement_pct_col = best_matching_col(df, ["overall engagement %", "engagement %"])
     engagement_score_col = best_matching_col(df, ["overall engagement score", "engagement score"])
 
@@ -1520,7 +1559,71 @@ def render_overview(data):
 
 
 
-def render_paid_students_section(df, ctx, prefix):
+
+def build_tetrx_payment_lookup_for_paid_details(data):
+    """Tetr-X source-of-truth payment-date lookup for paid student detail tables."""
+    rows = []
+    activities = data.get("activities", {}) if isinstance(data, dict) else {}
+    for sheet in TX_SHEETS:
+        tx = activities.get(sheet, pd.DataFrame())
+        if tx is None or tx.empty:
+            continue
+        program = "UG" if sheet == "Tetr-X-UG" else "PG" if sheet == "Tetr-X-PG" else ""
+        status = tx.get("sheet_status_raw", pd.Series("", index=tx.index)).astype(str).map(clean_text).str.lower()
+        pay = pd.to_datetime(tx.get("payment_date_parsed", pd.NaT), errors="coerce")
+        frame = pd.DataFrame({
+            "program": program,
+            "email_key": tx.get("email_key", ""),
+            "student_key": tx.get("student_key", ""),
+            "student_name": tx.get("student_name", ""),
+            "payment_date": pay,
+            "is_admitted": status.eq("admitted"),
+        })
+        frame["email_key"] = frame["email_key"].astype(str).map(clean_text)
+        frame["student_key"] = frame["student_key"].astype(str).map(clean_text)
+        frame["student_name_key"] = frame["student_name"].astype(str).map(normalize_name)
+        frame = frame[frame["is_admitted"] & frame["payment_date"].notna()].copy()
+        if not frame.empty:
+            rows.append(frame)
+
+    if not rows:
+        return {"by_email": {}, "by_name": {}, "by_email_any": {}, "by_name_any": {}}
+
+    lookup_df = pd.concat(rows, ignore_index=True).sort_values("payment_date")
+    by_email, by_name, by_email_any, by_name_any = {}, {}, {}, {}
+    for _, r in lookup_df.iterrows():
+        prog = clean_text(r.get("program", ""))
+        email = clean_text(r.get("email_key", ""))
+        name = clean_text(r.get("student_key", "")) or clean_text(r.get("student_name_key", ""))
+        dt = pd.to_datetime(r.get("payment_date", pd.NaT), errors="coerce")
+        if pd.isna(dt):
+            continue
+        if email:
+            by_email.setdefault((prog, email), dt)
+            by_email_any.setdefault(email, dt)
+        if name:
+            by_name.setdefault((prog, name), dt)
+            by_name_any.setdefault(name, dt)
+    return {"by_email": by_email, "by_name": by_name, "by_email_any": by_email_any, "by_name_any": by_name_any}
+
+
+def resolve_tetrx_payment_date_for_row(row, lookup):
+    program = clean_text(row.get("Program", ""))
+    email = clean_text(row.get("email_key", ""))
+    name = clean_text(row.get("student_key", "")) or normalize_name(row.get("student_name", ""))
+    candidates = [
+        ((program, email), lookup.get("by_email", {})),
+        ((program, name), lookup.get("by_name", {})),
+        (email, lookup.get("by_email_any", {})),
+        (name, lookup.get("by_name_any", {})),
+    ]
+    for key, dictionary in candidates:
+        if key and key in dictionary:
+            return dictionary[key]
+    return pd.NaT
+
+
+def render_paid_students_section(df, ctx, prefix, data=None):
     """Show admitted/paid students for UG/PG batch sections without affecting other pages."""
     if df is None or df.empty or "sheet_is_paid" not in df.columns:
         return
@@ -1532,6 +1635,12 @@ def render_paid_students_section(df, ctx, prefix):
         return
 
     st.markdown("#### Paid / Admitted Students")
+
+    # Prefer payment dates from the Tetr-X source-of-truth sheets for this paid-student table.
+    # UG uses Tetr-X-UG -> Payment date (c3); PG uses Tetr-X-PG -> Payment date.
+    if data is not None:
+        tx_lookup = build_tetrx_payment_lookup_for_paid_details(data)
+        paid_df["tx_payment_date_for_paid_details"] = paid_df.apply(lambda r: resolve_tetrx_payment_date_for_row(r, tx_lookup), axis=1)
 
     # Compact batch summary first, useful for All UG / All PG combined tabs.
     if "Batch" in paid_df.columns:
@@ -1557,7 +1666,9 @@ def render_paid_students_section(df, ctx, prefix):
         country_col = best_matching_col(paid_df, ["country"])
     if not income_col or income_col not in paid_df.columns:
         income_col = best_matching_col(paid_df, ["income", "household income"])
-    if not payment_date_col or payment_date_col not in paid_df.columns:
+    if "tx_payment_date_for_paid_details" in paid_df.columns and pd.to_datetime(paid_df["tx_payment_date_for_paid_details"], errors="coerce").notna().any():
+        payment_date_col = "tx_payment_date_for_paid_details"
+    elif not payment_date_col or payment_date_col not in paid_df.columns:
         payment_date_col = "payment_date_parsed" if "payment_date_parsed" in paid_df.columns else None
 
     detail_cols = []
@@ -1580,11 +1691,14 @@ def render_paid_students_section(df, ctx, prefix):
             rename_map[col] = label
 
     details = paid_df[detail_cols].copy() if detail_cols else paid_df.copy()
-    if "payment_date_parsed" in details.columns:
-        details["payment_date_parsed"] = pd.to_datetime(details["payment_date_parsed"], errors="coerce").dt.date.astype(str).replace("NaT", "")
+    for dt_col in ["payment_date_parsed", "tx_payment_date_for_paid_details"]:
+        if dt_col in details.columns:
+            details[dt_col] = pd.to_datetime(details[dt_col], errors="coerce").dt.date.astype(str).replace("NaT", "")
     if "engagement_pct" in details.columns:
         details["engagement_pct"] = pd.to_numeric(details["engagement_pct"], errors="coerce").round(1)
     details = details.rename(columns=rename_map)
+    if "Payment Date" in details.columns:
+        details["Payment Date"] = details["Payment Date"].replace({"NaT": "", "nan": "", "None": ""})
 
     sort_cols = [c for c in ["Batch", "Student Name"] if c in details.columns]
     if sort_cols:
@@ -1676,7 +1790,7 @@ def render_sheet_detail(sheet_name, df, ctx, prefix, data=None):
 
     # UG/PG batch pages: show all paid/admitted students and their details below Top Students & Best Upgrade Targets.
     if not prefix.startswith("tx_"):
-        render_paid_students_section(df, ctx, prefix)
+        render_paid_students_section(df, ctx, prefix, data=data)
 
     if not event_info.empty and event_info["event_date"].notna().any():
         timeline = build_timeline_from_event_info(df, event_info)
