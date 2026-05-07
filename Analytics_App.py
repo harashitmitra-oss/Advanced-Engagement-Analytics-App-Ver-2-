@@ -499,45 +499,6 @@ def best_matching_col(df: pd.DataFrame, candidates):
     return None
 
 
-def exact_matching_col(df: pd.DataFrame, candidates):
-    """Return the first column whose cleaned lowercase header exactly matches a candidate."""
-    normalized = {clean_text(c).lower(): c for c in df.columns}
-    for cand in candidates:
-        key = clean_text(cand).lower()
-        if key in normalized:
-            return normalized[key]
-    return None
-
-
-def select_payment_date_col(df: pd.DataFrame, sheet_name: str):
-    """Payment-date priority rules.
-
-    For Tetr-X sheets, the first source of truth is fixed by sheet:
-    - Tetr-X-UG: `Payment date (c3)`
-    - Tetr-X-PG: `Payment date`
-
-    Only if the exact source-of-truth column is absent do we fall back to the
-    older generic payment/community-join detection so existing non-Tetr-X sheets
-    keep working unchanged.
-    """
-    sheet = clean_text(sheet_name).lower()
-    if sheet == "tetr-x-ug":
-        col = exact_matching_col(df, ["Payment date (c3)"])
-        if col:
-            return col
-        # last-resort fallback for minor header spacing/case variations
-        for c in df.columns:
-            low = clean_text(c).lower().replace(" ", "")
-            if low == "paymentdate(c3)":
-                return c
-    elif sheet == "tetr-x-pg":
-        col = exact_matching_col(df, ["Payment date"])
-        if col:
-            return col
-
-    return best_matching_col(df, ["payment date", "date of payment", "paid date", "community join date"])
-
-
 def infer_program_from_sheet(sheet_name):
     s = sheet_name.lower()
     if "ug" in s:
@@ -1035,7 +996,7 @@ def parse_activity_sheet(raw: pd.DataFrame, sheet_name: str):
     community_status_col = best_matching_col(df, ["tetr x/term 0 status", "tetr x term 0 status", "term 0 status", "community status", "admitted group"])
     term_zero_col = best_matching_col(df, ["tetr x/term 0 status", "tetr x term 0 status", "term 0 status", "term zero group", "added to term 0"])
     payment_status_col = best_matching_col(df, ["payment status", "status"])
-    payment_date_col = select_payment_date_col(df, sheet_name)
+    payment_date_col = best_matching_col(df, ["payment date", "community join date"])
     engagement_pct_col = best_matching_col(df, ["overall engagement %", "engagement %"])
     engagement_score_col = best_matching_col(df, ["overall engagement score", "engagement score"])
 
