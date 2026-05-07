@@ -1519,6 +1519,78 @@ def render_overview(data):
 
 
 
+
+def render_paid_students_section(df, ctx, prefix):
+    """Show admitted/paid students for UG/PG batch sections without affecting other pages."""
+    if df is None or df.empty or "sheet_is_paid" not in df.columns:
+        return
+
+    paid_df = df[df["sheet_is_paid"].fillna(False).astype(bool)].copy()
+    if paid_df.empty:
+        st.markdown("#### Paid / Admitted Students")
+        st.info("No paid/admitted students found in this sheet.")
+        return
+
+    st.markdown("#### Paid / Admitted Students")
+
+    # Compact batch summary first, useful for All UG / All PG combined tabs.
+    if "Batch" in paid_df.columns:
+        batch_summary = (
+            paid_df.groupby("Batch", dropna=False)["student_name"]
+            .nunique()
+            .reset_index(name="Paid Students")
+            .sort_values(["Batch", "Paid Students"], ascending=[True, False])
+        )
+        batch_summary["Batch"] = batch_summary["Batch"].replace("", "Unknown")
+        st.dataframe(batch_summary, use_container_width=True, height=min(260, 70 + len(batch_summary) * 35), key=f"{prefix}_paid_batch_summary")
+
+    # Build a clean detail table from available normalized fields.
+    email_col = ctx.get("email_col") if isinstance(ctx, dict) else None
+    country_col = ctx.get("country_col") if isinstance(ctx, dict) else None
+    income_col = ctx.get("income_col") if isinstance(ctx, dict) else None
+    payment_date_col = ctx.get("payment_date_col") if isinstance(ctx, dict) else None
+
+    # Combined sections may not carry ctx columns, so infer safe fallbacks.
+    if not email_col or email_col not in paid_df.columns:
+        email_col = best_matching_col(paid_df, ["email"])
+    if not country_col or country_col not in paid_df.columns:
+        country_col = best_matching_col(paid_df, ["country"])
+    if not income_col or income_col not in paid_df.columns:
+        income_col = best_matching_col(paid_df, ["income", "household income"])
+    if not payment_date_col or payment_date_col not in paid_df.columns:
+        payment_date_col = "payment_date_parsed" if "payment_date_parsed" in paid_df.columns else None
+
+    detail_cols = []
+    rename_map = {}
+    for col, label in [
+        ("student_name", "Student Name"),
+        (email_col, "Email"),
+        ("Program", "UG/PG"),
+        ("Batch", "Batch"),
+        (country_col, "Country"),
+        (income_col, "Income"),
+        ("sheet_status_raw", "Status"),
+        (payment_date_col, "Payment Date"),
+        ("community_status_value", "Community Status"),
+        ("participation_count", "Total Participations"),
+        ("engagement_pct", "Engagement %"),
+    ]:
+        if col and col in paid_df.columns and col not in detail_cols:
+            detail_cols.append(col)
+            rename_map[col] = label
+
+    details = paid_df[detail_cols].copy() if detail_cols else paid_df.copy()
+    if "payment_date_parsed" in details.columns:
+        details["payment_date_parsed"] = pd.to_datetime(details["payment_date_parsed"], errors="coerce").dt.date.astype(str).replace("NaT", "")
+    if "engagement_pct" in details.columns:
+        details["engagement_pct"] = pd.to_numeric(details["engagement_pct"], errors="coerce").round(1)
+    details = details.rename(columns=rename_map)
+
+    sort_cols = [c for c in ["Batch", "Student Name"] if c in details.columns]
+    if sort_cols:
+        details = details.sort_values(sort_cols)
+    st.dataframe(details, use_container_width=True, height=420, key=f"{prefix}_paid_students_detail")
+
 def render_sheet_detail(sheet_name, df, ctx, prefix, data=None):
     st.markdown(f"#### {sheet_name}")
     if df.empty:
@@ -1601,6 +1673,10 @@ def render_sheet_detail(sheet_name, df, ctx, prefix, data=None):
             target = df[(~df["sheet_is_paid"]) & (~df["sheet_is_refunded"]) & (df["is_active"])][["student_name", "engagement_pct", "engagement_score", "community_status_value"]].sort_values(["engagement_pct", "engagement_score"], ascending=False).head(20)
             st.markdown("#### Best Upgrade Targets")
             st.dataframe(target, use_container_width=True, height=390, key=f"{prefix}_upgrade_df")
+
+    # UG/PG batch pages: show all paid/admitted students and their details below Top Students & Best Upgrade Targets.
+    if not prefix.startswith("tx_"):
+        render_paid_students_section(df, ctx, prefix)
 
     if not event_info.empty and event_info["event_date"].notna().any():
         timeline = build_timeline_from_event_info(df, event_info)
