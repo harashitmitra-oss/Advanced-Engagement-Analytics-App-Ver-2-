@@ -225,6 +225,21 @@ def normalize_community_status(x):
     return "Out"
 
 
+def is_community_in_value(x) -> bool:
+    """Business rule for Joined WA/In Community counts.
+    Treat In, TetrX, Tetr X, and Added to Term 0 as in-community.
+    Works with both raw sheet values and normalized values.
+    """
+    s = clean_text(x).strip().lower().replace("-", " ")
+    return s in {"in", "tetrx", "tetr x", "added to term 0"}
+
+
+def is_community_in_series(series: pd.Series) -> pd.Series:
+    if series is None:
+        return pd.Series(dtype=bool)
+    return series.apply(is_community_in_value).astype(bool)
+
+
 def parse_date_safe(x):
     try:
         return pd.to_datetime(x, errors="coerce", dayfirst=True)
@@ -2366,7 +2381,7 @@ def render_ug_vs_pg_page(data):
         "Paid %": [pct(ug["sheet_is_paid"].sum(), len(ug)), pct(pg["sheet_is_paid"].sum(), len(pg))],
         "Refunded %": [pct(ug["sheet_is_refunded"].sum(), len(ug)), pct(pg["sheet_is_refunded"].sum(), len(pg))],
         "Tetr X %": [pct((ug.get("community_status_value", pd.Series(dtype=object)) == "Tetr X").sum(), len(ug)), pct((pg.get("community_status_value", pd.Series(dtype=object)) == "Tetr X").sum(), len(pg))],
-        "In %": [pct((ug.get("community_status_value", pd.Series(dtype=object)) == "In").sum(), len(ug)), pct((pg.get("community_status_value", pd.Series(dtype=object)) == "In").sum(), len(pg))],
+        "In %": [pct(is_community_in_series(ug.get("community_status_value", pd.Series(dtype=object))).sum(), len(ug)), pct(is_community_in_series(pg.get("community_status_value", pd.Series(dtype=object))).sum(), len(pg))],
         "Out %": [pct((ug.get("community_status_value", pd.Series(dtype=object)) == "Out").sum(), len(ug)), pct((pg.get("community_status_value", pd.Series(dtype=object)) == "Out").sum(), len(pg))],
     })
 
@@ -4791,7 +4806,7 @@ def render_om_attendance_section(df, ctx, prefix):
         return
     attendees = build_online_masterclass_attendees(df, ctx)
     total_students = len(df)
-    in_mask = df.get("community_status_value", pd.Series("", index=df.index)).astype(str).eq("In")
+    in_mask = is_community_in_series(df.get("community_status_value", pd.Series("", index=df.index)))
     in_total = int(in_mask.sum())
     not_in_total = int((~in_mask).sum())
     if attendees.empty:
@@ -4824,8 +4839,9 @@ def render_sheet_detail(sheet_name, df, ctx, prefix, data=None):
     paid_students = int(df["sheet_is_paid"].sum()) if "sheet_is_paid" in df else 0
     refunded_students = int(df["sheet_is_refunded"].sum()) if "sheet_is_refunded" in df else 0
     comm_series = df.get("community_status_value", pd.Series("", index=df.index)).astype(str)
-    in_community = int(comm_series.eq("In").sum())
-    active_in_comm = int((df.get("is_active", pd.Series(False, index=df.index)).astype(bool) & comm_series.eq("In")).sum())
+    in_mask_metric = is_community_in_series(comm_series)
+    in_community = int(in_mask_metric.sum())
+    active_in_comm = int((df.get("is_active", pd.Series(False, index=df.index)).astype(bool) & in_mask_metric).sum())
 
     k1, k2, k3, k4, k5 = st.columns(5)
     k1.metric("Students", f"{total_students:,}")
@@ -4859,7 +4875,7 @@ def render_sheet_detail(sheet_name, df, ctx, prefix, data=None):
             fig = px.pie(community_plot, names="Community Status", values="Students", hole=0.58, title="Community Status", color="Community Status", color_discrete_map={"Tetr X": GREEN, "In": GREEN_3, "Out": GREEN_4})
             st.plotly_chart(nice_layout(fig, height=340), use_container_width=True, key=f"{prefix}_community")
         with nonin_col:
-            non_in = df[~comm_series.str.lower().eq("in")].copy()
+            non_in = df[~is_community_in_series(comm_series)].copy()
             st.markdown("##### Students Not In Community")
             if non_in.empty:
                 st.info("All listed students are marked In community.")
