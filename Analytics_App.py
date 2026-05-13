@@ -24,7 +24,7 @@ st.set_page_config(page_title="Tetr Analytics Dashboard", layout="wide")
 
 MASTER_SHEETS = ["Master UG", "Master PG"]
 UG_BATCH_SHEETS = ["UG - B1 to B4", "UG B5", "UG B6", "UG B7", "UG B8", "UG B9", "UG B10", "UG B11", "UG B12", "UG B13", "UG B14"]
-PG_BATCH_SHEETS = ["PG - B1 & B2", "PG - B3 & B4", "PG B5", "PG B6","PG B7"]
+PG_BATCH_SHEETS = ["PG - B1 & B2", "PG - B3 & B4", "PG B5", "PG B6", "PG B7"]
 TX_SHEETS = ["Tetr-X-UG", "Tetr-X-PG"]
 DATES_SHEET = "Dates"
 WINNER_SHEET = "Winner"
@@ -1057,6 +1057,10 @@ def parse_activity_sheet(raw: pd.DataFrame, sheet_name: str):
     batch_col = best_matching_col(df, ["batch"])
     country_col = best_matching_col(df, ["country"])
     income_col = best_matching_col(df, ["income"])
+    # Counsellor rules: UG usually uses Counsellor; PG uses Counsellor 1 unless it is Not required, then Counsellor 2.
+    counsellor_col = best_matching_col(df, ["counsellor"])
+    counsellor1_col = best_matching_col(df, ["counsellor 1", "counsellor1"])
+    counsellor2_col = best_matching_col(df, ["counsellor 2", "counsellor2"])
     mobile_col = best_matching_col(df, ["mobile"])
     community_status_col = best_matching_col(df, ["tetr x/term 0 status", "tetr x term 0 status", "term 0 status", "community status", "admitted group"])
     term_zero_col = best_matching_col(df, ["tetr x/term 0 status", "tetr x term 0 status", "term 0 status", "term zero group", "added to term 0"])
@@ -1076,6 +1080,14 @@ def parse_activity_sheet(raw: pd.DataFrame, sheet_name: str):
     df["email_key"] = df[email_col].map(normalize_email) if email_col else ""
     df["mobile_key"] = df[mobile_col].map(normalize_phone) if mobile_col else ""
     df["Batch"] = df[batch_col].map(clean_text) if batch_col else infer_batch_group_from_sheet_name(sheet_name)
+    if counsellor1_col and counsellor1_col in df.columns:
+        c1 = df[counsellor1_col].map(clean_text)
+        c2 = df[counsellor2_col].map(clean_text) if counsellor2_col and counsellor2_col in df.columns else pd.Series("", index=df.index)
+        df["counsellor_name"] = c1.where(~c1.str.lower().eq("not required"), c2)
+    elif counsellor_col and counsellor_col in df.columns:
+        df["counsellor_name"] = df[counsellor_col].map(clean_text)
+    else:
+        df["counsellor_name"] = ""
     community_base = df[community_status_col].map(clean_text) if community_status_col else pd.Series("", index=df.index)
     if term_zero_col:
         term_zero_series = df[term_zero_col].map(clean_text)
@@ -1133,6 +1145,9 @@ def parse_activity_sheet(raw: pd.DataFrame, sheet_name: str):
         "batch_col": batch_col,
         "country_col": country_col,
         "income_col": income_col,
+        "counsellor_col": counsellor_col,
+        "counsellor1_col": counsellor1_col,
+        "counsellor2_col": counsellor2_col,
         "mobile_col": mobile_col,
         "community_status_col": community_status_col,
         "payment_status_col": payment_status_col,
@@ -5079,6 +5094,320 @@ def render_tetrx_page(data):
                 render_tetrx_analytics(data)
             else:
                 render_sheet_detail(label, data["activities"][label], data["activity_ctx"][label], f"tx_{label}", data=data)
+
+
+
+# ---------------- Targeted fixes v4.7 fix54 ----------------
+# These overrides keep existing features intact and only change:
+# 1) Conversion pre-payment averages, 2) Tetr-X risky-window filtering,
+# 3) batch community/counsellor layout, and 4) PG B7 support via constant above.
+
+def _student_match_mask(frame: pd.DataFrame, email_key: str, student_key: str) -> pd.Series:
+    if frame is None or frame.empty:
+        return pd.Series(dtype=bool)
+    mask = pd.Series(False, index=frame.index)
+    if email_key and "email_key" in frame.columns:
+        mask = mask | frame["email_key"].astype(str).eq(email_key)
+    if student_key and "student_key" in frame.columns:
+        mask = mask | frame["student_key"].astype(str).eq(student_key)
+    return mask
+
+
+def _paid_tetrx_students_for_conversion(data: dict) -> pd.DataFrame:
+    rows = []
+    for tx_sheet in TX_SHEETS:
+        tx = data.get("activities", {}).get(tx_sheet, pd.DataFrame())
+        if tx is None or tx.empty:
+            continue
+        program = "UG" if tx_sheet.endswith("UG") else "PG"
+        paid = tx[tx.get("sheet_is_paid", pd.Series(False, index=tx.index)).fillna(False).astype(bool)].copy()
+        for _, r in paid.iterrows():
+            sid = clean_text(r.get("email_key", "")) or clean_text(r.get("student_key", "")) or normalize_name(r.get("student_name", ""))
+            pay_dt = pd.to_datetime(r.get("payment_date_parsed", pd.NaT), errors="coerce")
+            if not sid or pd.isna(pay_dt):
+                continue
+            rows.append({
+                "student_id": sid,
+                "student_name": clean_text(r.get("student_name", "")),
+                "email_key": clean_text(r.get("email_key", "")),
+                "student_key": clean_text(r.get("student_key", "")),
+                "program": program,
+                "batch": clean_text(r.get("Batch", "")),
+                "payment_date": pay_dt.normalize(),
+            })
+    out = pd.DataFrame(rows)
+    if out.empty:
+        return out
+    return out.sort_values("payment_date").drop_duplicates("student_id", keep="first").reset_index(drop=True)
+
+
+def _conversion_prepayment_counts_for_student(data: dict, stu: pd.Series) -> tuple[int, int, int]:
+    """Return (overall_before_payment, before_payment, first30) using batch sheets only."""
+    program = clean_text(stu.get("program", ""))
+    pay_dt = pd.to_datetime(stu.get("payment_date", pd.NaT), errors="coerce")
+    if pd.isna(pay_dt):
+        return 0, 0, 0
+    pay_dt = pay_dt.normalize()
+    email_key = clean_text(stu.get("email_key", ""))
+    student_key = clean_text(stu.get("student_key", ""))
+    student_name = clean_text(stu.get("student_name", ""))
+    batch = clean_text(stu.get("batch", ""))
+
+    dates_row = find_student_dates_row(data.get("dates_df", pd.DataFrame()), student_name, email_key, student_key, program, batch)
+    offered_dt = pd.to_datetime(dates_row.get("offered_date_parsed", pd.NaT), errors="coerce") if dates_row is not None else pd.NaT
+    deadline_dt = pd.to_datetime(dates_row.get("deadline_parsed", pd.NaT), errors="coerce") if dates_row is not None else pd.NaT
+    if pd.notna(offered_dt):
+        offered_dt = offered_dt.normalize()
+    if pd.notna(deadline_dt):
+        deadline_dt = deadline_dt.normalize()
+
+    sheets = UG_BATCH_SHEETS if program == "UG" else PG_BATCH_SHEETS
+    before_keys, first30_keys = set(), set()
+    for sheet in sheets:
+        df = data.get("activities", {}).get(sheet, pd.DataFrame())
+        ctx = data.get("activity_ctx", {}).get(sheet, {})
+        ev_info = ctx.get("event_info", pd.DataFrame()) if ctx else pd.DataFrame()
+        if df is None or df.empty or ev_info is None or ev_info.empty:
+            continue
+        mask = _student_match_mask(df, email_key, student_key)
+        if not mask.any():
+            continue
+        part = df.loc[mask]
+        for _, prow in part.iterrows():
+            for _, ev in ev_info.iterrows():
+                col = ev.get("column_name")
+                if not col or col not in prow.index:
+                    continue
+                attended = pd.to_numeric(pd.Series([prow.get(col, 0)]), errors="coerce").fillna(0).iloc[0]
+                if attended <= 0:
+                    continue
+                ev_date = pd.to_datetime(ev.get("event_date", pd.NaT), errors="coerce")
+                if pd.isna(ev_date):
+                    continue
+                ev_date = ev_date.normalize()
+                ev_name = clean_text(ev.get("event_name", "")) or clean_text(col)
+                ev_type = clean_text(ev.get("event_type", "Other")) or "Other"
+                key = "|".join([student_key or email_key or normalize_name(student_name), normalize_name(ev_name), normalize_name(ev_type), ev_date.strftime("%Y-%m-%d")])
+                if ev_date <= pay_dt:
+                    before_keys.add(key)
+                if pd.notna(offered_dt) and pd.notna(deadline_dt) and offered_dt <= ev_date <= deadline_dt:
+                    # Dates sheet first-30 velocity must also use batch-sheet pre-payment attendance.
+                    if ev_date <= pay_dt:
+                        first30_keys.add(key)
+    return len(before_keys), len(before_keys), len(first30_keys)
+
+
+def _build_conversion_extra_metrics(data):
+    paid = _paid_tetrx_students_for_conversion(data)
+    if paid.empty:
+        return pd.DataFrame(columns=["Program", "Metric", "Value"])
+    rows = []
+    count_rows = []
+    for _, stu in paid.iterrows():
+        overall, before, first30 = _conversion_prepayment_counts_for_student(data, stu)
+        count_rows.append({"program": stu.get("program", ""), "overall": overall, "before": before, "first30": first30})
+    counts = pd.DataFrame(count_rows)
+    for prog_label, sub in [("Total", counts), ("UG", counts[counts["program"].eq("UG")]), ("PG", counts[counts["program"].eq("PG")])]:
+        if sub.empty:
+            avg_total = avg_before = avg_first30 = 0.0
+        else:
+            avg_total = float(pd.to_numeric(sub["overall"], errors="coerce").fillna(0).mean())
+            avg_before = float(pd.to_numeric(sub["before"], errors="coerce").fillna(0).mean())
+            avg_first30 = float(pd.to_numeric(sub["first30"], errors="coerce").fillna(0).mean())
+        rows += [
+            {"Program": prog_label, "Metric": "Average session attended per admitted student", "Value": round(avg_total, 2)},
+            {"Program": prog_label, "Metric": "Average events attended before payment per admitted student", "Value": round(avg_before, 2)},
+            {"Program": prog_label, "Metric": "Average sessions attended per admitted student in 30 days", "Value": round(avg_first30, 2)},
+        ]
+    return pd.DataFrame(rows)
+
+
+def render_retention_page(data):
+    _base_render_retention_page(data)
+    st.markdown("---")
+    st.markdown("### Additional Conversion Averages")
+    st.caption("Pre-payment behavioural metrics use admitted / paid students from Tetr-X and attendance from their respective batch sheets.")
+    extra = _build_conversion_extra_metrics(data)
+    if extra.empty:
+        st.info("No admitted / paid conversion averages available.")
+    else:
+        fig = px.bar(extra, x="Metric", y="Value", color="Program", barmode="group", title="Pre-Payment Behavioural Data")
+        st.plotly_chart(nice_layout(fig, height=360, x_tickangle=-20), use_container_width=True, key="conversion_extra_avg_chart")
+        st.dataframe(extra, use_container_width=True, hide_index=True, key="conversion_extra_avg_table")
+
+
+def build_tx_risky_students(data, scope_label="Total"):
+    top = _tx_top_engaged_students(data, scope_label)
+    if top is None or top.empty:
+        return pd.DataFrame()
+    out = top.copy()
+    today = get_today_ist()
+    out["Payment Date"] = pd.to_datetime(out.get("Payment Date", pd.NaT), errors="coerce")
+    out["Days left to refund"] = out["Payment Date"].apply(lambda d: max(0, 60 - int((today - d.normalize()).days)) if pd.notna(d) else np.nan)
+    # Risk list should only show students still inside the 60-day refund window.
+    out = out[out["Days left to refund"].fillna(-1).between(0, 60)].copy()
+    if out.empty:
+        return out
+    attended = pd.to_numeric(out.get("Attended Events", 0), errors="coerce").fillna(0).astype(int)
+    out["Risk Level"] = np.select([attended <= 2, attended.between(3, 5), attended >= 6], ["High Risk", "Moderate Risk", "Low Risk"], default="High Risk")
+    return out.sort_values(["Risk Level", "Attended Events", "Name"], ascending=[True, True, True])
+
+
+def render_tx_risky_students_section(data, scope_label, key_prefix):
+    st.markdown("#### Risky Students")
+    st.caption("Only students still inside the 60-day refund window are shown. Risk is based on Tetr-X post-payment attendance: High Risk = 0–2, Moderate Risk = 3–5, Low Risk = 6+ attended activities.")
+    risky = build_tx_risky_students(data, scope_label)
+    if risky.empty:
+        st.info("No students inside the 60-day refund window for this risk view.")
+        return
+    cols = [c for c in ["Risk Level", "Name", "Email", "UG/PG", "Payment Date", "Days left to refund", "Attended Events", "Eligible Events", "Engagement %", "Top Event Types"] if c in risky.columns]
+    disp = risky.copy()
+    if "Payment Date" in disp.columns:
+        disp["Payment Date"] = pd.to_datetime(disp["Payment Date"], errors="coerce").dt.strftime("%d-%b-%Y")
+    st.dataframe(disp[cols], use_container_width=True, hide_index=True, height=360, key=f"{key_prefix}_risky_students")
+    chart = risky.groupby("Risk Level")["Name"].count().reset_index(name="Students")
+    fig = px.bar(chart, x="Risk Level", y="Students", title="Risk Buckets")
+    fig.update_traces(marker_color=AMBER)
+    st.plotly_chart(nice_layout(fig, height=300), use_container_width=True, key=f"{key_prefix}_risky_chart")
+
+
+def _resolve_counsellor_series_for_frame(df: pd.DataFrame, ctx: dict | None = None) -> pd.Series:
+    if df is None or df.empty:
+        return pd.Series(dtype=str)
+    if "counsellor_name" in df.columns:
+        return df["counsellor_name"].map(clean_text).replace("", "Unknown")
+    ctx = ctx or {}
+    c1 = ctx.get("counsellor1_col")
+    c2 = ctx.get("counsellor2_col")
+    c = ctx.get("counsellor_col")
+    if c1 and c1 in df.columns:
+        s1 = df[c1].map(clean_text)
+        s2 = df[c2].map(clean_text) if c2 and c2 in df.columns else pd.Series("", index=df.index)
+        return s1.where(~s1.str.lower().eq("not required"), s2).replace("", "Unknown")
+    if c and c in df.columns:
+        return df[c].map(clean_text).replace("", "Unknown")
+    return pd.Series("Unknown", index=df.index)
+
+
+def render_sheet_detail(sheet_name, df, ctx, prefix, data=None):
+    st.markdown(f"#### {sheet_name}")
+    if df is None or df.empty:
+        st.warning(f"No data available for {sheet_name}.")
+        return
+
+    total_students = int(len(df))
+    active_students = int(df["is_active"].sum()) if "is_active" in df else int((pd.to_numeric(df.get("engagement_score", pd.Series(0, index=df.index)), errors="coerce").fillna(0) > 0).sum())
+    paid_students = int(df["sheet_is_paid"].sum()) if "sheet_is_paid" in df else 0
+    refunded_students = int(df["sheet_is_refunded"].sum()) if "sheet_is_refunded" in df else 0
+    comm_series = df.get("community_status_value", pd.Series("", index=df.index)).astype(str)
+    in_mask_metric = is_community_in_series(comm_series)
+    in_community = int(in_mask_metric.sum())
+    active_in_comm = int((df.get("is_active", pd.Series(False, index=df.index)).astype(bool) & in_mask_metric).sum())
+
+    k1, k2, k3, k4, k5 = st.columns(5)
+    k1.metric("Students", f"{total_students:,}")
+    k2.metric("Joined WA", f"{in_community:,}", delta=f"{(in_community/total_students*100 if total_students else 0):.1f}%")
+    k3.metric("Active", f"{active_students:,}", delta=f"{(active_students/total_students*100 if total_students else 0):.1f}% overall, {(active_in_comm/in_community*100 if in_community else 0):.1f}% in Community")
+    k4.metric("Admitted / Paid", f"{paid_students:,}", delta=f"{(paid_students/total_students*100 if total_students else 0):.1f}%")
+    k5.metric("Refunded", f"{refunded_students:,}", delta=f"{(refunded_students/total_students*100 if total_students else 0):.1f}%")
+
+    event_info = ctx.get("event_info", pd.DataFrame()) if ctx else pd.DataFrame()
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        fig = px.histogram(df, x="engagement_pct", nbins=12, title="Engagement Distribution")
+        fig.update_traces(marker_color=GREEN_2)
+        st.plotly_chart(nice_layout(fig, height=340), use_container_width=True, key=f"{prefix}_hist")
+    with c2:
+        status = build_status_breakdown(df)
+        fig = px.pie(status, names="Status", values="Students", hole=0.58, title="Status Breakdown")
+        st.plotly_chart(nice_layout(fig, height=340), use_container_width=True, key=f"{prefix}_pie")
+    with c3:
+        active_circle = pd.DataFrame({"Status": ["Active", "Non-Active"], "Students": [active_students, max(total_students - active_students, 0)]})
+        fig = px.pie(active_circle, names="Status", values="Students", hole=0.58, title="Active vs Non-Active", color="Status", color_discrete_map={"Active": GREEN, "Non-Active": GREEN_4})
+        st.plotly_chart(nice_layout(fig, height=340), use_container_width=True, key=f"{prefix}_active_circle")
+
+    comm = comm_series.replace("", np.nan).dropna()
+    if not comm.empty:
+        st.markdown("#### Community Status")
+        comm_col, counsellor_col = st.columns([1, 1.25])
+        non_in_mask = ~is_community_in_series(comm_series)
+        with comm_col:
+            community_plot = comm.value_counts().reset_index()
+            community_plot.columns = ["Community Status", "Students"]
+            fig = px.pie(community_plot, names="Community Status", values="Students", hole=0.58, title="Community Status", color="Community Status", color_discrete_map={"Tetr X": GREEN, "In": GREEN_3, "Out": GREEN_4})
+            st.plotly_chart(nice_layout(fig, height=340), use_container_width=True, key=f"{prefix}_community")
+        with counsellor_col:
+            out_df = df[non_in_mask].copy()
+            out_df["Counsellor"] = _resolve_counsellor_series_for_frame(out_df, ctx)
+            if out_df.empty:
+                st.info("No Out community students for counsellor breakdown.")
+            else:
+                counsellor_plot = out_df.groupby("Counsellor")["student_name"].count().reset_index(name="Out Community Students").sort_values("Out Community Students", ascending=False)
+                fig = px.bar(counsellor_plot, x="Counsellor", y="Out Community Students", title="Out Community Students by Counsellor")
+                fig.update_traces(marker_color=AMBER)
+                st.plotly_chart(nice_layout(fig, height=340, x_tickangle=-25), use_container_width=True, key=f"{prefix}_out_counsellor")
+        non_in = df[non_in_mask].copy()
+        st.markdown("##### Students Not In Community")
+        if non_in.empty:
+            st.info("All listed students are marked In community.")
+        else:
+            non_in["Counsellor"] = _resolve_counsellor_series_for_frame(non_in, ctx)
+            cols = [c for c in ["student_name", "email_key", "community_status_value", "Counsellor", "Batch", "Program"] if c in non_in.columns]
+            st.dataframe(non_in[cols].sort_values([c for c in ["Batch", "Counsellor", "student_name"] if c in cols]), use_container_width=True, height=320, key=f"{prefix}_non_in_students")
+
+    d1, d2 = st.columns(2)
+    with d1:
+        if event_info is not None and not event_info.empty:
+            participants = []
+            for _, r in event_info.iterrows():
+                col = r["column_name"]
+                participants.append(int(pd.to_numeric(df[col], errors="coerce").fillna(0).sum()) if col in df.columns else 0)
+            event_counts = event_info.assign(Participants=participants).sort_values("Participants", ascending=False).head(12)
+            fig = px.bar(event_counts, x="Participants", y="event_name", orientation="h", color="event_type", title="Top Events by Participation", hover_name="event_name", hover_data={"event_name": False, "event_type": True, "event_date": True, "Participants": True})
+            st.plotly_chart(nice_layout(fig, height=460), use_container_width=True, key=f"{prefix}_events")
+    with d2:
+        country_col = ctx.get("country_col") if ctx else None
+        if country_col and country_col in df.columns:
+            top_country = df.groupby(country_col)["student_name"].count().reset_index(name="Students").sort_values("Students", ascending=False).head(10)
+            fig = px.bar(top_country, x=country_col, y="Students", title="Country Split")
+            fig.update_traces(marker_color=GREEN_3)
+            st.plotly_chart(nice_layout(fig, height=430, x_tickangle=-30), use_container_width=True, key=f"{prefix}_country")
+
+    t1, t2 = st.columns(2)
+    with t1:
+        students = df[[c for c in ["student_name", "engagement_pct", "engagement_score", "community_status_value"] if c in df.columns]].sort_values([c for c in ["engagement_pct", "engagement_score"] if c in df.columns], ascending=False).head(20)
+        st.markdown("#### Top Students")
+        st.dataframe(students, use_container_width=True, height=390, key=f"{prefix}_top_df")
+    with t2:
+        if prefix.startswith("tx_") and data is not None:
+            tx_program = infer_program_from_sheet(sheet_name)
+            type_counts = compute_tx_prepayment_event_type_summary(df, tx_program, data)
+            st.markdown("#### Event Type Attendance Summary")
+            st.caption("Based on paid/admitted Tetr-X students only, using their attended batch-sheet events before payment date.")
+            if not type_counts.empty:
+                fig = px.bar(type_counts, x="event_type", y="Attended %", text="Students Attended", title="Pre-Payment Batch Attendance by Event Type", hover_data=["Students Attended", "Event Occurrences", "Attendance Hits"], color="event_type")
+                fig.update_traces(textposition="outside")
+                st.plotly_chart(nice_layout(fig, height=390, x_tickangle=-25), use_container_width=True, key=f"{prefix}_event_type_attendance")
+                st.dataframe(type_counts.rename(columns={"event_type": "Event Type"}), use_container_width=True, height=190, key=f"{prefix}_event_type_df")
+            else:
+                st.info("No pre-payment batch attendance was found for the students in this Tetr-X sheet.")
+        else:
+            target = df[(~df.get("sheet_is_paid", pd.Series(False, index=df.index))) & (~df.get("sheet_is_refunded", pd.Series(False, index=df.index))) & (df.get("is_active", pd.Series(False, index=df.index)))]
+            cols = [c for c in ["student_name", "engagement_pct", "engagement_score", "community_status_value"] if c in target.columns]
+            target = target[cols].sort_values([c for c in ["engagement_pct", "engagement_score"] if c in cols], ascending=False).head(20) if cols else pd.DataFrame()
+            st.markdown("#### Best Upgrade Targets")
+            st.dataframe(target, use_container_width=True, height=390, key=f"{prefix}_upgrade_df")
+
+    if not prefix.startswith("tx_"):
+        render_paid_students_section(df, ctx, prefix, data=data)
+        render_om_attendance_section(df, ctx, prefix)
+
+    if event_info is not None and not event_info.empty and event_info["event_date"].notna().any():
+        timeline = build_timeline_from_event_info(df, event_info)
+        if not timeline.empty:
+            fig = px.line(timeline, x="event_date", y="Participants", markers=True, title="Participation Timeline", hover_name="Event Names", hover_data={"Event Names": False, "Event Types": True, "event_date": True, "Participants": True})
+            fig.update_traces(line_color=GREEN, marker_color=GREEN)
+            st.plotly_chart(nice_layout(fig, height=360), use_container_width=True, key=f"{prefix}_timeline")
 
 
 def main():
