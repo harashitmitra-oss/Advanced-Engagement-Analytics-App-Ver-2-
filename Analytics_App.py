@@ -5635,6 +5635,11 @@ def _tetrx_ug_event_matrix(data, mode):
         }
 
     event_rows = []
+    # Denominator for the summary percentage: unique students who were eligible
+    # to attend at least one session in that attendance bucket during the selected view.
+    # This intentionally avoids counting repeated event opportunities as the denominator.
+    eligible_student_ids_by_category = {c: set() for c in categories}
+
     for sheet in UG_BATCH_SHEETS + ["Tetr-X-UG"]:
         df = data.get("activities", {}).get(sheet, pd.DataFrame())
         ctx = data.get("activity_ctx", {}).get(sheet, {})
@@ -5650,6 +5655,26 @@ def _tetrx_ug_event_matrix(data, mode):
                 continue
             ev_date = pd.to_datetime(ev.get("event_date", pd.NaT), errors="coerce")
             ev_date = ev_date.normalize() if pd.notna(ev_date) else pd.NaT
+
+            # Work out which Tetr-X UG students were eligible for this event in the selected view.
+            # The summary % uses this as unique eligible students, not repeated eligible opportunities.
+            if pd.notna(ev_date):
+                for sid, info in student_info.items():
+                    pay = info.get("payment_date", pd.NaT)
+                    offered = info.get("offered", pd.NaT)
+                    deadline = info.get("deadline", pd.NaT)
+                    eligible_for_event = False
+                    if mode == "Pre-Payment":
+                        eligible_for_event = sheet != "Tetr-X-UG" and pd.notna(pay) and ev_date <= pay
+                    elif mode == "First 30 Days":
+                        eligible_for_event = pd.notna(offered) and pd.notna(deadline) and offered <= ev_date <= deadline
+                    elif mode == "Post-Payment":
+                        eligible_for_event = pd.notna(pay) and ev_date >= pay
+                    else:  # All
+                        eligible_for_event = True
+                    if eligible_for_event:
+                        eligible_student_ids_by_category[category].add(sid)
+
             attended = pd.to_numeric(df[col], errors="coerce").fillna(0).gt(0)
             for _, sr in df.loc[attended].iterrows():
                 sid = _student_id_from_values(sr.get("email_key", ""), sr.get("student_key", ""), sr.get("student_name", ""))
@@ -5696,39 +5721,23 @@ def _tetrx_ug_event_matrix(data, mode):
         table_rows.append(row)
     table = pd.DataFrame(table_rows).sort_values("Student Name").reset_index(drop=True)
 
-    # Eligibility opportunities for summary percentages.
-    eligibility = {c: 0 for c in categories}
-    for _, evrow in (events.drop_duplicates(["category", "event_name", "event_date", "source_sheet"]).iterrows() if not events.empty else []):
-        cat = evrow["category"]
-        ev_date = pd.to_datetime(evrow["event_date"], errors="coerce")
-        if pd.isna(ev_date):
-            continue
-        for sid, info in student_info.items():
-            pay = info.get("payment_date", pd.NaT)
-            offered = info.get("offered", pd.NaT)
-            deadline = info.get("deadline", pd.NaT)
-            ok = False
-            if mode == "Pre-Payment":
-                ok = pd.notna(pay) and ev_date <= pay
-            elif mode == "First 30 Days":
-                ok = pd.notna(offered) and pd.notna(deadline) and offered <= ev_date <= deadline
-            elif mode == "Post-Payment":
-                ok = pd.notna(pay) and ev_date >= pay
-            else:
-                ok = True
-            if ok:
-                eligibility[cat] += 1
+    # Summary percentages use unique eligible students for each attendance bucket.
+    # This is different from eligible opportunities: if 20 AMAs happened, a student is
+    # counted once in the denominator for the AMA bucket if they were eligible for any of them.
+    eligibility = {c: len(eligible_student_ids_by_category.get(c, set())) for c in categories}
     summary_rows = []
     total_students = len(table)
     paid_students = int(table["Status"].astype(str).str.lower().eq("admitted").sum()) if not table.empty else 0
     for c in categories:
         total_att = int(table[c].sum()) if c in table.columns else 0
         eligible = int(eligibility.get(c, 0))
+        unique_attended = int((table[c] > 0).sum()) if c in table.columns else 0
         summary_rows.append({
             "Activity Column": c,
             "Total Attendance": total_att,
-            "Eligible Opportunities": eligible,
-            "% of Eligible Opportunities": (total_att / eligible * 100) if eligible else 0.0,
+            "Unique Students Attended": unique_attended,
+            "Eligible Unique Students": eligible,
+            "% of Eligible Students": (total_att / eligible * 100) if eligible else 0.0,
         })
     summary = pd.DataFrame(summary_rows)
     return table, summary
@@ -5783,11 +5792,23 @@ def render_activities_page(data):
         m1, m2 = st.columns(2)
         m1.metric("Total Students", f"{total_students:,}")
         m2.metric("Total Paid / Admitted Students", f"{paid_students:,}")
-        st.dataframe(matrix, use_container_width=True, hide_index=True, height=420, key=f"activities_txug_matrix_{mode}")
+        attendance_cols = [c for c in ["AMA Pratham", "AMA Tarun", "AMA Amitoj", "AMA Garima", "AMA Capstone", "AMA Life at Tetr", "Masterclass", "Competition", "Hackathon"] if c in matrix.columns]
+        def _highlight_activity_nonzero(val):
+            try:
+                return "background-color: #dff3e7; color: #0b3d2e; font-weight: 700;" if float(val) > 0 else ""
+            except Exception:
+                return ""
+        try:
+            styled_matrix = matrix.style.applymap(_highlight_activity_nonzero, subset=attendance_cols)
+            st.dataframe(styled_matrix, use_container_width=True, hide_index=True, height=420, key=f"activities_txug_matrix_{mode}")
+        except Exception:
+            st.dataframe(matrix, use_container_width=True, hide_index=True, height=420, key=f"activities_txug_matrix_{mode}")
+
         st.markdown("#### Attendance Summary")
         sdisp = summary.copy()
         if not sdisp.empty:
-            sdisp["% of Eligible Opportunities"] = sdisp["% of Eligible Opportunities"].map(lambda x: f"{x:.1f}%")
+            if "% of Eligible Students" in sdisp.columns:
+                sdisp["% of Eligible Students"] = sdisp["% of Eligible Students"].map(lambda x: f"{x:.1f}%")
             st.dataframe(sdisp, use_container_width=True, hide_index=True, key=f"activities_txug_summary_{mode}")
         ama_cols = ["AMA Pratham", "AMA Tarun", "AMA Amitoj", "AMA Garima", "AMA Capstone", "AMA Life at Tetr"]
         avg_ama = matrix[ama_cols].sum(axis=1).mean() if all(c in matrix.columns for c in ama_cols) else 0
