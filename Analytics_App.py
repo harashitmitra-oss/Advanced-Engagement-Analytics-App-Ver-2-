@@ -5568,21 +5568,27 @@ def build_activities_all_events(data, speaker_filter=None):
     return out.reset_index(drop=True)
 
 
-def _is_tetrx_ug_student_id(row):
+
+def _student_id_from_activity_row(row):
     return _student_id_from_values(row.get("email_key", ""), row.get("student_key", ""), row.get("student_name", ""))
 
 
-def _tetrx_ug_student_frame(data):
-    tx = data.get("activities", {}).get("Tetr-X-UG", pd.DataFrame())
+def _tetrx_student_frame(data, program="UG"):
+    tx_sheet = "Tetr-X-UG" if str(program).upper() == "UG" else "Tetr-X-PG"
+    tx = data.get("activities", {}).get(tx_sheet, pd.DataFrame())
     if tx is None or tx.empty:
         return pd.DataFrame()
     status = tx.get("sheet_status_raw", pd.Series("", index=tx.index)).astype(str).map(clean_text)
     out = tx.copy()
-    out["student_id"] = out.apply(_is_tetrx_ug_student_id, axis=1)
+    out["student_id"] = out.apply(_student_id_from_activity_row, axis=1)
     out["Status"] = status
     out = out[out["student_id"].astype(str).str.len().gt(0)].copy()
     out = out.drop_duplicates("student_id", keep="first").reset_index(drop=True)
     return out
+
+
+def _tetrx_ug_student_frame(data):
+    return _tetrx_student_frame(data, "UG")
 
 
 def _categorize_activities_ama(event_name, event_type):
@@ -5610,8 +5616,50 @@ def _categorize_activities_ama(event_name, event_type):
     return None
 
 
-def _tetrx_ug_event_matrix(data, mode):
-    students = _tetrx_ug_student_frame(data)
+def _event_is_eligible_for_student(mode, sheet, tx_sheet, ev_date, pay, offered, deadline):
+    """Eligibility for a Tetr-X activity-matrix student/category cell.
+
+    Pre-Payment: only batch-sheet events on/before payment date.
+    First 30 Days: all students are eligible for the view; attendance is included inside Offered date -> Deadline.
+    Post-Payment: events on/after payment date.
+    All: pre-payment batch events plus post-payment events, with duplicate event rows merged later.
+    """
+    if pd.isna(ev_date):
+        return False
+    if mode == "Pre-Payment":
+        return sheet != tx_sheet and pd.notna(pay) and ev_date <= pay
+    if mode == "First 30 Days":
+        return True
+    if mode == "Post-Payment":
+        return pd.notna(pay) and ev_date >= pay
+    # All
+    if pd.isna(pay):
+        return False
+    if sheet != tx_sheet and ev_date <= pay:
+        return True
+    if ev_date >= pay:
+        return True
+    return False
+
+
+def _event_include_attendance_for_student(mode, sheet, tx_sheet, ev_date, pay, offered, deadline):
+    if pd.isna(ev_date):
+        return False
+    if mode == "Pre-Payment":
+        return sheet != tx_sheet and pd.notna(pay) and ev_date <= pay
+    if mode == "First 30 Days":
+        return pd.notna(offered) and pd.notna(deadline) and offered <= ev_date <= deadline
+    if mode == "Post-Payment":
+        return pd.notna(pay) and ev_date >= pay
+    # All: count every attended event the student was eligible for before or after payment.
+    return _event_is_eligible_for_student(mode, sheet, tx_sheet, ev_date, pay, offered, deadline)
+
+
+def _tetrx_event_matrix(data, mode, program="UG"):
+    program = str(program).upper()
+    tx_sheet = "Tetr-X-UG" if program == "UG" else "Tetr-X-PG"
+    batch_sheets = UG_BATCH_SHEETS if program == "UG" else PG_BATCH_SHEETS
+    students = _tetrx_student_frame(data, program)
     categories = ["AMA Pratham", "AMA Tarun", "AMA Amitoj", "AMA Garima", "AMA Capstone", "AMA Life at Tetr", "Masterclass", "Competition", "Hackathon"]
     if students.empty:
         return pd.DataFrame(columns=["Student Name", "Email", "Status"] + categories), pd.DataFrame()
@@ -5622,7 +5670,7 @@ def _tetrx_ug_event_matrix(data, mode):
         sid = r.get("student_id", "")
         pay_dt = pd.to_datetime(r.get("payment_date_parsed", pd.NaT), errors="coerce")
         pay_dt = pay_dt.normalize() if pd.notna(pay_dt) else pd.NaT
-        drow = find_student_dates_row(dates_df, r.get("student_name", ""), r.get("email_key", ""), r.get("student_key", ""), "UG", r.get("Batch", "")) if dates_df is not None and not dates_df.empty else None
+        drow = find_student_dates_row(dates_df, r.get("student_name", ""), r.get("email_key", ""), r.get("student_key", ""), program, r.get("Batch", "")) if dates_df is not None and not dates_df.empty else None
         offered = pd.to_datetime(drow.get("offered_date_parsed", pd.NaT), errors="coerce") if drow is not None else pd.NaT
         deadline = pd.to_datetime(drow.get("deadline_parsed", pd.NaT), errors="coerce") if drow is not None else pd.NaT
         student_info[sid] = {
@@ -5635,12 +5683,10 @@ def _tetrx_ug_event_matrix(data, mode):
         }
 
     event_rows = []
-    # Denominator for the summary percentage: unique students who were eligible
-    # to attend at least one session in that attendance bucket during the selected view.
-    # This intentionally avoids counting repeated event opportunities as the denominator.
     eligible_student_ids_by_category = {c: set() for c in categories}
+    eligible_student_category = {sid: {c: False for c in categories} for sid in student_info.keys()}
 
-    for sheet in UG_BATCH_SHEETS + ["Tetr-X-UG"]:
+    for sheet in list(batch_sheets) + [tx_sheet]:
         df = data.get("activities", {}).get(sheet, pd.DataFrame())
         ctx = data.get("activity_ctx", {}).get(sheet, {})
         ev_info = ctx.get("event_info", pd.DataFrame())
@@ -5656,24 +5702,18 @@ def _tetrx_ug_event_matrix(data, mode):
             ev_date = pd.to_datetime(ev.get("event_date", pd.NaT), errors="coerce")
             ev_date = ev_date.normalize() if pd.notna(ev_date) else pd.NaT
 
-            # Work out which Tetr-X UG students were eligible for this event in the selected view.
-            # The summary % uses this as unique eligible students, not repeated eligible opportunities.
+            # Mark eligible students for this activity bucket. For First 30 Days, every
+            # Tetr-X student is eligible for every bucket that exists; the date window only
+            # controls counted attendance.
             if pd.notna(ev_date):
                 for sid, info in student_info.items():
                     pay = info.get("payment_date", pd.NaT)
                     offered = info.get("offered", pd.NaT)
                     deadline = info.get("deadline", pd.NaT)
-                    eligible_for_event = False
-                    if mode == "Pre-Payment":
-                        eligible_for_event = sheet != "Tetr-X-UG" and pd.notna(pay) and ev_date <= pay
-                    elif mode == "First 30 Days":
-                        eligible_for_event = pd.notna(offered) and pd.notna(deadline) and offered <= ev_date <= deadline
-                    elif mode == "Post-Payment":
-                        eligible_for_event = pd.notna(pay) and ev_date >= pay
-                    else:  # All
-                        eligible_for_event = True
+                    eligible_for_event = _event_is_eligible_for_student(mode, sheet, tx_sheet, ev_date, pay, offered, deadline)
                     if eligible_for_event:
                         eligible_student_ids_by_category[category].add(sid)
+                        eligible_student_category[sid][category] = True
 
             attended = pd.to_numeric(df[col], errors="coerce").fillna(0).gt(0)
             for _, sr in df.loc[attended].iterrows():
@@ -5684,17 +5724,13 @@ def _tetrx_ug_event_matrix(data, mode):
                 pay = info.get("payment_date", pd.NaT)
                 offered = info.get("offered", pd.NaT)
                 deadline = info.get("deadline", pd.NaT)
-                include = False
-                if mode == "Pre-Payment":
-                    include = pd.notna(pay) and pd.notna(ev_date) and ev_date <= pay and sheet != "Tetr-X-UG"
-                elif mode == "First 30 Days":
-                    include = pd.notna(offered) and pd.notna(deadline) and pd.notna(ev_date) and (offered <= ev_date <= deadline)
-                elif mode == "Post-Payment":
-                    include = pd.notna(pay) and pd.notna(ev_date) and ev_date >= pay
-                else:  # All
-                    include = pd.notna(ev_date)
+                include = _event_include_attendance_for_student(mode, sheet, tx_sheet, ev_date, pay, offered, deadline)
                 if not include:
                     continue
+                # If an attended event exists, keep that student/category eligible too, so
+                # counts and denominators cannot become inconsistent because of missing dates.
+                eligible_student_ids_by_category[category].add(sid)
+                eligible_student_category[sid][category] = True
                 dedupe = f"{sid}|{_event_name_key(ev.get('event_name',''))}|{category}|{ev_date.strftime('%Y-%m-%d') if pd.notna(ev_date) else ''}"
                 event_rows.append({
                     "student_id": sid,
@@ -5717,21 +5753,20 @@ def _tetrx_ug_event_matrix(data, mode):
         else:
             counts = events[events["student_id"].eq(sid)]["category"].value_counts()
         for c in categories:
-            row[c] = int(counts.get(c, 0))
+            if mode in {"Pre-Payment", "Post-Payment", "All"} and not eligible_student_category.get(sid, {}).get(c, False):
+                row[c] = "N/A"
+            else:
+                row[c] = int(counts.get(c, 0))
         table_rows.append(row)
     table = pd.DataFrame(table_rows).sort_values("Student Name").reset_index(drop=True)
 
-    # Summary percentages use unique eligible students for each attendance bucket.
-    # This is different from eligible opportunities: if 20 AMAs happened, a student is
-    # counted once in the denominator for the AMA bucket if they were eligible for any of them.
     eligibility = {c: len(eligible_student_ids_by_category.get(c, set())) for c in categories}
     summary_rows = []
-    total_students = len(table)
-    paid_students = int(table["Status"].astype(str).str.lower().eq("admitted").sum()) if not table.empty else 0
     for c in categories:
-        total_att = int(table[c].sum()) if c in table.columns else 0
+        numeric_counts = pd.to_numeric(table[c], errors="coerce") if c in table.columns else pd.Series(dtype=float)
+        total_att = int(numeric_counts.fillna(0).sum()) if len(numeric_counts) else 0
         eligible = int(eligibility.get(c, 0))
-        unique_attended = int((table[c] > 0).sum()) if c in table.columns else 0
+        unique_attended = int(numeric_counts.fillna(0).gt(0).sum()) if len(numeric_counts) else 0
         summary_rows.append({
             "Activity Column": c,
             "Total Attendance": total_att,
@@ -5743,9 +5778,62 @@ def _tetrx_ug_event_matrix(data, mode):
     return table, summary
 
 
+def _tetrx_ug_event_matrix(data, mode):
+    return _tetrx_event_matrix(data, mode, "UG")
+
+
+def _render_tetrx_activity_matrix(data, program, title, key_prefix):
+    st.markdown(f"### {title} Activity Matrix")
+    mode = st.radio("Select View", ["Pre-Payment", "First 30 Days", "Post-Payment", "All"], horizontal=True, key=f"{key_prefix}_mode")
+    matrix, summary = _tetrx_event_matrix(data, mode, program)
+    if matrix.empty:
+        st.info(f"No {title} student data found.")
+        return
+    total_students = len(matrix)
+    paid_students = int(matrix["Status"].astype(str).str.lower().eq("admitted").sum())
+    m1, m2 = st.columns(2)
+    m1.metric("Total Students", f"{total_students:,}")
+    m2.metric("Total Paid / Admitted Students", f"{paid_students:,}")
+    attendance_cols = [c for c in ["AMA Pratham", "AMA Tarun", "AMA Amitoj", "AMA Garima", "AMA Capstone", "AMA Life at Tetr", "Masterclass", "Competition", "Hackathon"] if c in matrix.columns]
+
+    def _highlight_activity_nonzero(val):
+        try:
+            return "background-color: #dff3e7; color: #0b3d2e; font-weight: 700;" if float(val) > 0 else ""
+        except Exception:
+            return ""
+
+    try:
+        styled_matrix = matrix.style.applymap(_highlight_activity_nonzero, subset=attendance_cols)
+        st.dataframe(styled_matrix, use_container_width=True, hide_index=True, height=420, key=f"{key_prefix}_matrix_{mode}")
+    except Exception:
+        st.dataframe(matrix, use_container_width=True, hide_index=True, height=420, key=f"{key_prefix}_matrix_{mode}")
+
+    st.markdown("#### Attendance Summary")
+    sdisp = summary.copy()
+    if not sdisp.empty:
+        if "% of Eligible Students" in sdisp.columns:
+            sdisp["% of Eligible Students"] = sdisp["% of Eligible Students"].map(lambda x: f"{x:.1f}%")
+        st.dataframe(sdisp, use_container_width=True, hide_index=True, key=f"{key_prefix}_summary_{mode}")
+    ama_cols = ["AMA Pratham", "AMA Tarun", "AMA Amitoj", "AMA Garima", "AMA Capstone", "AMA Life at Tetr"]
+    numeric_matrix = matrix.copy()
+    for col in attendance_cols:
+        numeric_matrix[col] = pd.to_numeric(numeric_matrix[col], errors="coerce").fillna(0)
+    avg_ama = numeric_matrix[ama_cols].sum(axis=1).mean() if all(c in numeric_matrix.columns for c in ama_cols) else 0
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Average AMAs Done", f"{avg_ama:.2f}")
+    c2.metric("Average Masterclass Attended", f"{numeric_matrix['Masterclass'].mean():.2f}" if "Masterclass" in numeric_matrix else "0.00")
+    c3.metric("Average Competition Attended", f"{numeric_matrix['Competition'].mean():.2f}" if "Competition" in numeric_matrix else "0.00")
+    c4.metric("Average Hackathon Attended", f"{numeric_matrix['Hackathon'].mean():.2f}" if "Hackathon" in numeric_matrix else "0.00")
+    chart_df = summary.copy()
+    if not chart_df.empty:
+        fig = px.bar(chart_df, x="Activity Column", y="Total Attendance", text="Total Attendance", title=f"{title} Attendance by Activity · {mode}")
+        fig.update_traces(marker_color=GREEN)
+        st.plotly_chart(nice_layout(fig, height=360, x_tickangle=-25), use_container_width=True, key=f"{key_prefix}_chart_{mode}")
+
+
 def render_activities_page(data):
     st.subheader("Activities")
-    all_tab, txug_tab = st.tabs(["All Events", "Tetr X UG"])
+    all_tab, txug_tab, txpg_tab = st.tabs(["All Events", "Tetr X UG", "Tetr X PG"])
 
     with all_tab:
         st.markdown("### All Events · Online Events + Masterclasses")
@@ -5781,47 +5869,10 @@ def render_activities_page(data):
                 st.dataframe(tdisp, use_container_width=True, hide_index=True, height=260, key="activities_tarun_table")
 
     with txug_tab:
-        st.markdown("### Tetr X UG Activity Matrix")
-        mode = st.radio("Select View", ["Pre-Payment", "First 30 Days", "Post-Payment", "All"], horizontal=True, key="activities_txug_mode")
-        matrix, summary = _tetrx_ug_event_matrix(data, mode)
-        if matrix.empty:
-            st.info("No Tetr-X-UG student data found.")
-            return
-        total_students = len(matrix)
-        paid_students = int(matrix["Status"].astype(str).str.lower().eq("admitted").sum())
-        m1, m2 = st.columns(2)
-        m1.metric("Total Students", f"{total_students:,}")
-        m2.metric("Total Paid / Admitted Students", f"{paid_students:,}")
-        attendance_cols = [c for c in ["AMA Pratham", "AMA Tarun", "AMA Amitoj", "AMA Garima", "AMA Capstone", "AMA Life at Tetr", "Masterclass", "Competition", "Hackathon"] if c in matrix.columns]
-        def _highlight_activity_nonzero(val):
-            try:
-                return "background-color: #dff3e7; color: #0b3d2e; font-weight: 700;" if float(val) > 0 else ""
-            except Exception:
-                return ""
-        try:
-            styled_matrix = matrix.style.applymap(_highlight_activity_nonzero, subset=attendance_cols)
-            st.dataframe(styled_matrix, use_container_width=True, hide_index=True, height=420, key=f"activities_txug_matrix_{mode}")
-        except Exception:
-            st.dataframe(matrix, use_container_width=True, hide_index=True, height=420, key=f"activities_txug_matrix_{mode}")
+        _render_tetrx_activity_matrix(data, "UG", "Tetr X UG", "activities_txug")
 
-        st.markdown("#### Attendance Summary")
-        sdisp = summary.copy()
-        if not sdisp.empty:
-            if "% of Eligible Students" in sdisp.columns:
-                sdisp["% of Eligible Students"] = sdisp["% of Eligible Students"].map(lambda x: f"{x:.1f}%")
-            st.dataframe(sdisp, use_container_width=True, hide_index=True, key=f"activities_txug_summary_{mode}")
-        ama_cols = ["AMA Pratham", "AMA Tarun", "AMA Amitoj", "AMA Garima", "AMA Capstone", "AMA Life at Tetr"]
-        avg_ama = matrix[ama_cols].sum(axis=1).mean() if all(c in matrix.columns for c in ama_cols) else 0
-        c1, c2, c3, c4 = st.columns(4)
-        c1.metric("Average AMAs Done", f"{avg_ama:.2f}")
-        c2.metric("Average Masterclass Attended", f"{matrix['Masterclass'].mean():.2f}" if "Masterclass" in matrix else "0.00")
-        c3.metric("Average Competition Attended", f"{matrix['Competition'].mean():.2f}" if "Competition" in matrix else "0.00")
-        c4.metric("Average Hackathon Attended", f"{matrix['Hackathon'].mean():.2f}" if "Hackathon" in matrix else "0.00")
-        chart_df = summary.copy()
-        if not chart_df.empty:
-            fig = px.bar(chart_df, x="Activity Column", y="Total Attendance", text="Total Attendance", title=f"Tetr-X-UG Attendance by Activity · {mode}")
-            fig.update_traces(marker_color=GREEN)
-            st.plotly_chart(nice_layout(fig, height=360, x_tickangle=-25), use_container_width=True, key=f"activities_txug_chart_{mode}")
+    with txpg_tab:
+        _render_tetrx_activity_matrix(data, "PG", "Tetr X PG", "activities_txpg")
 
 def main():
     cfg = resolve_source()
