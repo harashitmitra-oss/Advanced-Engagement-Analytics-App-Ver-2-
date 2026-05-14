@@ -5745,9 +5745,21 @@ def _tetrx_event_matrix(data, mode, program="UG"):
     if not events.empty:
         events = events.drop_duplicates("dedupe_key")
 
+    # Winner counts for each Tetr-X student, shown only in Activities matrices.
+    winner_lookup = {}
+    winner_df = data.get("winner_df", pd.DataFrame())
+    if winner_df is not None and not winner_df.empty:
+        w = winner_df.copy()
+        if "is_winner" in w.columns:
+            w = w[w["is_winner"].fillna(False).astype(bool)].copy()
+        for _, wr in w.iterrows():
+            wid = _student_id_from_values(wr.get("email_key", ""), wr.get("student_key", ""), wr.get("winner_name", ""))
+            if wid:
+                winner_lookup[wid] = winner_lookup.get(wid, 0) + 1
+
     table_rows = []
     for sid, info in student_info.items():
-        row = {"Student Name": info["name"], "Email": info["email"], "Status": info["status"]}
+        row = {"Student Name": info["name"], "Email": info["email"], "Status": info["status"], "Winner": int(winner_lookup.get(sid, 0))}
         if events.empty:
             counts = pd.Series(dtype=int)
         else:
@@ -5772,7 +5784,7 @@ def _tetrx_event_matrix(data, mode, program="UG"):
             "Total Attendance": total_att,
             "Unique Students Attended": unique_attended,
             "Eligible Unique Students": eligible,
-            "% of Eligible Students": (total_att / eligible * 100) if eligible else 0.0,
+            "% of Activity-Type Eligible Students": (unique_attended / eligible * 100) if eligible else 0.0,
         })
     summary = pd.DataFrame(summary_rows)
     return table, summary
@@ -5791,9 +5803,12 @@ def _render_tetrx_activity_matrix(data, program, title, key_prefix):
         return
     total_students = len(matrix)
     paid_students = int(matrix["Status"].astype(str).str.lower().eq("admitted").sum())
-    m1, m2 = st.columns(2)
+    winner_students = int(pd.to_numeric(matrix.get("Winner", pd.Series(0, index=matrix.index)), errors="coerce").fillna(0).gt(0).sum()) if "Winner" in matrix.columns else 0
+    winner_pct = (winner_students / total_students * 100) if total_students else 0.0
+    m1, m2, m3 = st.columns(3)
     m1.metric("Total Students", f"{total_students:,}")
     m2.metric("Total Paid / Admitted Students", f"{paid_students:,}")
+    m3.metric("Winners", f"{winner_students:,}", delta=f"{winner_pct:.1f}% of students")
     attendance_cols = [c for c in ["AMA Pratham", "AMA Tarun", "AMA Amitoj", "AMA Garima", "AMA Capstone", "AMA Life at Tetr", "Masterclass", "Competition", "Hackathon"] if c in matrix.columns]
 
     def _highlight_activity_nonzero(val):
@@ -5811,19 +5826,22 @@ def _render_tetrx_activity_matrix(data, program, title, key_prefix):
     st.markdown("#### Attendance Summary")
     sdisp = summary.copy()
     if not sdisp.empty:
-        if "% of Eligible Students" in sdisp.columns:
-            sdisp["% of Eligible Students"] = sdisp["% of Eligible Students"].map(lambda x: f"{x:.1f}%")
+        if "% of Activity-Type Eligible Students" in sdisp.columns:
+            sdisp["% of Activity-Type Eligible Students"] = sdisp["% of Activity-Type Eligible Students"].map(lambda x: f"{x:.1f}%")
         st.dataframe(sdisp, use_container_width=True, hide_index=True, key=f"{key_prefix}_summary_{mode}")
     ama_cols = ["AMA Pratham", "AMA Tarun", "AMA Amitoj", "AMA Garima", "AMA Capstone", "AMA Life at Tetr"]
     numeric_matrix = matrix.copy()
     for col in attendance_cols:
         numeric_matrix[col] = pd.to_numeric(numeric_matrix[col], errors="coerce").fillna(0)
     avg_ama = numeric_matrix[ama_cols].sum(axis=1).mean() if all(c in numeric_matrix.columns for c in ama_cols) else 0
-    c1, c2, c3, c4 = st.columns(4)
+    avg_masterclass = numeric_matrix['Masterclass'].mean() if "Masterclass" in numeric_matrix else 0.0
+    avg_ama_masterclass = (numeric_matrix[ama_cols].sum(axis=1) + (numeric_matrix['Masterclass'] if "Masterclass" in numeric_matrix else 0)).mean() if all(c in numeric_matrix.columns for c in ama_cols) else avg_masterclass
+    c1, c2, c3, c4, c5 = st.columns(5)
     c1.metric("Average AMAs Done", f"{avg_ama:.2f}")
-    c2.metric("Average Masterclass Attended", f"{numeric_matrix['Masterclass'].mean():.2f}" if "Masterclass" in numeric_matrix else "0.00")
-    c3.metric("Average Competition Attended", f"{numeric_matrix['Competition'].mean():.2f}" if "Competition" in numeric_matrix else "0.00")
-    c4.metric("Average Hackathon Attended", f"{numeric_matrix['Hackathon'].mean():.2f}" if "Hackathon" in numeric_matrix else "0.00")
+    c2.metric("Average AMAs & Masterclass Attended", f"{avg_ama_masterclass:.2f}")
+    c3.metric("Average Masterclass Attended", f"{avg_masterclass:.2f}")
+    c4.metric("Average Competition Attended", f"{numeric_matrix['Competition'].mean():.2f}" if "Competition" in numeric_matrix else "0.00")
+    c5.metric("Average Hackathon Attended", f"{numeric_matrix['Hackathon'].mean():.2f}" if "Hackathon" in numeric_matrix else "0.00")
     chart_df = summary.copy()
     if not chart_df.empty:
         fig = px.bar(chart_df, x="Activity Column", y="Total Attendance", text="Total Attendance", title=f"{title} Attendance by Activity · {mode}")
@@ -5880,7 +5898,7 @@ def main():
 
     with st.sidebar:
         st.markdown("## 🧭 Navigation")
-        default_pages = ["Overview", "Recent Activity", "Activities", "Success Metrics", "Student Profile", "UG", "PG", "UG vs PG", "Tetr-X", "T-7 & T+7 Analysis", "Conversion", "Retention", "Refund Analytics"]
+        default_pages = ["Overview", "Recent Activity", "Success Metrics", "Student Profile", "UG", "PG", "UG vs PG", "Tetr-X", "T-7 & T+7 Analysis", "Conversion", "Retention", "Refund Analytics", "Activities"]
         default_index = default_pages.index(st.session_state.get("nav_page", "Overview")) if st.session_state.get("nav_page", "Overview") in default_pages else 0
         page = st.radio("Go to", default_pages, index=default_index, label_visibility="collapsed", key="nav")
         st.session_state["nav_page"] = page
