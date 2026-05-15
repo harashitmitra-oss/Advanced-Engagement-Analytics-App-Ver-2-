@@ -5595,6 +5595,8 @@ def _categorize_activities_ama(event_name, event_type):
     name = clean_text(event_name).lower()
     typ = _activity_event_type_norm(event_type)
     if typ == "Online Event":
+        if any(x in name for x in ["shahrose", "welcome webinar", "harshit"]):
+            return "AMA Welcome Webinar"
         if "pratham" in name:
             return "AMA Pratham"
         if "tarun" in name:
@@ -5660,7 +5662,7 @@ def _tetrx_event_matrix(data, mode, program="UG"):
     tx_sheet = "Tetr-X-UG" if program == "UG" else "Tetr-X-PG"
     batch_sheets = UG_BATCH_SHEETS if program == "UG" else PG_BATCH_SHEETS
     students = _tetrx_student_frame(data, program)
-    categories = ["AMA Pratham", "AMA Tarun", "AMA Amitoj", "AMA Garima", "AMA Capstone", "AMA Life at Tetr", "Masterclass", "Competition", "Hackathon"]
+    categories = ["AMA Welcome Webinar", "AMA Pratham", "AMA Tarun", "AMA Amitoj", "AMA Garima", "AMA Capstone", "AMA Life at Tetr", "Masterclass", "Competition", "Hackathon"]
     if students.empty:
         return pd.DataFrame(columns=["Student Name", "Email", "Status"] + categories), pd.DataFrame()
 
@@ -5772,6 +5774,20 @@ def _tetrx_event_matrix(data, mode, program="UG"):
         table_rows.append(row)
     table = pd.DataFrame(table_rows).sort_values("Student Name").reset_index(drop=True)
 
+    # Combined column requested only for Activities matrices. It preserves N/A when
+    # the student was not eligible for either Masterclass or Competition in the selected view.
+    def _combine_activity_cells(a, b):
+        av = pd.to_numeric(pd.Series([a]), errors="coerce").iloc[0]
+        bv = pd.to_numeric(pd.Series([b]), errors="coerce").iloc[0]
+        if pd.isna(av) and pd.isna(bv):
+            return "N/A"
+        return int((0 if pd.isna(av) else av) + (0 if pd.isna(bv) else bv))
+
+    if "Masterclass" in table.columns and "Competition" in table.columns:
+        table["Competition & Masterclass"] = [
+            _combine_activity_cells(a, b) for a, b in zip(table["Competition"], table["Masterclass"])
+        ]
+
     eligibility = {c: len(eligible_student_ids_by_category.get(c, set())) for c in categories}
     summary_rows = []
     for c in categories:
@@ -5785,6 +5801,16 @@ def _tetrx_event_matrix(data, mode, program="UG"):
             "Unique Students Attended": unique_attended,
             "Eligible Unique Students": eligible,
             "% of Activity-Type Eligible Students": (unique_attended / eligible * 100) if eligible else 0.0,
+        })
+    if "Competition & Masterclass" in table.columns:
+        combined_counts = pd.to_numeric(table["Competition & Masterclass"], errors="coerce")
+        combined_eligible_ids = set(eligible_student_ids_by_category.get("Competition", set())) | set(eligible_student_ids_by_category.get("Masterclass", set()))
+        summary_rows.append({
+            "Activity Column": "Competition & Masterclass",
+            "Total Attendance": int(combined_counts.fillna(0).sum()) if len(combined_counts) else 0,
+            "Unique Students Attended": int(combined_counts.fillna(0).gt(0).sum()) if len(combined_counts) else 0,
+            "Eligible Unique Students": len(combined_eligible_ids),
+            "% of Activity-Type Eligible Students": (int(combined_counts.fillna(0).gt(0).sum()) / len(combined_eligible_ids) * 100) if combined_eligible_ids else 0.0,
         })
     summary = pd.DataFrame(summary_rows)
     return table, summary
@@ -5809,7 +5835,7 @@ def _render_tetrx_activity_matrix(data, program, title, key_prefix):
     m1.metric("Total Students", f"{total_students:,}")
     m2.metric("Total Paid / Admitted Students", f"{paid_students:,}")
     m3.metric("Winners", f"{winner_students:,}", delta=f"{winner_pct:.1f}% of students")
-    attendance_cols = [c for c in ["AMA Pratham", "AMA Tarun", "AMA Amitoj", "AMA Garima", "AMA Capstone", "AMA Life at Tetr", "Masterclass", "Competition", "Hackathon"] if c in matrix.columns]
+    attendance_cols = [c for c in ["AMA Welcome Webinar", "AMA Pratham", "AMA Tarun", "AMA Amitoj", "AMA Garima", "AMA Capstone", "AMA Life at Tetr", "Masterclass", "Competition", "Hackathon", "Competition & Masterclass"] if c in matrix.columns]
 
     def _highlight_activity_nonzero(val):
         try:
@@ -5829,19 +5855,21 @@ def _render_tetrx_activity_matrix(data, program, title, key_prefix):
         if "% of Activity-Type Eligible Students" in sdisp.columns:
             sdisp["% of Activity-Type Eligible Students"] = sdisp["% of Activity-Type Eligible Students"].map(lambda x: f"{x:.1f}%")
         st.dataframe(sdisp, use_container_width=True, hide_index=True, key=f"{key_prefix}_summary_{mode}")
-    ama_cols = ["AMA Pratham", "AMA Tarun", "AMA Amitoj", "AMA Garima", "AMA Capstone", "AMA Life at Tetr"]
+    ama_cols = ["AMA Welcome Webinar", "AMA Pratham", "AMA Tarun", "AMA Amitoj", "AMA Garima", "AMA Capstone", "AMA Life at Tetr"]
     numeric_matrix = matrix.copy()
     for col in attendance_cols:
         numeric_matrix[col] = pd.to_numeric(numeric_matrix[col], errors="coerce").fillna(0)
     avg_ama = numeric_matrix[ama_cols].sum(axis=1).mean() if all(c in numeric_matrix.columns for c in ama_cols) else 0
     avg_masterclass = numeric_matrix['Masterclass'].mean() if "Masterclass" in numeric_matrix else 0.0
     avg_ama_masterclass = (numeric_matrix[ama_cols].sum(axis=1) + (numeric_matrix['Masterclass'] if "Masterclass" in numeric_matrix else 0)).mean() if all(c in numeric_matrix.columns for c in ama_cols) else avg_masterclass
-    c1, c2, c3, c4, c5 = st.columns(5)
+    avg_comp_masterclass = numeric_matrix["Competition & Masterclass"].mean() if "Competition & Masterclass" in numeric_matrix else ((numeric_matrix["Competition"] if "Competition" in numeric_matrix else 0) + (numeric_matrix["Masterclass"] if "Masterclass" in numeric_matrix else 0)).mean()
+    c1, c2, c3, c4, c5, c6 = st.columns(6)
     c1.metric("Average AMAs Done", f"{avg_ama:.2f}")
     c2.metric("Average AMAs & Masterclass Attended", f"{avg_ama_masterclass:.2f}")
-    c3.metric("Average Masterclass Attended", f"{avg_masterclass:.2f}")
-    c4.metric("Average Competition Attended", f"{numeric_matrix['Competition'].mean():.2f}" if "Competition" in numeric_matrix else "0.00")
-    c5.metric("Average Hackathon Attended", f"{numeric_matrix['Hackathon'].mean():.2f}" if "Hackathon" in numeric_matrix else "0.00")
+    c3.metric("Average Competition & Masterclass", f"{avg_comp_masterclass:.2f}")
+    c4.metric("Average Masterclass Attended", f"{avg_masterclass:.2f}")
+    c5.metric("Average Competition Attended", f"{numeric_matrix['Competition'].mean():.2f}" if "Competition" in numeric_matrix else "0.00")
+    c6.metric("Average Hackathon Attended", f"{numeric_matrix['Hackathon'].mean():.2f}" if "Hackathon" in numeric_matrix else "0.00")
     chart_df = summary.copy()
     if not chart_df.empty:
         fig = px.bar(chart_df, x="Activity Column", y="Total Attendance", text="Total Attendance", title=f"{title} Attendance by Activity · {mode}")
@@ -5849,9 +5877,213 @@ def _render_tetrx_activity_matrix(data, program, title, key_prefix):
         st.plotly_chart(nice_layout(fig, height=360, x_tickangle=-25), use_container_width=True, key=f"{key_prefix}_chart_{mode}")
 
 
+
+
+def _unpaid_student_frame(data, program="UG"):
+    """Unique unpaid/non-admitted students from batch sheets only for Activities → Unpaid UG/PG."""
+    program = str(program).upper()
+    batch_sheets = UG_BATCH_SHEETS if program == "UG" else PG_BATCH_SHEETS
+    # Exclude anybody who is already present in the relevant Tetr-X sheet as admitted/paid.
+    tx_students = _tetrx_student_frame(data, program)
+    tx_paid_ids = set()
+    if tx_students is not None and not tx_students.empty:
+        tx_status = tx_students.get("Status", pd.Series("", index=tx_students.index)).astype(str).str.strip().str.lower()
+        tx_paid_ids = set(tx_students.loc[tx_status.eq("admitted"), "student_id"].astype(str))
+
+    rows = []
+    seen = set()
+    for sheet in batch_sheets:
+        df = data.get("activities", {}).get(sheet, pd.DataFrame())
+        if df is None or df.empty:
+            continue
+        for _, r in df.iterrows():
+            sid = _student_id_from_values(r.get("email_key", ""), r.get("student_key", ""), r.get("student_name", ""))
+            if not sid or sid in seen or sid in tx_paid_ids:
+                continue
+            status = clean_text(r.get("sheet_status_raw", r.get("paid_label", "")))
+            if status.lower() == "admitted" or bool(r.get("sheet_is_paid", False)):
+                continue
+            rows.append({
+                "student_id": sid,
+                "Student Name": clean_text(r.get("student_name", "")),
+                "Email": clean_text(r.get("email_key", "")),
+                "Status": status,
+                "Batch": clean_text(r.get("Batch", infer_batch_from_sheet_name(sheet))),
+                "Program": program,
+                "student_key": clean_text(r.get("student_key", "")),
+                "email_key": clean_text(r.get("email_key", "")),
+            })
+            seen.add(sid)
+    return pd.DataFrame(rows)
+
+
+def _unpaid_event_matrix(data, mode, program="UG"):
+    program = str(program).upper()
+    batch_sheets = UG_BATCH_SHEETS if program == "UG" else PG_BATCH_SHEETS
+    students = _unpaid_student_frame(data, program)
+    categories = ["AMA Welcome Webinar", "AMA Pratham", "AMA Tarun", "AMA Amitoj", "AMA Garima", "AMA Capstone", "AMA Life at Tetr", "Masterclass", "Competition", "Hackathon"]
+    if students.empty:
+        return pd.DataFrame(columns=["Student Name", "Email", "Status"] + categories), pd.DataFrame()
+
+    dates_df = data.get("dates_df", pd.DataFrame())
+    student_info = {}
+    for _, r in students.iterrows():
+        drow = find_student_dates_row(dates_df, r.get("Student Name", ""), r.get("email_key", ""), r.get("student_key", ""), program, r.get("Batch", "")) if dates_df is not None and not dates_df.empty else None
+        offered = pd.to_datetime(drow.get("offered_date_parsed", pd.NaT), errors="coerce") if drow is not None else pd.NaT
+        deadline = pd.to_datetime(drow.get("deadline_parsed", pd.NaT), errors="coerce") if drow is not None else pd.NaT
+        student_info[r["student_id"]] = {
+            "name": r.get("Student Name", ""),
+            "email": r.get("Email", ""),
+            "status": r.get("Status", ""),
+            "offered": offered.normalize() if pd.notna(offered) else pd.NaT,
+            "deadline": deadline.normalize() if pd.notna(deadline) else pd.NaT,
+        }
+
+    event_rows = []
+    eligible_student_ids_by_category = {c: set() for c in categories}
+    eligible_student_category = {sid: {c: False for c in categories} for sid in student_info.keys()}
+
+    for sheet in batch_sheets:
+        df = data.get("activities", {}).get(sheet, pd.DataFrame())
+        ctx = data.get("activity_ctx", {}).get(sheet, {})
+        ev_info = ctx.get("event_info", pd.DataFrame())
+        if df is None or df.empty or ev_info is None or ev_info.empty:
+            continue
+        for _, ev in ev_info.iterrows():
+            col = ev.get("column_name")
+            if col not in df.columns:
+                continue
+            category = _categorize_activities_ama(ev.get("event_name", ""), ev.get("event_type", ""))
+            if not category:
+                continue
+            ev_date = pd.to_datetime(ev.get("event_date", pd.NaT), errors="coerce")
+            ev_date = ev_date.normalize() if pd.notna(ev_date) else pd.NaT
+
+            for sid, info in student_info.items():
+                if pd.isna(ev_date):
+                    eligible = False
+                elif mode == "First 30 Days":
+                    offered, deadline = info.get("offered", pd.NaT), info.get("deadline", pd.NaT)
+                    eligible = pd.notna(offered) and pd.notna(deadline) and offered <= ev_date <= deadline
+                else:  # All
+                    eligible = True
+                if eligible:
+                    eligible_student_ids_by_category[category].add(sid)
+                    eligible_student_category[sid][category] = True
+
+            attended = pd.to_numeric(df[col], errors="coerce").fillna(0).gt(0)
+            for _, sr in df.loc[attended].iterrows():
+                sid = _student_id_from_values(sr.get("email_key", ""), sr.get("student_key", ""), sr.get("student_name", ""))
+                if sid not in student_info:
+                    continue
+                info = student_info[sid]
+                if pd.isna(ev_date):
+                    include = False
+                elif mode == "First 30 Days":
+                    offered, deadline = info.get("offered", pd.NaT), info.get("deadline", pd.NaT)
+                    include = pd.notna(offered) and pd.notna(deadline) and offered <= ev_date <= deadline
+                else:
+                    include = True
+                if not include:
+                    continue
+                eligible_student_ids_by_category[category].add(sid)
+                eligible_student_category[sid][category] = True
+                dedupe = f"{sid}|{_event_name_key(ev.get('event_name',''))}|{category}|{ev_date.strftime('%Y-%m-%d') if pd.notna(ev_date) else ''}"
+                event_rows.append({"student_id": sid, "category": category, "dedupe_key": dedupe})
+
+    events = pd.DataFrame(event_rows)
+    if not events.empty:
+        events = events.drop_duplicates("dedupe_key")
+
+    rows = []
+    for sid, info in student_info.items():
+        row = {"Student Name": info["name"], "Email": info["email"], "Status": info["status"]}
+        counts = events[events["student_id"].eq(sid)]["category"].value_counts() if not events.empty else pd.Series(dtype=int)
+        for c in categories:
+            row[c] = int(counts.get(c, 0)) if eligible_student_category.get(sid, {}).get(c, False) else "N/A"
+        if "Masterclass" in row and "Competition" in row:
+            av = pd.to_numeric(pd.Series([row["Competition"]]), errors="coerce").iloc[0]
+            bv = pd.to_numeric(pd.Series([row["Masterclass"]]), errors="coerce").iloc[0]
+            row["Competition & Masterclass"] = "N/A" if pd.isna(av) and pd.isna(bv) else int((0 if pd.isna(av) else av) + (0 if pd.isna(bv) else bv))
+        rows.append(row)
+    table = pd.DataFrame(rows).sort_values("Student Name").reset_index(drop=True)
+
+    summary_rows = []
+    for c in categories:
+        numeric_counts = pd.to_numeric(table[c], errors="coerce") if c in table.columns else pd.Series(dtype=float)
+        eligible = len(eligible_student_ids_by_category.get(c, set()))
+        unique_attended = int(numeric_counts.fillna(0).gt(0).sum()) if len(numeric_counts) else 0
+        summary_rows.append({
+            "Activity Column": c,
+            "Total Attendance": int(numeric_counts.fillna(0).sum()) if len(numeric_counts) else 0,
+            "Unique Students Attended": unique_attended,
+            "Eligible Unique Students": eligible,
+            "% of Activity-Type Eligible Students": (unique_attended / eligible * 100) if eligible else 0.0,
+        })
+    if "Competition & Masterclass" in table.columns:
+        combined_counts = pd.to_numeric(table["Competition & Masterclass"], errors="coerce")
+        eligible_ids = set(eligible_student_ids_by_category.get("Competition", set())) | set(eligible_student_ids_by_category.get("Masterclass", set()))
+        summary_rows.append({
+            "Activity Column": "Competition & Masterclass",
+            "Total Attendance": int(combined_counts.fillna(0).sum()) if len(combined_counts) else 0,
+            "Unique Students Attended": int(combined_counts.fillna(0).gt(0).sum()) if len(combined_counts) else 0,
+            "Eligible Unique Students": len(eligible_ids),
+            "% of Activity-Type Eligible Students": (int(combined_counts.fillna(0).gt(0).sum()) / len(eligible_ids) * 100) if eligible_ids else 0.0,
+        })
+    return table, pd.DataFrame(summary_rows)
+
+
+def _render_unpaid_activity_matrix(data, program, title, key_prefix):
+    st.markdown(f"### {title} Activity Matrix")
+    mode = st.radio("Select View", ["First 30 Days", "All"], horizontal=True, key=f"{key_prefix}_mode")
+    matrix, summary = _unpaid_event_matrix(data, mode, program)
+    if matrix.empty:
+        st.info(f"No {title} student data found.")
+        return
+    st.metric("Total Unpaid / Non-Admitted Students", f"{len(matrix):,}")
+    attendance_cols = [c for c in ["AMA Welcome Webinar", "AMA Pratham", "AMA Tarun", "AMA Amitoj", "AMA Garima", "AMA Capstone", "AMA Life at Tetr", "Masterclass", "Competition", "Hackathon", "Competition & Masterclass"] if c in matrix.columns]
+
+    def _highlight_activity_nonzero(val):
+        try:
+            return "background-color: #dff3e7; color: #0b3d2e; font-weight: 700;" if float(val) > 0 else ""
+        except Exception:
+            return ""
+
+    try:
+        st.dataframe(matrix.style.applymap(_highlight_activity_nonzero, subset=attendance_cols), use_container_width=True, hide_index=True, height=420, key=f"{key_prefix}_matrix_{mode}")
+    except Exception:
+        st.dataframe(matrix, use_container_width=True, hide_index=True, height=420, key=f"{key_prefix}_matrix_{mode}")
+
+    st.markdown("#### Attendance Summary")
+    sdisp = summary.copy()
+    if not sdisp.empty and "% of Activity-Type Eligible Students" in sdisp.columns:
+        sdisp["% of Activity-Type Eligible Students"] = sdisp["% of Activity-Type Eligible Students"].map(lambda x: f"{x:.1f}%")
+    st.dataframe(sdisp, use_container_width=True, hide_index=True, key=f"{key_prefix}_summary_{mode}")
+
+    numeric_matrix = matrix.copy()
+    for col in attendance_cols:
+        numeric_matrix[col] = pd.to_numeric(numeric_matrix[col], errors="coerce").fillna(0)
+    ama_cols = [c for c in ["AMA Welcome Webinar", "AMA Pratham", "AMA Tarun", "AMA Amitoj", "AMA Garima", "AMA Capstone", "AMA Life at Tetr"] if c in numeric_matrix.columns]
+    avg_ama = numeric_matrix[ama_cols].sum(axis=1).mean() if ama_cols else 0.0
+    avg_masterclass = numeric_matrix["Masterclass"].mean() if "Masterclass" in numeric_matrix else 0.0
+    avg_ama_masterclass = (numeric_matrix[ama_cols].sum(axis=1) + (numeric_matrix["Masterclass"] if "Masterclass" in numeric_matrix else 0)).mean() if ama_cols else avg_masterclass
+    avg_comp_masterclass = numeric_matrix["Competition & Masterclass"].mean() if "Competition & Masterclass" in numeric_matrix else 0.0
+    c1, c2, c3, c4, c5, c6 = st.columns(6)
+    c1.metric("Average AMAs Done", f"{avg_ama:.2f}")
+    c2.metric("Average AMAs & Masterclass Attended", f"{avg_ama_masterclass:.2f}")
+    c3.metric("Average Competition & Masterclass", f"{avg_comp_masterclass:.2f}")
+    c4.metric("Average Masterclass Attended", f"{avg_masterclass:.2f}")
+    c5.metric("Average Competition Attended", f"{numeric_matrix['Competition'].mean():.2f}" if "Competition" in numeric_matrix else "0.00")
+    c6.metric("Average Hackathon Attended", f"{numeric_matrix['Hackathon'].mean():.2f}" if "Hackathon" in numeric_matrix else "0.00")
+
+    if not summary.empty:
+        fig = px.bar(summary, x="Activity Column", y="Total Attendance", text="Total Attendance", title=f"{title} Attendance by Activity · {mode}")
+        fig.update_traces(marker_color=GREEN)
+        st.plotly_chart(nice_layout(fig, height=360, x_tickangle=-25), use_container_width=True, key=f"{key_prefix}_chart_{mode}")
+
 def render_activities_page(data):
     st.subheader("Activities")
-    all_tab, txug_tab, txpg_tab = st.tabs(["All Events", "Tetr X UG", "Tetr X PG"])
+    all_tab, txug_tab, txpg_tab, unpaid_ug_tab, unpaid_pg_tab = st.tabs(["All Events", "Tetr X UG", "Tetr X PG", "Unpaid UG", "Unpaid PG"])
 
     with all_tab:
         st.markdown("### All Events · Online Events + Masterclasses")
@@ -5891,6 +6123,12 @@ def render_activities_page(data):
 
     with txpg_tab:
         _render_tetrx_activity_matrix(data, "PG", "Tetr X PG", "activities_txpg")
+
+    with unpaid_ug_tab:
+        _render_unpaid_activity_matrix(data, "UG", "Unpaid UG", "activities_unpaid_ug")
+
+    with unpaid_pg_tab:
+        _render_unpaid_activity_matrix(data, "PG", "Unpaid PG", "activities_unpaid_pg")
 
 def main():
     cfg = resolve_source()
