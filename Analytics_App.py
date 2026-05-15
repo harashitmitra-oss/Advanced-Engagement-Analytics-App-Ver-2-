@@ -5872,8 +5872,29 @@ def _render_tetrx_activity_matrix(data, program, title, key_prefix):
     c6.metric("Average Hackathon Attended", f"{numeric_matrix['Hackathon'].mean():.2f}" if "Hackathon" in numeric_matrix else "0.00")
     chart_df = summary.copy()
     if not chart_df.empty:
-        fig = px.bar(chart_df, x="Activity Column", y="Total Attendance", text="Total Attendance", title=f"{title} Attendance by Activity · {mode}")
-        fig.update_traces(marker_color=GREEN)
+        pct_col = "% of Activity-Type Eligible Students"
+        if pct_col in chart_df.columns:
+            chart_df[pct_col] = pd.to_numeric(chart_df[pct_col], errors="coerce").fillna(0)
+            chart_df["Percentage Label"] = chart_df[pct_col].map(lambda x: f"{x:.1f}%")
+            fig = px.bar(
+                chart_df,
+                x="Activity Column",
+                y=pct_col,
+                text="Percentage Label",
+                title=f"{title} Attendance % by Activity · {mode}",
+                hover_data={
+                    "Activity Column": False,
+                    pct_col: ":.1f",
+                    "Unique Students Attended": True,
+                    "Eligible Unique Students": True,
+                    "Total Attendance": True,
+                    "Percentage Label": False,
+                },
+            )
+            fig.update_yaxes(title="% of Activity-Type Eligible Students")
+        else:
+            fig = px.bar(chart_df, x="Activity Column", y="Total Attendance", text="Total Attendance", title=f"{title} Attendance by Activity · {mode}")
+        fig.update_traces(marker_color=GREEN, textposition="outside")
         st.plotly_chart(nice_layout(fig, height=360, x_tickangle=-25), use_container_width=True, key=f"{key_prefix}_chart_{mode}")
 
 
@@ -6077,8 +6098,30 @@ def _render_unpaid_activity_matrix(data, program, title, key_prefix):
     c6.metric("Average Hackathon Attended", f"{numeric_matrix['Hackathon'].mean():.2f}" if "Hackathon" in numeric_matrix else "0.00")
 
     if not summary.empty:
-        fig = px.bar(summary, x="Activity Column", y="Total Attendance", text="Total Attendance", title=f"{title} Attendance by Activity · {mode}")
-        fig.update_traces(marker_color=GREEN)
+        chart_df = summary.copy()
+        pct_col = "% of Activity-Type Eligible Students"
+        if pct_col in chart_df.columns:
+            chart_df[pct_col] = pd.to_numeric(chart_df[pct_col], errors="coerce").fillna(0)
+            chart_df["Percentage Label"] = chart_df[pct_col].map(lambda x: f"{x:.1f}%")
+            fig = px.bar(
+                chart_df,
+                x="Activity Column",
+                y=pct_col,
+                text="Percentage Label",
+                title=f"{title} Attendance % by Activity · {mode}",
+                hover_data={
+                    "Activity Column": False,
+                    pct_col: ":.1f",
+                    "Unique Students Attended": True,
+                    "Eligible Unique Students": True,
+                    "Total Attendance": True,
+                    "Percentage Label": False,
+                },
+            )
+            fig.update_yaxes(title="% of Activity-Type Eligible Students")
+        else:
+            fig = px.bar(chart_df, x="Activity Column", y="Total Attendance", text="Total Attendance", title=f"{title} Attendance by Activity · {mode}")
+        fig.update_traces(marker_color=GREEN, textposition="outside")
         st.plotly_chart(nice_layout(fig, height=360, x_tickangle=-25), use_container_width=True, key=f"{key_prefix}_chart_{mode}")
 
 def render_activities_page(data):
