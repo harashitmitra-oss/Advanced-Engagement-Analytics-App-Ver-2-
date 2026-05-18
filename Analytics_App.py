@@ -23,7 +23,7 @@ except Exception:
 st.set_page_config(page_title="Tetr Analytics Dashboard", layout="wide")
 
 MASTER_SHEETS = ["Master UG", "Master PG"]
-UG_BATCH_SHEETS = ["UG - B1 to B4", "UG B5", "UG B6", "UG B7", "UG B8", "UG B9", "UG B10", "UG B11", "UG B12", "UG B13", "UG B14","UG B15"]
+UG_BATCH_SHEETS = ["UG - B1 to B4", "UG B5", "UG B6", "UG B7", "UG B8", "UG B9", "UG B10", "UG B11", "UG B12", "UG B13", "UG B14", "UG B15"]
 PG_BATCH_SHEETS = ["PG - B1 & B2", "PG - B3 & B4", "PG B5", "PG B6", "PG B7"]
 TX_SHEETS = ["Tetr-X-UG", "Tetr-X-PG"]
 DATES_SHEET = "Dates"
@@ -458,6 +458,31 @@ def build_timeline_from_event_info(df: pd.DataFrame, event_info: pd.DataFrame) -
             "Event Types": ("event_type", lambda s: ", ".join(sorted(dict.fromkeys([clean_text(x) for x in s if clean_text(x)]))))
         }
     ).sort_values("event_date")
+    return out
+
+
+def build_event_attendance_table(df: pd.DataFrame, event_info: pd.DataFrame) -> pd.DataFrame:
+    """Return an event-level attendance table for batch/Tetr-X detail pages."""
+    cols = ["Event / Activity Name", "Event / Activity Date", "Event / Activity Type", "Attendance"]
+    if df is None or df.empty or event_info is None or event_info.empty:
+        return pd.DataFrame(columns=cols)
+    rows = []
+    for _, ev in event_info.iterrows():
+        col = ev.get("column_name")
+        if not col or col not in df.columns:
+            continue
+        event_date = pd.to_datetime(ev.get("event_date", pd.NaT), errors="coerce")
+        attendance = int(pd.to_numeric(df[col], errors="coerce").fillna(0).gt(0).sum())
+        rows.append({
+            "Event / Activity Name": clean_text(ev.get("event_name", "")) or clean_text(col),
+            "Event / Activity Date": event_date.normalize() if pd.notna(event_date) else pd.NaT,
+            "Event / Activity Type": clean_text(ev.get("event_type", "")) or "Other",
+            "Attendance": attendance,
+        })
+    if not rows:
+        return pd.DataFrame(columns=cols)
+    out = pd.DataFrame(rows)
+    out = out.sort_values("Event / Activity Date", ascending=False, na_position="last").reset_index(drop=True)
     return out
 
 def parse_numeric_percent(x):
@@ -1849,6 +1874,12 @@ def render_sheet_detail(sheet_name, df, ctx, prefix, data=None):
             )
             fig.update_traces(line_color=GREEN, marker_color=GREEN)
             st.plotly_chart(nice_layout(fig, height=360), use_container_width=True, key=f"{prefix}_timeline")
+            event_table = build_event_attendance_table(df, event_info)
+            if not event_table.empty:
+                event_table_display = event_table.copy()
+                event_table_display["Event / Activity Date"] = pd.to_datetime(event_table_display["Event / Activity Date"], errors="coerce").dt.strftime("%d %b %Y").fillna("")
+                st.markdown("##### Event / Activity Attendance Table")
+                st.dataframe(event_table_display, use_container_width=True, hide_index=True, height=320, key=f"{prefix}_event_attendance_table")
 
 
 
@@ -4918,7 +4949,10 @@ def render_sheet_detail(sheet_name, df, ctx, prefix, data=None):
 
     t1, t2 = st.columns(2)
     with t1:
-        students = df[[c for c in ["student_name", "engagement_pct", "engagement_score", "community_status_value"] if c in df.columns]].sort_values([c for c in ["engagement_pct", "engagement_score"] if c in df.columns], ascending=False).head(20)
+        top_cols = [c for c in ["student_name", "sheet_status_raw", "engagement_pct", "engagement_score", "community_status_value"] if c in df.columns]
+        students = df[top_cols].sort_values([c for c in ["engagement_pct", "engagement_score"] if c in top_cols], ascending=False).head(20) if top_cols else pd.DataFrame()
+        if "sheet_status_raw" in students.columns:
+            students = students.rename(columns={"sheet_status_raw": "Status"})
         st.markdown("#### Top Students")
         st.dataframe(students, use_container_width=True, height=390, key=f"{prefix}_top_df")
     with t2:
@@ -4936,8 +4970,10 @@ def render_sheet_detail(sheet_name, df, ctx, prefix, data=None):
                 st.info("No pre-payment batch attendance was found for the students in this Tetr-X sheet.")
         else:
             target = df[(~df.get("sheet_is_paid", pd.Series(False, index=df.index))) & (~df.get("sheet_is_refunded", pd.Series(False, index=df.index))) & (df.get("is_active", pd.Series(False, index=df.index)))]
-            cols = [c for c in ["student_name", "engagement_pct", "engagement_score", "community_status_value"] if c in target.columns]
+            cols = [c for c in ["student_name", "sheet_status_raw", "engagement_pct", "engagement_score", "community_status_value"] if c in target.columns]
             target = target[cols].sort_values([c for c in ["engagement_pct", "engagement_score"] if c in cols], ascending=False).head(20) if cols else pd.DataFrame()
+            if "sheet_status_raw" in target.columns:
+                target = target.rename(columns={"sheet_status_raw": "Status"})
             st.markdown("#### Best Upgrade Targets")
             st.dataframe(target, use_container_width=True, height=390, key=f"{prefix}_upgrade_df")
 
@@ -4951,6 +4987,12 @@ def render_sheet_detail(sheet_name, df, ctx, prefix, data=None):
             fig = px.line(timeline, x="event_date", y="Participants", markers=True, title="Participation Timeline", hover_name="Event Names", hover_data={"Event Names": False, "Event Types": True, "event_date": True, "Participants": True})
             fig.update_traces(line_color=GREEN, marker_color=GREEN)
             st.plotly_chart(nice_layout(fig, height=360), use_container_width=True, key=f"{prefix}_timeline")
+            event_table = build_event_attendance_table(df, event_info)
+            if not event_table.empty:
+                event_table_display = event_table.copy()
+                event_table_display["Event / Activity Date"] = pd.to_datetime(event_table_display["Event / Activity Date"], errors="coerce").dt.strftime("%d %b %Y").fillna("")
+                st.markdown("##### Event / Activity Attendance Table")
+                st.dataframe(event_table_display, use_container_width=True, hide_index=True, height=320, key=f"{prefix}_event_attendance_table")
 
 
 def build_tx_risky_students(data, scope_label="Total"):
@@ -5375,7 +5417,10 @@ def render_sheet_detail(sheet_name, df, ctx, prefix, data=None):
 
     t1, t2 = st.columns(2)
     with t1:
-        students = df[[c for c in ["student_name", "engagement_pct", "engagement_score", "community_status_value"] if c in df.columns]].sort_values([c for c in ["engagement_pct", "engagement_score"] if c in df.columns], ascending=False).head(20)
+        top_cols = [c for c in ["student_name", "sheet_status_raw", "engagement_pct", "engagement_score", "community_status_value"] if c in df.columns]
+        students = df[top_cols].sort_values([c for c in ["engagement_pct", "engagement_score"] if c in top_cols], ascending=False).head(20) if top_cols else pd.DataFrame()
+        if "sheet_status_raw" in students.columns:
+            students = students.rename(columns={"sheet_status_raw": "Status"})
         st.markdown("#### Top Students")
         st.dataframe(students, use_container_width=True, height=390, key=f"{prefix}_top_df")
     with t2:
@@ -5393,8 +5438,10 @@ def render_sheet_detail(sheet_name, df, ctx, prefix, data=None):
                 st.info("No pre-payment batch attendance was found for the students in this Tetr-X sheet.")
         else:
             target = df[(~df.get("sheet_is_paid", pd.Series(False, index=df.index))) & (~df.get("sheet_is_refunded", pd.Series(False, index=df.index))) & (df.get("is_active", pd.Series(False, index=df.index)))]
-            cols = [c for c in ["student_name", "engagement_pct", "engagement_score", "community_status_value"] if c in target.columns]
+            cols = [c for c in ["student_name", "sheet_status_raw", "engagement_pct", "engagement_score", "community_status_value"] if c in target.columns]
             target = target[cols].sort_values([c for c in ["engagement_pct", "engagement_score"] if c in cols], ascending=False).head(20) if cols else pd.DataFrame()
+            if "sheet_status_raw" in target.columns:
+                target = target.rename(columns={"sheet_status_raw": "Status"})
             st.markdown("#### Best Upgrade Targets")
             st.dataframe(target, use_container_width=True, height=390, key=f"{prefix}_upgrade_df")
 
@@ -5408,6 +5455,12 @@ def render_sheet_detail(sheet_name, df, ctx, prefix, data=None):
             fig = px.line(timeline, x="event_date", y="Participants", markers=True, title="Participation Timeline", hover_name="Event Names", hover_data={"Event Names": False, "Event Types": True, "event_date": True, "Participants": True})
             fig.update_traces(line_color=GREEN, marker_color=GREEN)
             st.plotly_chart(nice_layout(fig, height=360), use_container_width=True, key=f"{prefix}_timeline")
+            event_table = build_event_attendance_table(df, event_info)
+            if not event_table.empty:
+                event_table_display = event_table.copy()
+                event_table_display["Event / Activity Date"] = pd.to_datetime(event_table_display["Event / Activity Date"], errors="coerce").dt.strftime("%d %b %Y").fillna("")
+                st.markdown("##### Event / Activity Attendance Table")
+                st.dataframe(event_table_display, use_container_width=True, hide_index=True, height=320, key=f"{prefix}_event_attendance_table")
 
 
 
@@ -5475,11 +5528,49 @@ def _paid_at_event_mask(df, event_date):
     return paid & pay.notna() & (pay <= pd.to_datetime(event_date).normalize())
 
 
+def _batch_distribution_for_ids(df, attended_mask, sheet):
+    """Return a dict like {'UG B7': 4} for attended students in a source sheet."""
+    if df is None or df.empty or not attended_mask.any():
+        return {}
+    sub = df.loc[attended_mask].copy()
+    if "Batch" in sub.columns:
+        labels = sub["Batch"].astype(str).map(clean_text)
+        fallback = infer_batch_group_from_sheet_name(sheet) if 'infer_batch_group_from_sheet_name' in globals() else sheet
+        labels = labels.replace("", fallback)
+    else:
+        fallback = infer_batch_group_from_sheet_name(sheet) if 'infer_batch_group_from_sheet_name' in globals() else sheet
+        labels = pd.Series(fallback, index=sub.index)
+    counts = labels.value_counts().to_dict()
+    return {clean_text(k): int(v) for k, v in counts.items() if clean_text(k)}
+
+
+def _merge_dist_dicts(*dicts):
+    out = {}
+    for d in dicts:
+        if not isinstance(d, dict):
+            continue
+        for k, v in d.items():
+            k = clean_text(k)
+            if not k:
+                continue
+            out[k] = out.get(k, 0) + int(v or 0)
+    return out
+
+
+def _format_dist_dict(d):
+    if not isinstance(d, dict) or not d:
+        return ""
+    def sort_key(x):
+        m = re.search(r"(\d+)", str(x[0]))
+        return (str(x[0])[:2], int(m.group(1)) if m else 999, str(x[0]))
+    return ", ".join([f"{v} {k}" for k, v in sorted(d.items(), key=sort_key)])
+
+
 def build_activities_all_events(data, speaker_filter=None):
     """Build all Online Event + Masterclass occurrence table with deduped event name/date.
 
-    Attendance is counted separately for UG, PG and TetrX. Eligibility is the count of students in the
-    audience sheet(s); for TetrX it is admitted students whose payment date is on/before the event date.
+    Attendance is counted separately for UG, PG, Tetr-X UG and Tetr-X PG. Eligibility is the count of students in the
+    audience sheet(s); for Tetr-X it is admitted students whose payment date is on/before the event date.
     """
     rows = []
     activities = data.get("activities", {})
@@ -5492,7 +5583,12 @@ def build_activities_all_events(data, speaker_filter=None):
         if event_info is None or event_info.empty:
             continue
         audience = _event_audience_label(sheet)
-        program_group = "TetrX" if sheet in TX_SHEETS else infer_program_from_sheet(sheet)
+        if sheet == "Tetr-X-UG":
+            program_group = "TetrX-UG"
+        elif sheet == "Tetr-X-PG":
+            program_group = "TetrX-PG"
+        else:
+            program_group = infer_program_from_sheet(sheet)
         for _, ev in event_info.iterrows():
             col = ev.get("column_name")
             if col not in df.columns:
@@ -5504,10 +5600,7 @@ def build_activities_all_events(data, speaker_filter=None):
                 continue
             if speaker_filter and speaker_filter.lower() not in event_name.lower():
                 continue
-            if pd.isna(event_date):
-                date_key = ""
-            else:
-                date_key = event_date.normalize().strftime("%Y-%m-%d")
+            date_key = event_date.normalize().strftime("%Y-%m-%d") if pd.notna(event_date) else ""
             event_key = f"{_event_name_key(event_name)}|{date_key}"
             attended_mask = pd.to_numeric(df[col], errors="coerce").fillna(0).gt(0)
             if sheet in TX_SHEETS:
@@ -5519,6 +5612,8 @@ def build_activities_all_events(data, speaker_filter=None):
             eligible_ids.discard("")
             attended_ids = set(df.loc[attended_mask].apply(_student_id_from_row_basic, axis=1).astype(str))
             attended_ids.discard("")
+            ug_dist = _batch_distribution_for_ids(df, attended_mask, sheet) if program_group == "UG" else {}
+            pg_dist = _batch_distribution_for_ids(df, attended_mask, sheet) if program_group == "PG" else {}
             rows.append({
                 "event_key": event_key,
                 "Event Name": event_name,
@@ -5528,29 +5623,35 @@ def build_activities_all_events(data, speaker_filter=None):
                 "source_sheet": sheet,
                 "UG Attended IDs": attended_ids if program_group == "UG" else set(),
                 "PG Attended IDs": attended_ids if program_group == "PG" else set(),
-                "TetrX Attended IDs": attended_ids if program_group == "TetrX" else set(),
+                "TetrX UG Attended IDs": attended_ids if program_group == "TetrX-UG" else set(),
+                "TetrX PG Attended IDs": attended_ids if program_group == "TetrX-PG" else set(),
                 "Eligible IDs": eligible_ids,
+                "UG Distribution Dict": ug_dist,
+                "PG Distribution Dict": pg_dist,
             })
     if not rows:
-        return pd.DataFrame(columns=["Event Name", "Date", "Audience", "Audience Size", "UG Attended", "PG Attended", "TetrX Attended", "Total Attendance", "Attend to Eligible Ratio"])
+        return pd.DataFrame(columns=["Event Name", "Date", "Audience", "Audience Size", "UG Attended", "PG Attended", "Tetr X UG Attended", "Tetr X PG Attended", "Total Attendance", "Attend to Eligible Ratio", "UG Attendance Distribution", "PG Attendance Distribution"])
     raw = pd.DataFrame(rows)
     out_rows = []
     for key, g in raw.groupby("event_key", dropna=False):
-        ug_ids, pg_ids, tx_ids, eligible_ids = set(), set(), set(), set()
-        audiences = []
-        sheets = []
+        ug_ids, pg_ids, txug_ids, txpg_ids, eligible_ids = set(), set(), set(), set(), set()
+        audiences, sheets = [], []
+        ug_dist, pg_dist = {}, {}
         for _, r in g.iterrows():
             ug_ids |= set(r.get("UG Attended IDs", set()))
             pg_ids |= set(r.get("PG Attended IDs", set()))
-            tx_ids |= set(r.get("TetrX Attended IDs", set()))
+            txug_ids |= set(r.get("TetrX UG Attended IDs", set()))
+            txpg_ids |= set(r.get("TetrX PG Attended IDs", set()))
             eligible_ids |= set(r.get("Eligible IDs", set()))
+            ug_dist = _merge_dist_dicts(ug_dist, r.get("UG Distribution Dict", {}))
+            pg_dist = _merge_dist_dicts(pg_dist, r.get("PG Distribution Dict", {}))
             if clean_text(r.get("Audience", "")):
                 audiences.append(clean_text(r.get("Audience", "")))
             if clean_text(r.get("source_sheet", "")):
                 sheets.append(clean_text(r.get("source_sheet", "")))
         first = g.iloc[0]
         audience_size = len(eligible_ids)
-        total_att = len(ug_ids | pg_ids | tx_ids)
+        total_att = len(ug_ids | pg_ids | txug_ids | txpg_ids)
         out_rows.append({
             "Event Name": clean_text(first.get("Event Name", "")),
             "Date": first.get("Date", pd.NaT),
@@ -5560,13 +5661,16 @@ def build_activities_all_events(data, speaker_filter=None):
             "Audience Size": audience_size,
             "UG Attended": len(ug_ids),
             "PG Attended": len(pg_ids),
-            "TetrX Attended": len(tx_ids),
+            "Tetr X UG Attended": len(txug_ids),
+            "Tetr X PG Attended": len(txpg_ids),
+            "TetrX Attended": len(txug_ids | txpg_ids),
             "Total Attendance": total_att,
             "Attend to Eligible Ratio": (total_att / audience_size * 100) if audience_size else 0.0,
+            "UG Attendance Distribution": _format_dist_dict(ug_dist),
+            "PG Attendance Distribution": _format_dist_dict(pg_dist),
         })
     out = pd.DataFrame(out_rows).sort_values(["Date", "Event Name"], ascending=[False, True], na_position="last")
     return out.reset_index(drop=True)
-
 
 
 def _student_id_from_activity_row(row):
@@ -5864,7 +5968,7 @@ def _render_tetrx_activity_matrix(data, program, title, key_prefix):
     avg_ama_masterclass = (numeric_matrix[ama_cols].sum(axis=1) + (numeric_matrix['Masterclass'] if "Masterclass" in numeric_matrix else 0)).mean() if all(c in numeric_matrix.columns for c in ama_cols) else avg_masterclass
     avg_comp_masterclass = numeric_matrix["Competition & Hackathon"].mean() if "Competition & Hackathon" in numeric_matrix else ((numeric_matrix["Competition"] if "Competition" in numeric_matrix else 0) + (numeric_matrix["Hackathon"] if "Hackathon" in numeric_matrix else 0)).mean()
     c1, c2, c3, c4, c5, c6 = st.columns(6)
-    c1.metric("Average AMAs Done", f"{avg_ama:.2f}")
+    c1.metric("Average AMA's Attended", f"{avg_ama:.2f}")
     c2.metric("Average AMAs & Masterclass Attended", f"{avg_ama_masterclass:.2f}")
     c3.metric("Average Competition & Hackathon", f"{avg_comp_masterclass:.2f}")
     c4.metric("Average Masterclass Attended", f"{avg_masterclass:.2f}")
@@ -6090,7 +6194,7 @@ def _render_unpaid_activity_matrix(data, program, title, key_prefix):
     avg_ama_masterclass = (numeric_matrix[ama_cols].sum(axis=1) + (numeric_matrix["Masterclass"] if "Masterclass" in numeric_matrix else 0)).mean() if ama_cols else avg_masterclass
     avg_comp_masterclass = numeric_matrix["Competition & Hackathon"].mean() if "Competition & Hackathon" in numeric_matrix else 0.0
     c1, c2, c3, c4, c5, c6 = st.columns(6)
-    c1.metric("Average AMAs Done", f"{avg_ama:.2f}")
+    c1.metric("Average AMA's Attended", f"{avg_ama:.2f}")
     c2.metric("Average AMAs & Masterclass Attended", f"{avg_ama_masterclass:.2f}")
     c3.metric("Average Competition & Hackathon", f"{avg_comp_masterclass:.2f}")
     c4.metric("Average Masterclass Attended", f"{avg_masterclass:.2f}")
@@ -6124,6 +6228,18 @@ def _render_unpaid_activity_matrix(data, program, title, key_prefix):
         fig.update_traces(marker_color=GREEN, textposition="outside")
         st.plotly_chart(nice_layout(fig, height=360, x_tickangle=-25), use_container_width=True, key=f"{key_prefix}_chart_{mode}")
 
+
+def _render_attendance_distribution_toggle(df, key_prefix):
+    if df is None or df.empty:
+        return
+    dist_cols = ["Event Name", "Date", "UG Attendance Distribution", "PG Attendance Distribution"]
+    if not all(c in df.columns for c in dist_cols):
+        return
+    if st.toggle("Show UG/PG attended batch distribution", value=False, key=f"{key_prefix}_dist_toggle"):
+        d = df[dist_cols].copy()
+        d["Date"] = pd.to_datetime(d["Date"], errors="coerce").dt.strftime("%d %b %Y").fillna("")
+        st.dataframe(d, use_container_width=True, hide_index=True, height=260, key=f"{key_prefix}_dist_table")
+
 def render_activities_page(data):
     st.subheader("Activities")
     all_tab, txug_tab, txpg_tab, unpaid_ug_tab, unpaid_pg_tab = st.tabs(["All Events", "Tetr X UG", "Tetr X PG", "Unpaid UG", "Unpaid PG"])
@@ -6137,7 +6253,9 @@ def render_activities_page(data):
             display = all_events.copy()
             display["Date"] = pd.to_datetime(display["Date"], errors="coerce").dt.strftime("%d %b %Y").fillna("")
             display["Attend to Eligible Ratio"] = display["Attend to Eligible Ratio"].map(lambda x: f"{x:.1f}%")
+            display = display.drop(columns=["TetrX Attended"], errors="ignore")
             st.dataframe(display, use_container_width=True, hide_index=True, height=420, key="activities_all_events_table")
+            _render_attendance_distribution_toggle(all_events, "activities_all_events")
             chart = all_events.head(30).copy()
             fig = px.bar(chart.sort_values("Date"), x="Date", y="Attend to Eligible Ratio", hover_data=["Event Name", "Audience", "Audience Size", "Total Attendance"], title="Attend to Eligible Ratio · Recent Events")
             fig.update_traces(marker_color=GREEN_2)
@@ -6151,7 +6269,9 @@ def render_activities_page(data):
                 st.info("No Pratham online events found.")
             else:
                 pdisp = pratham.copy(); pdisp["Date"] = pd.to_datetime(pdisp["Date"], errors="coerce").dt.strftime("%d %b %Y").fillna(""); pdisp["Attend to Eligible Ratio"] = pdisp["Attend to Eligible Ratio"].map(lambda x: f"{x:.1f}%")
+                pdisp = pdisp.drop(columns=["TetrX Attended"], errors="ignore")
                 st.dataframe(pdisp, use_container_width=True, hide_index=True, height=260, key="activities_pratham_table")
+                _render_attendance_distribution_toggle(pratham, "activities_pratham")
         with c2:
             st.markdown("### AMA with Tarun")
             tarun = build_activities_all_events(data, speaker_filter="Tarun")
@@ -6159,7 +6279,9 @@ def render_activities_page(data):
                 st.info("No Tarun online events found.")
             else:
                 tdisp = tarun.copy(); tdisp["Date"] = pd.to_datetime(tdisp["Date"], errors="coerce").dt.strftime("%d %b %Y").fillna(""); tdisp["Attend to Eligible Ratio"] = tdisp["Attend to Eligible Ratio"].map(lambda x: f"{x:.1f}%")
+                tdisp = tdisp.drop(columns=["TetrX Attended"], errors="ignore")
                 st.dataframe(tdisp, use_container_width=True, hide_index=True, height=260, key="activities_tarun_table")
+                _render_attendance_distribution_toggle(tarun, "activities_tarun")
 
     with txug_tab:
         _render_tetrx_activity_matrix(data, "UG", "Tetr X UG", "activities_txug")
