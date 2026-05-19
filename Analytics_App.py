@@ -893,7 +893,7 @@ def parse_winner_sheet(raw: pd.DataFrame):
     if raw is None or raw.empty:
         return pd.DataFrame(columns=[
             "challenge_name", "winner_name", "student_key", "email_key", "batch_key",
-            "amount_usd", "entry_type", "is_winner", "is_spotlight"
+            "amount_usd", "entry_type", "is_winner", "is_spotlight", "announcement_date"
         ])
 
     header_row = 0
@@ -907,11 +907,15 @@ def parse_winner_sheet(raw: pd.DataFrame):
     batch_col = next((c for c in df.columns if "batch" in clean_text(c).lower()), None)
     amount_col = next((c for c in df.columns if "amount" in clean_text(c).lower() and "usd" in clean_text(c).lower()), None)
     type_col = next((c for c in df.columns if "winner/spotlight" in clean_text(c).lower()), None)
+    announcement_date_col = next((
+        c for c in df.columns
+        if ("date" in clean_text(c).lower() and ("winner" in clean_text(c).lower() or "announcement" in clean_text(c).lower()))
+    ), None)
 
     if winner_name_col is None and email_col is None:
         return pd.DataFrame(columns=[
             "challenge_name", "winner_name", "student_key", "email_key", "batch_key",
-            "amount_usd", "entry_type", "is_winner", "is_spotlight"
+            "amount_usd", "entry_type", "is_winner", "is_spotlight", "announcement_date"
         ])
 
     out = pd.DataFrame()
@@ -928,6 +932,7 @@ def parse_winner_sheet(raw: pd.DataFrame):
     out["entry_type"] = df[type_col].map(clean_text) if type_col else ""
     out["is_winner"] = out["entry_type"].astype(str).str.lower().eq("winner")
     out["is_spotlight"] = out["entry_type"].astype(str).str.lower().eq("spotlight")
+    out["announcement_date"] = df[announcement_date_col].apply(parse_date_safe) if announcement_date_col else pd.NaT
 
     out = out[(out["winner_name"].apply(is_valid_student_name)) | (out["email_key"].astype(str).str.len() > 3)].copy()
     out = out[out["challenge_name"].astype(str).str.strip().ne("") | out["is_winner"] | out["is_spotlight"]].copy()
@@ -6240,9 +6245,134 @@ def _render_attendance_distribution_toggle(df, key_prefix):
         d["Date"] = pd.to_datetime(d["Date"], errors="coerce").dt.strftime("%d %b %Y").fillna("")
         st.dataframe(d, use_container_width=True, hide_index=True, height=260, key=f"{key_prefix}_dist_table")
 
+
+def _winner_impact_students_for_scope(data, scope="Total"):
+    """Return denominator students and Winner-announced-in-T-7 rows for Tetr-X students.
+
+    Winner impact is based on the Winner sheet's Date of Winner Announcement and Tetr-X payment dates.
+    Window: T-7 through T, inclusive. T is the payment date.
+    """
+    scope = clean_text(scope).upper()
+    frames = []
+    if scope in {"TOTAL", "UG"}:
+        ug = _tetrx_student_frame(data, "UG")
+        if ug is not None and not ug.empty:
+            ug = ug.copy()
+            ug["Program"] = "UG"
+            frames.append(ug)
+    if scope in {"TOTAL", "PG"}:
+        pg = _tetrx_student_frame(data, "PG")
+        if pg is not None and not pg.empty:
+            pg = pg.copy()
+            pg["Program"] = "PG"
+            frames.append(pg)
+    if not frames:
+        return pd.DataFrame(), pd.DataFrame()
+    students = pd.concat(frames, ignore_index=True).drop_duplicates("student_id", keep="first")
+    if "payment_date_parsed" in students.columns:
+        students["payment_date_norm"] = pd.to_datetime(students["payment_date_parsed"], errors="coerce").dt.normalize()
+    else:
+        students["payment_date_norm"] = pd.NaT
+
+    winner_df = data.get("winner_df", pd.DataFrame())
+    out_cols = [
+        "Student Name", "Email", "UG/PG", "Batch", "Payment Date",
+        "Challenge Name", "Winner Announcement Date", "Winner/Spotlight", "Amount in USD"
+    ]
+    if winner_df is None or winner_df.empty:
+        return students, pd.DataFrame(columns=out_cols)
+    w = winner_df.copy()
+    if "announcement_date" not in w.columns:
+        w["announcement_date"] = pd.NaT
+    w["announcement_date"] = pd.to_datetime(w["announcement_date"], errors="coerce").dt.normalize()
+    # Winner Impact is specifically for winner announcements. If the sheet has no explicit type,
+    # keep the rows rather than dropping them.
+    if "is_winner" in w.columns and w["is_winner"].notna().any():
+        w = w[w["is_winner"].fillna(False).astype(bool)].copy()
+    if w.empty:
+        return students, pd.DataFrame(columns=out_cols)
+
+    rows = []
+    for _, stu in students.iterrows():
+        pay_dt = pd.to_datetime(stu.get("payment_date_norm", pd.NaT), errors="coerce")
+        if pd.isna(pay_dt):
+            continue
+        sid_email = clean_text(stu.get("email_key", ""))
+        sid_name = clean_text(stu.get("student_key", ""))
+        mask = pd.Series(False, index=w.index)
+        if sid_email:
+            mask = mask | w.get("email_key", pd.Series("", index=w.index)).astype(str).eq(sid_email)
+        if sid_name:
+            mask = mask | w.get("student_key", pd.Series("", index=w.index)).astype(str).eq(sid_name)
+        cand = w.loc[mask].copy()
+        if cand.empty:
+            continue
+        # Narrow by batch when Winner sheet has a batch value and the student has a batch value.
+        stu_batch_key = normalize_batch_token(stu.get("Batch", "")) if "Batch" in stu.index else ""
+        if stu_batch_key and "batch_key" in cand.columns:
+            narrowed = cand[cand["batch_key"].astype(str).eq(stu_batch_key)].copy()
+            if not narrowed.empty:
+                cand = narrowed
+        start = pay_dt - pd.Timedelta(days=7)
+        end = pay_dt
+        cand = cand[cand["announcement_date"].notna() & cand["announcement_date"].between(start, end, inclusive="both")].copy()
+        if cand.empty:
+            continue
+        cand["_dedupe"] = cand.apply(
+            lambda r: f"{stu.get('student_id','')}|{_event_name_key(r.get('challenge_name',''))}|{pd.to_datetime(r.get('announcement_date'), errors='coerce').strftime('%Y-%m-%d') if pd.notna(pd.to_datetime(r.get('announcement_date'), errors='coerce')) else ''}",
+            axis=1,
+        )
+        cand = cand.drop_duplicates("_dedupe")
+        for _, r in cand.iterrows():
+            rows.append({
+                "Student Name": clean_text(stu.get("student_name", "")),
+                "Email": clean_text(stu.get("email", "")),
+                "UG/PG": clean_text(stu.get("Program", "")),
+                "Batch": clean_text(stu.get("Batch", "")),
+                "Payment Date": pay_dt,
+                "Challenge Name": clean_text(r.get("challenge_name", "")),
+                "Winner Announcement Date": pd.to_datetime(r.get("announcement_date", pd.NaT), errors="coerce"),
+                "Winner/Spotlight": clean_text(r.get("entry_type", "Winner")) or "Winner",
+                "Amount in USD": float(pd.to_numeric(pd.Series([r.get("amount_usd", 0)]), errors="coerce").fillna(0).iloc[0]),
+            })
+    impact = pd.DataFrame(rows, columns=out_cols)
+    if not impact.empty:
+        impact = impact.sort_values(["Winner Announcement Date", "Student Name"], ascending=[False, True]).reset_index(drop=True)
+    return students, impact
+
+
+def _render_winner_impact_scope(data, scope, key_prefix):
+    students, impact = _winner_impact_students_for_scope(data, scope)
+    total_students = int(students["student_id"].nunique()) if students is not None and not students.empty and "student_id" in students.columns else 0
+    winner_students = int(impact[["Student Name", "Email"]].drop_duplicates().shape[0]) if impact is not None and not impact.empty else 0
+    pct = (winner_students / total_students * 100) if total_students else 0.0
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Tetr-X Students", f"{total_students:,}")
+    c2.metric("Winner Announced in T-7", f"{winner_students:,}")
+    c3.metric("% Winner Announced in T-7", f"{pct:.1f}%")
+    if impact is None or impact.empty:
+        st.info(f"No {scope} Tetr-X students had a winner announcement in T-7 to T.")
+        return
+    display = impact.copy()
+    for col in ["Payment Date", "Winner Announcement Date"]:
+        display[col] = pd.to_datetime(display[col], errors="coerce").dt.strftime("%d %b %Y").fillna("")
+    st.dataframe(display, use_container_width=True, hide_index=True, height=360, key=f"{key_prefix}_winner_impact_table")
+
+
+def render_winner_impact_activities(data):
+    st.markdown("### Winner Impact")
+    st.caption("Uses Tetr-X students only. A winner is counted when the Winner sheet announcement date is within T-7 to T of the student's Tetr-X payment date.")
+    total_tab, ug_tab, pg_tab = st.tabs(["Total", "UG", "PG"])
+    with total_tab:
+        _render_winner_impact_scope(data, "Total", "activities_winner_total")
+    with ug_tab:
+        _render_winner_impact_scope(data, "UG", "activities_winner_ug")
+    with pg_tab:
+        _render_winner_impact_scope(data, "PG", "activities_winner_pg")
+
 def render_activities_page(data):
     st.subheader("Activities")
-    all_tab, txug_tab, txpg_tab, unpaid_ug_tab, unpaid_pg_tab = st.tabs(["All Events", "Tetr X UG", "Tetr X PG", "Unpaid UG", "Unpaid PG"])
+    all_tab, winner_impact_tab, txug_tab, txpg_tab, unpaid_ug_tab, unpaid_pg_tab = st.tabs(["All Events", "Winner Impact", "Tetr X UG", "Tetr X PG", "Unpaid UG", "Unpaid PG"])
 
     with all_tab:
         st.markdown("### All Events · Online Events + Masterclasses")
@@ -6282,6 +6412,9 @@ def render_activities_page(data):
                 tdisp = tdisp.drop(columns=["TetrX Attended"], errors="ignore")
                 st.dataframe(tdisp, use_container_width=True, hide_index=True, height=260, key="activities_tarun_table")
                 _render_attendance_distribution_toggle(tarun, "activities_tarun")
+
+    with winner_impact_tab:
+        render_winner_impact_activities(data)
 
     with txug_tab:
         _render_tetrx_activity_matrix(data, "UG", "Tetr X UG", "activities_txug")
