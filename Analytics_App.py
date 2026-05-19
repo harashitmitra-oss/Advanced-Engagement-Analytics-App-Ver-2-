@@ -6333,7 +6333,16 @@ def _winner_impact_students_for_scope(data, scope="Total", entry_kind="winner"):
         )
         cand = cand.drop_duplicates("_dedupe")
         for _, r in cand.iterrows():
-            stu_email = clean_text(stu.get("email", "")) or clean_text(r.get("email", "")) or clean_text(r.get("email_id", ""))
+            # Email can come from Tetr-X parsed fields (email_key) or Winner sheet parsed fields (email_key).
+            # Some parsed frames do not retain the original raw email column, so fall back to email_key
+            # to avoid blank Email values in Winner Impact.
+            stu_email = (
+                clean_text(stu.get("email", ""))
+                or clean_text(stu.get("email_key", ""))
+                or clean_text(r.get("email", ""))
+                or clean_text(r.get("email_id", ""))
+                or clean_text(r.get("email_key", ""))
+            )
             rows.append({
                 "Student Name": clean_text(stu.get("student_name", "")) or clean_text(r.get("winner_name", "")),
                 "Email": stu_email,
