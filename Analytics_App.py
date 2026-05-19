@@ -6246,13 +6246,16 @@ def _render_attendance_distribution_toggle(df, key_prefix):
         st.dataframe(d, use_container_width=True, hide_index=True, height=260, key=f"{key_prefix}_dist_table")
 
 
-def _winner_impact_students_for_scope(data, scope="Total"):
-    """Return denominator students and Winner-announced-in-T-7 rows for Tetr-X students.
 
-    Winner impact is based on the Winner sheet's Date of Winner Announcement and Tetr-X payment dates.
+def _winner_impact_students_for_scope(data, scope="Total", entry_kind="winner"):
+    """Return denominator Tetr-X students and Winner/Spotlight-announced-in-T-7 rows.
+
+    Uses the Winner sheet's Date of Winner Announcement and each Tetr-X student's payment date.
     Window: T-7 through T, inclusive. T is the payment date.
+    entry_kind: "winner" or "spotlight".
     """
     scope = clean_text(scope).upper()
+    entry_kind = clean_text(entry_kind).lower()
     frames = []
     if scope in {"TOTAL", "UG"}:
         ug = _tetrx_student_frame(data, "UG")
@@ -6285,10 +6288,17 @@ def _winner_impact_students_for_scope(data, scope="Total"):
     if "announcement_date" not in w.columns:
         w["announcement_date"] = pd.NaT
     w["announcement_date"] = pd.to_datetime(w["announcement_date"], errors="coerce").dt.normalize()
-    # Winner Impact is specifically for winner announcements. If the sheet has no explicit type,
-    # keep the rows rather than dropping them.
-    if "is_winner" in w.columns and w["is_winner"].notna().any():
-        w = w[w["is_winner"].fillna(False).astype(bool)].copy()
+
+    if entry_kind == "spotlight":
+        if "is_spotlight" in w.columns:
+            w = w[w["is_spotlight"].fillna(False).astype(bool)].copy()
+        elif "entry_type" in w.columns:
+            w = w[w["entry_type"].astype(str).str.strip().str.lower().eq("spotlight")].copy()
+    else:
+        if "is_winner" in w.columns:
+            w = w[w["is_winner"].fillna(False).astype(bool)].copy()
+        elif "entry_type" in w.columns:
+            w = w[w["entry_type"].astype(str).str.strip().str.lower().eq("winner")].copy()
     if w.empty:
         return students, pd.DataFrame(columns=out_cols)
 
@@ -6307,7 +6317,6 @@ def _winner_impact_students_for_scope(data, scope="Total"):
         cand = w.loc[mask].copy()
         if cand.empty:
             continue
-        # Narrow by batch when Winner sheet has a batch value and the student has a batch value.
         stu_batch_key = normalize_batch_token(stu.get("Batch", "")) if "Batch" in stu.index else ""
         if stu_batch_key and "batch_key" in cand.columns:
             narrowed = cand[cand["batch_key"].astype(str).eq(stu_batch_key)].copy()
@@ -6319,21 +6328,22 @@ def _winner_impact_students_for_scope(data, scope="Total"):
         if cand.empty:
             continue
         cand["_dedupe"] = cand.apply(
-            lambda r: f"{stu.get('student_id','')}|{_event_name_key(r.get('challenge_name',''))}|{pd.to_datetime(r.get('announcement_date'), errors='coerce').strftime('%Y-%m-%d') if pd.notna(pd.to_datetime(r.get('announcement_date'), errors='coerce')) else ''}",
+            lambda r: f"{stu.get('student_id','')}|{_event_name_key(r.get('challenge_name',''))}|{pd.to_datetime(r.get('announcement_date'), errors='coerce').strftime('%Y-%m-%d') if pd.notna(pd.to_datetime(r.get('announcement_date'), errors='coerce')) else ''}|{entry_kind}",
             axis=1,
         )
         cand = cand.drop_duplicates("_dedupe")
         for _, r in cand.iterrows():
+            stu_email = clean_text(stu.get("email", "")) or clean_text(r.get("email", "")) or clean_text(r.get("email_id", ""))
             rows.append({
-                "Student Name": clean_text(stu.get("student_name", "")),
-                "Email": clean_text(stu.get("email", "")),
+                "Student Name": clean_text(stu.get("student_name", "")) or clean_text(r.get("winner_name", "")),
+                "Email": stu_email,
                 "UG/PG": clean_text(stu.get("Program", "")),
-                "Batch": clean_text(stu.get("Batch", "")),
+                "Batch": clean_text(stu.get("Batch", "")) or clean_text(r.get("Batch", "")),
                 "Payment Date": pay_dt,
                 "Challenge Name": clean_text(r.get("challenge_name", "")),
                 "Winner Announcement Date": pd.to_datetime(r.get("announcement_date", pd.NaT), errors="coerce"),
-                "Winner/Spotlight": clean_text(r.get("entry_type", "Winner")) or "Winner",
-                "Amount in USD": float(pd.to_numeric(pd.Series([r.get("amount_usd", 0)]), errors="coerce").fillna(0).iloc[0]),
+                "Winner/Spotlight": "Spotlight" if entry_kind == "spotlight" else "Winner",
+                "Amount in USD": float(pd.to_numeric(pd.Series([r.get("amount_usd", 0)]), errors="coerce").fillna(0).iloc[0]) if entry_kind != "spotlight" else 0.0,
             })
     impact = pd.DataFrame(rows, columns=out_cols)
     if not impact.empty:
@@ -6341,27 +6351,47 @@ def _winner_impact_students_for_scope(data, scope="Total"):
     return students, impact
 
 
-def _render_winner_impact_scope(data, scope, key_prefix):
-    students, impact = _winner_impact_students_for_scope(data, scope)
-    total_students = int(students["student_id"].nunique()) if students is not None and not students.empty and "student_id" in students.columns else 0
-    winner_students = int(impact[["Student Name", "Email"]].drop_duplicates().shape[0]) if impact is not None and not impact.empty else 0
-    pct = (winner_students / total_students * 100) if total_students else 0.0
-    c1, c2, c3 = st.columns(3)
-    c1.metric("Tetr-X Students", f"{total_students:,}")
-    c2.metric("Winner Announced in T-7", f"{winner_students:,}")
-    c3.metric("% Winner Announced in T-7", f"{pct:.1f}%")
-    if impact is None or impact.empty:
-        st.info(f"No {scope} Tetr-X students had a winner announcement in T-7 to T.")
-        return
+def _format_impact_display(impact):
     display = impact.copy()
     for col in ["Payment Date", "Winner Announcement Date"]:
-        display[col] = pd.to_datetime(display[col], errors="coerce").dt.strftime("%d %b %Y").fillna("")
-    st.dataframe(display, use_container_width=True, hide_index=True, height=360, key=f"{key_prefix}_winner_impact_table")
+        if col in display.columns:
+            display[col] = pd.to_datetime(display[col], errors="coerce").dt.strftime("%d %b %Y").fillna("")
+    if "Email" in display.columns:
+        display["Email"] = display["Email"].astype(str).map(clean_text)
+    return display
+
+
+def _render_winner_impact_scope(data, scope, key_prefix):
+    students, winner_impact = _winner_impact_students_for_scope(data, scope, entry_kind="winner")
+    _, spotlight_impact = _winner_impact_students_for_scope(data, scope, entry_kind="spotlight")
+    total_students = int(students["student_id"].nunique()) if students is not None and not students.empty and "student_id" in students.columns else 0
+    winner_students = int(winner_impact[["Student Name", "Email"]].drop_duplicates().shape[0]) if winner_impact is not None and not winner_impact.empty else 0
+    spotlight_students = int(spotlight_impact[["Student Name", "Email"]].drop_duplicates().shape[0]) if spotlight_impact is not None and not spotlight_impact.empty else 0
+    winner_pct = (winner_students / total_students * 100) if total_students else 0.0
+    spotlight_pct = (spotlight_students / total_students * 100) if total_students else 0.0
+    c1, c2, c3, c4, c5 = st.columns(5)
+    c1.metric("Tetr-X Students", f"{total_students:,}")
+    c2.metric("Winner Announced in T-7", f"{winner_students:,}")
+    c3.metric("% Winner Announced in T-7", f"{winner_pct:.1f}%")
+    c4.metric("Spotlight Announced in T-7", f"{spotlight_students:,}")
+    c5.metric("% Spotlight Announced in T-7", f"{spotlight_pct:.1f}%")
+
+    st.markdown("#### Winner Announced in T-7")
+    if winner_impact is None or winner_impact.empty:
+        st.info(f"No {scope} Tetr-X students had a winner announcement in T-7 to T.")
+    else:
+        st.dataframe(_format_impact_display(winner_impact), use_container_width=True, hide_index=True, height=300, key=f"{key_prefix}_winner_impact_table")
+
+    st.markdown("#### Spotlight Announced in T-7")
+    if spotlight_impact is None or spotlight_impact.empty:
+        st.info(f"No {scope} Tetr-X students had a spotlight announcement in T-7 to T.")
+    else:
+        st.dataframe(_format_impact_display(spotlight_impact), use_container_width=True, hide_index=True, height=300, key=f"{key_prefix}_spotlight_impact_table")
 
 
 def render_winner_impact_activities(data):
     st.markdown("### Winner Impact")
-    st.caption("Uses Tetr-X students only. A winner is counted when the Winner sheet announcement date is within T-7 to T of the student's Tetr-X payment date.")
+    st.caption("Uses Tetr-X students only. Winner/Spotlight announcements are counted when the Winner sheet announcement date is within T-7 to T of the student's Tetr-X payment date.")
     total_tab, ug_tab, pg_tab = st.tabs(["Total", "UG", "PG"])
     with total_tab:
         _render_winner_impact_scope(data, "Total", "activities_winner_total")
@@ -6372,7 +6402,7 @@ def render_winner_impact_activities(data):
 
 def render_activities_page(data):
     st.subheader("Activities")
-    all_tab, winner_impact_tab, txug_tab, txpg_tab, unpaid_ug_tab, unpaid_pg_tab = st.tabs(["All Events", "Winner Impact", "Tetr X UG", "Tetr X PG", "Unpaid UG", "Unpaid PG"])
+    all_tab, txug_tab, txpg_tab, unpaid_ug_tab, unpaid_pg_tab, winner_impact_tab = st.tabs(["All Events", "Tetr X UG", "Tetr X PG", "Unpaid UG", "Unpaid PG", "Winner Impact"])
 
     with all_tab:
         st.markdown("### All Events · Online Events + Masterclasses")
