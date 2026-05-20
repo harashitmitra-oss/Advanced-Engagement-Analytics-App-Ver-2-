@@ -5766,6 +5766,51 @@ def _event_include_attendance_for_student(mode, sheet, tx_sheet, ev_date, pay, o
     return _event_is_eligible_for_student(mode, sheet, tx_sheet, ev_date, pay, offered, deadline)
 
 
+AMA_ACTIVITY_COLUMNS = [
+    "AMA Welcome Webinar", "AMA Pratham", "AMA Tarun", "AMA Amitoj",
+    "AMA Garima", "AMA Capstone", "AMA Life at Tetr"
+]
+AMA_MASTERCLASS_COLUMN = "AMAs & Masterclasses"
+
+
+def _combine_activity_columns_for_row(row, cols):
+    """Sum activity columns while preserving N/A when the student was not eligible for any source column."""
+    total = 0
+    has_numeric = False
+    for col in cols:
+        val = row.get(col, "N/A") if hasattr(row, "get") else "N/A"
+        parsed = pd.to_numeric(pd.Series([val]), errors="coerce").iloc[0]
+        if pd.notna(parsed):
+            total += parsed
+            has_numeric = True
+    return int(total) if has_numeric else "N/A"
+
+
+def _combined_activity_summary_row(table, eligible_student_ids_by_category, source_cols, label):
+    """Build a summary row for a combined activity bucket using unique eligible students."""
+    if table is None or table.empty or label not in table.columns:
+        return {
+            "Activity Column": label,
+            "Total Attendance": 0,
+            "Unique Students Attended": 0,
+            "Eligible Unique Students": 0,
+            "% of Activity-Type Eligible Students": 0.0,
+        }
+    combined_counts = pd.to_numeric(table[label], errors="coerce")
+    eligible_ids = set()
+    for col in source_cols:
+        eligible_ids |= set(eligible_student_ids_by_category.get(col, set()))
+    unique_attended = int(combined_counts.fillna(0).gt(0).sum()) if len(combined_counts) else 0
+    eligible_count = len(eligible_ids)
+    return {
+        "Activity Column": label,
+        "Total Attendance": int(combined_counts.fillna(0).sum()) if len(combined_counts) else 0,
+        "Unique Students Attended": unique_attended,
+        "Eligible Unique Students": eligible_count,
+        "% of Activity-Type Eligible Students": (unique_attended / eligible_count * 100) if eligible_count else 0.0,
+    }
+
+
 def _tetrx_event_matrix(data, mode, program="UG"):
     program = str(program).upper()
     tx_sheet = "Tetr-X-UG" if program == "UG" else "Tetr-X-PG"
@@ -5897,6 +5942,12 @@ def _tetrx_event_matrix(data, mode, program="UG"):
             _combine_activity_cells(a, b) for a, b in zip(table["Competition"], table["Hackathon"])
         ]
 
+    ama_masterclass_cols = [c for c in AMA_ACTIVITY_COLUMNS + ["Masterclass"] if c in table.columns]
+    if ama_masterclass_cols:
+        table[AMA_MASTERCLASS_COLUMN] = table.apply(
+            lambda row: _combine_activity_columns_for_row(row, ama_masterclass_cols), axis=1
+        )
+
     eligibility = {c: len(eligible_student_ids_by_category.get(c, set())) for c in categories}
     summary_rows = []
     for c in categories:
@@ -5912,15 +5963,13 @@ def _tetrx_event_matrix(data, mode, program="UG"):
             "% of Activity-Type Eligible Students": (unique_attended / eligible * 100) if eligible else 0.0,
         })
     if "Competition & Hackathon" in table.columns:
-        combined_counts = pd.to_numeric(table["Competition & Hackathon"], errors="coerce")
-        combined_eligible_ids = set(eligible_student_ids_by_category.get("Competition", set())) | set(eligible_student_ids_by_category.get("Hackathon", set()))
-        summary_rows.append({
-            "Activity Column": "Competition & Hackathon",
-            "Total Attendance": int(combined_counts.fillna(0).sum()) if len(combined_counts) else 0,
-            "Unique Students Attended": int(combined_counts.fillna(0).gt(0).sum()) if len(combined_counts) else 0,
-            "Eligible Unique Students": len(combined_eligible_ids),
-            "% of Activity-Type Eligible Students": (int(combined_counts.fillna(0).gt(0).sum()) / len(combined_eligible_ids) * 100) if combined_eligible_ids else 0.0,
-        })
+        summary_rows.append(_combined_activity_summary_row(
+            table, eligible_student_ids_by_category, ["Competition", "Hackathon"], "Competition & Hackathon"
+        ))
+    if AMA_MASTERCLASS_COLUMN in table.columns:
+        summary_rows.append(_combined_activity_summary_row(
+            table, eligible_student_ids_by_category, [c for c in AMA_ACTIVITY_COLUMNS + ["Masterclass"] if c in categories], AMA_MASTERCLASS_COLUMN
+        ))
     summary = pd.DataFrame(summary_rows)
     return table, summary
 
@@ -5944,7 +5993,7 @@ def _render_tetrx_activity_matrix(data, program, title, key_prefix):
     m1.metric("Total Students", f"{total_students:,}")
     m2.metric("Total Paid / Admitted Students", f"{paid_students:,}")
     m3.metric("Winners", f"{winner_students:,}", delta=f"{winner_pct:.1f}% of students")
-    attendance_cols = [c for c in ["AMA Welcome Webinar", "AMA Pratham", "AMA Tarun", "AMA Amitoj", "AMA Garima", "AMA Capstone", "AMA Life at Tetr", "Masterclass", "Competition", "Hackathon", "Competition & Hackathon"] if c in matrix.columns]
+    attendance_cols = [c for c in ["AMA Welcome Webinar", "AMA Pratham", "AMA Tarun", "AMA Amitoj", "AMA Garima", "AMA Capstone", "AMA Life at Tetr", "Masterclass", "AMAs & Masterclasses", "Competition", "Hackathon", "Competition & Hackathon"] if c in matrix.columns]
 
     def _highlight_activity_nonzero(val):
         try:
@@ -5970,7 +6019,7 @@ def _render_tetrx_activity_matrix(data, program, title, key_prefix):
         numeric_matrix[col] = pd.to_numeric(numeric_matrix[col], errors="coerce").fillna(0)
     avg_ama = numeric_matrix[ama_cols].sum(axis=1).mean() if all(c in numeric_matrix.columns for c in ama_cols) else 0
     avg_masterclass = numeric_matrix['Masterclass'].mean() if "Masterclass" in numeric_matrix else 0.0
-    avg_ama_masterclass = (numeric_matrix[ama_cols].sum(axis=1) + (numeric_matrix['Masterclass'] if "Masterclass" in numeric_matrix else 0)).mean() if all(c in numeric_matrix.columns for c in ama_cols) else avg_masterclass
+    avg_ama_masterclass = numeric_matrix[AMA_MASTERCLASS_COLUMN].mean() if AMA_MASTERCLASS_COLUMN in numeric_matrix.columns else ((numeric_matrix[ama_cols].sum(axis=1) + (numeric_matrix['Masterclass'] if "Masterclass" in numeric_matrix else 0)).mean() if all(c in numeric_matrix.columns for c in ama_cols) else avg_masterclass)
     avg_comp_masterclass = numeric_matrix["Competition & Hackathon"].mean() if "Competition & Hackathon" in numeric_matrix else ((numeric_matrix["Competition"] if "Competition" in numeric_matrix else 0) + (numeric_matrix["Hackathon"] if "Hackathon" in numeric_matrix else 0)).mean()
     c1, c2, c3, c4, c5, c6 = st.columns(6)
     c1.metric("Average AMA's Attended", f"{avg_ama:.2f}")
@@ -6135,6 +6184,9 @@ def _unpaid_event_matrix(data, mode, program="UG"):
             av = pd.to_numeric(pd.Series([row["Competition"]]), errors="coerce").iloc[0]
             bv = pd.to_numeric(pd.Series([row["Hackathon"]]), errors="coerce").iloc[0]
             row["Competition & Hackathon"] = "N/A" if pd.isna(av) and pd.isna(bv) else int((0 if pd.isna(av) else av) + (0 if pd.isna(bv) else bv))
+        ama_masterclass_cols = [c for c in AMA_ACTIVITY_COLUMNS + ["Masterclass"] if c in row]
+        if ama_masterclass_cols:
+            row[AMA_MASTERCLASS_COLUMN] = _combine_activity_columns_for_row(row, ama_masterclass_cols)
         rows.append(row)
     table = pd.DataFrame(rows).sort_values("Student Name").reset_index(drop=True)
 
@@ -6151,15 +6203,13 @@ def _unpaid_event_matrix(data, mode, program="UG"):
             "% of Activity-Type Eligible Students": (unique_attended / eligible * 100) if eligible else 0.0,
         })
     if "Competition & Hackathon" in table.columns:
-        combined_counts = pd.to_numeric(table["Competition & Hackathon"], errors="coerce")
-        eligible_ids = set(eligible_student_ids_by_category.get("Competition", set())) | set(eligible_student_ids_by_category.get("Hackathon", set()))
-        summary_rows.append({
-            "Activity Column": "Competition & Hackathon",
-            "Total Attendance": int(combined_counts.fillna(0).sum()) if len(combined_counts) else 0,
-            "Unique Students Attended": int(combined_counts.fillna(0).gt(0).sum()) if len(combined_counts) else 0,
-            "Eligible Unique Students": len(eligible_ids),
-            "% of Activity-Type Eligible Students": (int(combined_counts.fillna(0).gt(0).sum()) / len(eligible_ids) * 100) if eligible_ids else 0.0,
-        })
+        summary_rows.append(_combined_activity_summary_row(
+            table, eligible_student_ids_by_category, ["Competition", "Hackathon"], "Competition & Hackathon"
+        ))
+    if AMA_MASTERCLASS_COLUMN in table.columns:
+        summary_rows.append(_combined_activity_summary_row(
+            table, eligible_student_ids_by_category, [c for c in AMA_ACTIVITY_COLUMNS + ["Masterclass"] if c in categories], AMA_MASTERCLASS_COLUMN
+        ))
     return table, pd.DataFrame(summary_rows)
 
 
@@ -6171,7 +6221,7 @@ def _render_unpaid_activity_matrix(data, program, title, key_prefix):
         st.info(f"No {title} student data found.")
         return
     st.metric("Total Unpaid / Non-Admitted Students", f"{len(matrix):,}")
-    attendance_cols = [c for c in ["AMA Welcome Webinar", "AMA Pratham", "AMA Tarun", "AMA Amitoj", "AMA Garima", "AMA Capstone", "AMA Life at Tetr", "Masterclass", "Competition", "Hackathon", "Competition & Hackathon"] if c in matrix.columns]
+    attendance_cols = [c for c in ["AMA Welcome Webinar", "AMA Pratham", "AMA Tarun", "AMA Amitoj", "AMA Garima", "AMA Capstone", "AMA Life at Tetr", "Masterclass", "AMAs & Masterclasses", "Competition", "Hackathon", "Competition & Hackathon"] if c in matrix.columns]
 
     def _highlight_activity_nonzero(val):
         try:
@@ -6196,7 +6246,7 @@ def _render_unpaid_activity_matrix(data, program, title, key_prefix):
     ama_cols = [c for c in ["AMA Welcome Webinar", "AMA Pratham", "AMA Tarun", "AMA Amitoj", "AMA Garima", "AMA Capstone", "AMA Life at Tetr"] if c in numeric_matrix.columns]
     avg_ama = numeric_matrix[ama_cols].sum(axis=1).mean() if ama_cols else 0.0
     avg_masterclass = numeric_matrix["Masterclass"].mean() if "Masterclass" in numeric_matrix else 0.0
-    avg_ama_masterclass = (numeric_matrix[ama_cols].sum(axis=1) + (numeric_matrix["Masterclass"] if "Masterclass" in numeric_matrix else 0)).mean() if ama_cols else avg_masterclass
+    avg_ama_masterclass = numeric_matrix[AMA_MASTERCLASS_COLUMN].mean() if AMA_MASTERCLASS_COLUMN in numeric_matrix.columns else ((numeric_matrix[ama_cols].sum(axis=1) + (numeric_matrix["Masterclass"] if "Masterclass" in numeric_matrix else 0)).mean() if ama_cols else avg_masterclass)
     avg_comp_masterclass = numeric_matrix["Competition & Hackathon"].mean() if "Competition & Hackathon" in numeric_matrix else 0.0
     c1, c2, c3, c4, c5, c6 = st.columns(6)
     c1.metric("Average AMA's Attended", f"{avg_ama:.2f}")
