@@ -5269,19 +5269,94 @@ def _build_conversion_extra_metrics(data):
     return pd.DataFrame(rows)
 
 
-def render_retention_page(data):
-    _base_render_retention_page(data)
+
+def _conversion_scoped_data(data: dict, scope_label: str) -> dict:
+    """Return a shallow copy of dashboard data filtered for Conversion scope only.
+
+    This is intentionally used only by the Conversion page tabs so no other
+    dashboard sections are affected. Total keeps the full data. UG keeps UG
+    batch sheets + Tetr-X-UG. PG keeps PG batch sheets + Tetr-X-PG.
+    """
+    if scope_label == "Total":
+        return data
+    keep_sheets = set(UG_BATCH_SHEETS if scope_label == "UG" else PG_BATCH_SHEETS)
+    keep_sheets.add("Tetr-X-UG" if scope_label == "UG" else "Tetr-X-PG")
+    scoped = dict(data)
+    scoped["activities"] = {k: v for k, v in data.get("activities", {}).items() if k in keep_sheets}
+    scoped["activity_ctx"] = {k: v for k, v in data.get("activity_ctx", {}).items() if k in keep_sheets}
+    return scoped
+
+
+def _render_conversion_core_for_scope(data: dict, scope_label: str, key_prefix: str):
+    scoped_data = _conversion_scoped_data(data, scope_label)
+    summary_df, events_df = build_retention_data(scoped_data)
+
+    if summary_df is None or summary_df.empty:
+        st.warning(f"No admitted/paid students with usable payment dates were found for {scope_label}.")
+        return
+
+    # Safety filter in case a future helper starts retaining broader data.
+    if scope_label in {"UG", "PG"} and "program" in summary_df.columns:
+        summary_df = summary_df[summary_df["program"].astype(str).eq(scope_label)].copy()
+    if scope_label in {"UG", "PG"} and events_df is not None and not events_df.empty and "program" in events_df.columns:
+        events_df = events_df[events_df["program"].astype(str).eq(scope_label)].copy()
+
+    total = int(len(summary_df))
+    ug_total = int((summary_df.get("program", pd.Series("", index=summary_df.index)).astype(str) == "UG").sum())
+    pg_total = int((summary_df.get("program", pd.Series("", index=summary_df.index)).astype(str) == "PG").sum())
+
+    k1, k2, k3 = st.columns(3)
+    k1.metric("Admitted / Paid / Tetr X Students", f"{total:,}")
+    k2.metric("UG", f"{ug_total:,}")
+    k3.metric("PG", f"{pg_total:,}")
+
+    render_distribution_block("First 30 Days", summary_df["first30_count"], f"{key_prefix}_first30")
+    render_event_type_block("First 30 Days Event Type Performance", events_df, "in_first30", f"{key_prefix}_first30", eligible_students=total)
+
+    render_distribution_block("T-7", summary_df["tminus7_count"], f"{key_prefix}_tminus7")
+    render_event_type_block("T-7 Event Type Performance", events_df, "in_tminus7", f"{key_prefix}_tminus7", eligible_students=total)
+
+    render_distribution_block("T+7", summary_df["tplus7_count"], f"{key_prefix}_tplus7")
+    render_event_type_block("T+7 Event Type Performance", events_df, "in_tplus7", f"{key_prefix}_tplus7", eligible_students=total)
+
+    render_distribution_block("Post Payment Journey", summary_df["post_payment_count"], f"{key_prefix}_post")
+    c1, c2 = st.columns(2)
+    c1.metric("Students Active Post Payment", f"{int((summary_df['post_payment_count'] >= 1).sum()):,}")
+    c2.metric("Students with 0 Post Payment Activities", f"{int((summary_df['post_payment_count'] == 0).sum()):,}")
+    render_event_type_block("Post Payment Journey Event Type Performance", events_df, "post_payment", f"{key_prefix}_post", eligible_students=total)
+
+
+def _render_conversion_averages_for_scope(data: dict, scope_label: str, key_prefix: str):
     st.markdown("---")
     st.markdown("### Additional Conversion Averages")
     st.caption("Pre-payment behavioural metrics use admitted / paid students from Tetr-X and attendance from their respective batch sheets.")
     extra = _build_conversion_extra_metrics(data)
-    if extra.empty:
+    if extra is None or extra.empty:
         st.info("No admitted / paid conversion averages available.")
-    else:
-        fig = px.bar(extra, x="Metric", y="Value", color="Program", barmode="group", title="Pre-Payment Behavioural Data")
-        st.plotly_chart(nice_layout(fig, height=360, x_tickangle=-20), use_container_width=True, key="conversion_extra_avg_chart")
-        st.dataframe(extra, use_container_width=True, hide_index=True, key="conversion_extra_avg_table")
+        return
+    if scope_label in {"UG", "PG"}:
+        extra = extra[extra["Program"].astype(str).eq(scope_label)].copy()
+    if extra.empty:
+        st.info(f"No admitted / paid conversion averages available for {scope_label}.")
+        return
+    fig = px.bar(extra, x="Metric", y="Value", color="Program", barmode="group", title="Pre-Payment Behavioural Data")
+    st.plotly_chart(nice_layout(fig, height=360, x_tickangle=-20), use_container_width=True, key=f"{key_prefix}_extra_avg_chart")
+    st.dataframe(extra, use_container_width=True, hide_index=True, key=f"{key_prefix}_extra_avg_table")
 
+
+def render_retention_page(data):
+    st.subheader("Conversion")
+    st.caption("Conversion analytics split into Total, UG, and PG views. Total keeps the combined view; UG and PG use their respective Tetr-X and batch sheets only.")
+    tab_total, tab_ug, tab_pg = st.tabs(["Total", "UG", "PG"])
+    with tab_total:
+        _render_conversion_core_for_scope(data, "Total", "conversion_total")
+        _render_conversion_averages_for_scope(data, "Total", "conversion_total")
+    with tab_ug:
+        _render_conversion_core_for_scope(data, "UG", "conversion_ug")
+        _render_conversion_averages_for_scope(data, "UG", "conversion_ug")
+    with tab_pg:
+        _render_conversion_core_for_scope(data, "PG", "conversion_pg")
+        _render_conversion_averages_for_scope(data, "PG", "conversion_pg")
 
 def build_tx_risky_students(data, scope_label="Total"):
     top = _tx_top_engaged_students(data, scope_label)
