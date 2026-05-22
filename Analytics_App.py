@@ -3873,8 +3873,7 @@ def build_retention_window_comparison(paid_df, events_df, available_df):
     return pd.DataFrame(rows)
 
 
-def render_true_retention_page(data):
-    st.subheader("Retention")
+def _render_true_retention_overview(data):
     paid_df, events_df, occurrences_df, available_df, metrics = build_retention_analytics_v2(data)
     if paid_df.empty:
         st.warning("No paid/admitted/refunded Tetr-X students were found for retention analytics.")
@@ -3987,6 +3986,137 @@ def render_true_retention_page(data):
         fig = px.bar(top_events.head(12), x="Attendance", y="event_name", color="event_type", orientation="h", title="Top Tetr-X Activities by Attendance", hover_data=["Dates", "Attendees"])
         st.plotly_chart(nice_layout(fig, height=440), use_container_width=True, key="new_ret_top_events_chart")
         st.dataframe(top_events.rename(columns={"event_name": "Event", "event_type": "Activity Type"}), use_container_width=True, height=360, key="new_ret_top_events_table")
+
+
+def _build_retention_student_postpayment_table(paid_df: pd.DataFrame, events_df: pd.DataFrame, program: str) -> pd.DataFrame:
+    """Student-level post-payment retention table for Retention UG/PG tabs only."""
+    columns = [
+        "Name", "Email", "Payment Date", "Last Engaged Date", "Days passed since Engaged",
+        "Activities done post payment", "0-15 days", "16-30 days", "31-45 days", "46-60 days", "60+ days",
+        "Online Event and Masterclass Attended", "Competition and hackathon Participated",
+        "General/Fun/Quiz/poll/fun task Participated", "Names of Events/activities they participated in",
+    ]
+    if paid_df is None or paid_df.empty:
+        return pd.DataFrame(columns=columns)
+
+    today = get_today_ist().normalize() if "get_today_ist" in globals() else pd.Timestamp.today().normalize()
+    base = paid_df.copy()
+    base["program"] = base.get("program", "").astype(str)
+    base = base[base["program"].eq(program)].copy()
+
+    # Requirement: Status = Admitted students only for these UG/PG Retention tables.
+    if "retention_is_admitted" in base.columns:
+        admitted_mask = base["retention_is_admitted"].fillna(False).astype(bool)
+    elif "sheet_status_raw" in base.columns:
+        admitted_mask = base["sheet_status_raw"].fillna("").astype(str).str.strip().str.lower().eq("admitted")
+    else:
+        admitted_mask = ~base.get("is_churned", pd.Series(False, index=base.index)).fillna(False).astype(bool)
+    base = base[admitted_mask].copy()
+    if base.empty:
+        return pd.DataFrame(columns=columns)
+
+    ev = events_df.copy() if events_df is not None and not events_df.empty else pd.DataFrame()
+    if not ev.empty:
+        ev["program"] = ev.get("program", "").astype(str)
+        ev = ev[ev["program"].eq(program)].copy()
+        ev["student_id"] = ev.get("student_id", "").astype(str)
+        ev["days_after_payment"] = pd.to_numeric(ev.get("days_after_payment", 0), errors="coerce")
+        ev["event_date"] = pd.to_datetime(ev.get("event_date", pd.NaT), errors="coerce")
+        ev = ev[ev["days_after_payment"].ge(0)].copy()
+        if "dedupe_key" in ev.columns:
+            ev = ev.drop_duplicates(subset=["dedupe_key"]).copy()
+
+    rows = []
+    for _, stu in base.sort_values(["payment_date", "student_name"], na_position="last").iterrows():
+        sid = clean_text(stu.get("student_id", ""))
+        sub = ev[ev["student_id"].eq(sid)].copy() if sid and not ev.empty else pd.DataFrame()
+        if not sub.empty and "dedupe_key" in sub.columns:
+            sub = sub.drop_duplicates(subset=["dedupe_key"]).copy()
+        total_count = int(sub["dedupe_key"].nunique()) if (not sub.empty and "dedupe_key" in sub.columns) else int(len(sub))
+        last_dt = pd.to_datetime(sub["event_date"], errors="coerce").max() if not sub.empty else pd.NaT
+        days_since = int((today - last_dt.normalize()).days) if pd.notna(last_dt) else ""
+        def _count_between(lo, hi=None):
+            if sub.empty:
+                return 0
+            d = pd.to_numeric(sub["days_after_payment"], errors="coerce")
+            mask = d.ge(lo)
+            if hi is not None:
+                mask = mask & d.le(hi)
+            return int(sub.loc[mask, "dedupe_key"].nunique()) if "dedupe_key" in sub.columns else int(mask.sum())
+        type_series = sub.get("event_type", pd.Series(dtype=str)).fillna("").astype(str) if not sub.empty else pd.Series(dtype=str)
+        type_lower = type_series.str.lower()
+        online_master = int(sub.loc[type_lower.eq("online events & masterclasses"), "dedupe_key"].nunique()) if (not sub.empty and "dedupe_key" in sub.columns) else 0
+        comp_hack = int(sub.loc[type_lower.eq("competitions & hackathons"), "dedupe_key"].nunique()) if (not sub.empty and "dedupe_key" in sub.columns) else 0
+        general_fun = int(sub.loc[type_lower.eq("general/fun"), "dedupe_key"].nunique()) if (not sub.empty and "dedupe_key" in sub.columns) else 0
+        if not sub.empty:
+            names = []
+            for _, e in sub.sort_values("event_date").iterrows():
+                nm = clean_text(e.get("event_name", ""))
+                dt = pd.to_datetime(e.get("event_date", pd.NaT), errors="coerce")
+                if nm:
+                    names.append(f"{nm} ({dt.strftime('%d-%b-%Y') if pd.notna(dt) else '-'})")
+            event_names = "; ".join(dict.fromkeys(names))
+        else:
+            event_names = ""
+        pay_dt = pd.to_datetime(stu.get("payment_date", pd.NaT), errors="coerce")
+        email = clean_text(stu.get("email_key", ""))
+        # If the normalized email is unavailable, fall back to any raw email-ish column.
+        if not email:
+            for c in [col for col in stu.index if "email" in str(col).lower()]:
+                email = clean_text(stu.get(c, ""))
+                if email:
+                    break
+        rows.append({
+            "Name": clean_text(stu.get("student_name", "")),
+            "Email": email,
+            "Payment Date": pay_dt.strftime("%d-%b-%Y") if pd.notna(pay_dt) else "",
+            "Last Engaged Date": last_dt.strftime("%d-%b-%Y") if pd.notna(last_dt) else "",
+            "Days passed since Engaged": days_since,
+            "Activities done post payment": total_count,
+            "0-15 days": _count_between(0, 15),
+            "16-30 days": _count_between(16, 30),
+            "31-45 days": _count_between(31, 45),
+            "46-60 days": _count_between(46, 60),
+            "60+ days": _count_between(61, None),
+            "Online Event and Masterclass Attended": online_master,
+            "Competition and hackathon Participated": comp_hack,
+            "General/Fun/Quiz/poll/fun task Participated": general_fun,
+            "Names of Events/activities they participated in": event_names,
+        })
+    out = pd.DataFrame(rows, columns=columns)
+    return out.sort_values(["Payment Date", "Activities done post payment", "Name"], ascending=[False, False, True]).reset_index(drop=True)
+
+
+def _render_retention_program_student_tab(paid_df: pd.DataFrame, events_df: pd.DataFrame, program: str, key_prefix: str):
+    st.markdown(f"### Retention {program}")
+    st.caption("Status = Admitted students only. All activity counts are deduped post-payment Tetr-X activities after each student's payment date.")
+    table = _build_retention_student_postpayment_table(paid_df, events_df, program)
+    if table.empty:
+        st.info(f"No admitted Tetr-X {program} students with usable payment dates were found.")
+        return
+    m1, m2, m3 = st.columns(3)
+    m1.metric(f"Admitted Tetr-X {program} Students", f"{len(table):,}")
+    m2.metric("Active Post Payment", f"{int((pd.to_numeric(table['Activities done post payment'], errors='coerce').fillna(0) > 0).sum()):,}")
+    m3.metric("Avg Post-Payment Activities", f"{pd.to_numeric(table['Activities done post payment'], errors='coerce').fillna(0).mean():.1f}")
+
+    st.dataframe(table, use_container_width=True, hide_index=True, height=560, key=f"{key_prefix}_retention_student_table")
+
+    dist = table.groupby("Activities done post payment", as_index=False).agg(Students=("Name", "count")).sort_values("Activities done post payment")
+    fig = px.bar(dist, x="Activities done post payment", y="Students", title=f"{program} Post-Payment Activity Distribution")
+    fig.update_traces(marker_color=GREEN_2)
+    st.plotly_chart(nice_layout(fig, height=320), use_container_width=True, key=f"{key_prefix}_retention_distribution")
+
+
+def render_true_retention_page(data):
+    st.subheader("Retention")
+    tabs = st.tabs(["Total", "Retention UG", "Retention PG"])
+    with tabs[0]:
+        _render_true_retention_overview(data)
+    paid_df, events_df, occurrences_df, available_df, metrics = build_retention_analytics_v2(data)
+    with tabs[1]:
+        _render_retention_program_student_tab(paid_df, events_df, "UG", "retention_ug")
+    with tabs[2]:
+        _render_retention_program_student_tab(paid_df, events_df, "PG", "retention_pg")
 
 def render_recent_activity_page(data):
     st.subheader("Recent Activity")
