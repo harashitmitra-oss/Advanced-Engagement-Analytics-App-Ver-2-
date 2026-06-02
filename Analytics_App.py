@@ -23,8 +23,8 @@ except Exception:
 st.set_page_config(page_title="Tetr Analytics Dashboard", layout="wide")
 
 MASTER_SHEETS = ["Master UG", "Master PG"]
-UG_BATCH_SHEETS = ["UG - B1 to B4", "UG B5", "UG B6", "UG B7", "UG B8", "UG B9", "UG B10", "UG B11", "UG B12", "UG B13", "UG B14", "UG B15","UG B16"]
-PG_BATCH_SHEETS = ["PG - B1 & B2", "PG - B3 & B4", "PG B5", "PG B6", "PG B7"]
+UG_BATCH_SHEETS = ["UG - B1 to B4", "UG B5", "UG B6", "UG B7", "UG B8", "UG B9", "UG B10", "UG B11", "UG B12", "UG B13", "UG B14", "UG B15"]
+PG_BATCH_SHEETS = ["PG - B1 & B2", "PG - B3 & B4", "PG B5", "PG B6", "PG B7", "PG B8"]
 TX_SHEETS = ["Tetr-X-UG", "Tetr-X-PG"]
 DATES_SHEET = "Dates"
 WINNER_SHEET = "Winner"
@@ -956,6 +956,11 @@ def parse_master_sheet(raw: pd.DataFrame, program: str, sheet_name: str):
     status_col = best_matching_col(df, ["status"])
     payment_col = best_matching_col(df, ["payment"])
     payment_date_col = best_matching_col(df, ["payment date", "date of payment", "paid date"])
+    # Overview active-student source of truth: newly added master-sheet column.
+    # It is intentionally detected before generic event-column parsing so it is not treated as an event.
+    batch_engagement_pct_col = next((c for c in df.columns if clean_text(c).lower() == "engagement % (batch data)"), None)
+    if batch_engagement_pct_col is None:
+        batch_engagement_pct_col = best_matching_col(df, ["engagement % (batch data)", "batch data engagement %"])
     community_status_col = best_matching_col(df, ["tetr x/term 0 status", "tetr x term 0 status", "term 0 status", "community status", "admitted group"])
     term_zero_col = best_matching_col(df, ["tetr x/term 0 status", "tetr x term 0 status", "term 0 status", "term zero group", "added to term 0"])
 
@@ -988,9 +993,10 @@ def parse_master_sheet(raw: pd.DataFrame, program: str, sheet_name: str):
         df["master_payment_date_parsed"] = df["master_payment_value"].apply(parse_date_safe)
 
     event_cols = []
-    protected = {name_col, email_col, batch_col, country_col, income_col, status_col, payment_col, community_status_col,
+    protected = {name_col, email_col, batch_col, country_col, income_col, status_col, payment_col, payment_date_col,
+                 batch_engagement_pct_col, community_status_col,
                  "Program", "Batch", "source_sheet", "student_name", "student_key", "email_key", "mobile_key", "community_status_value",
-                 "master_is_paid", "master_is_refunded", "master_status_value", "master_payment_value"}
+                 "master_is_paid", "master_is_refunded", "master_status_value", "master_payment_value", "master_payment_date_parsed"}
     for col in df.columns:
         if col in protected:
             continue
@@ -1000,7 +1006,17 @@ def parse_master_sheet(raw: pd.DataFrame, program: str, sheet_name: str):
             df[col] = s.map(normalize_yes_no)
 
     df["participation_count_master"] = df[event_cols].sum(axis=1) if event_cols else 0
-    df["active_master"] = df["participation_count_master"] > 0
+    # Active students in Overview now come from Engagement % (Batch Data) > 0 when that column exists.
+    # Fallback keeps the older behavior for older workbooks.
+    if batch_engagement_pct_col and batch_engagement_pct_col in df.columns:
+        batch_pct = df[batch_engagement_pct_col].apply(parse_numeric_percent)
+        if not batch_pct.dropna().empty and batch_pct.max(skipna=True) <= 1.05:
+            batch_pct = batch_pct * 100
+        df["engagement_batch_data_pct"] = batch_pct.fillna(0)
+        df["active_master"] = df["engagement_batch_data_pct"].gt(0)
+    else:
+        df["engagement_batch_data_pct"] = np.nan
+        df["active_master"] = df["participation_count_master"] > 0
     df["is_paid"] = df["master_is_paid"]
     df["is_refunded"] = df["master_is_refunded"]
     df["status_bucket"] = np.select(
@@ -1023,6 +1039,7 @@ def parse_master_sheet(raw: pd.DataFrame, program: str, sheet_name: str):
         "status_col": status_col,
         "payment_col": payment_col,
         "payment_date_col": payment_date_col,
+        "batch_engagement_pct_col": batch_engagement_pct_col,
         "community_status_col": community_status_col,
         "event_cols": event_cols,
     }
@@ -2394,6 +2411,87 @@ def render_combined_program_section(title, sheets, data, prefix):
         st.warning(f"No data available for {title}.")
         return
     render_sheet_detail(title, combined_df, combined_ctx, prefix, data=data)
+
+
+def _course_student_keys(data, course_label):
+    """Return normalized email/name keys for UG students in Dates sheet matching the Course value."""
+    dates = data.get("dates_df", pd.DataFrame())
+    if dates is None or dates.empty or "Course" not in dates.columns:
+        return set(), set()
+    token = clean_text(course_label).upper()
+    d = dates.copy()
+    course_mask = d["Course"].astype(str).str.upper().str.contains(token, na=False)
+    if "UG PG" in d.columns:
+        ug_mask = d["UG PG"].astype(str).str.upper().str.contains("UG", na=False)
+    else:
+        ug_mask = pd.Series(True, index=d.index)
+    d = d.loc[course_mask & ug_mask].copy()
+    emails = set(d.get("email_key", pd.Series(dtype=object)).astype(str).map(clean_text).replace("", np.nan).dropna().tolist())
+    names = set(d.get("student_key", pd.Series(dtype=object)).astype(str).map(clean_text).replace("", np.nan).dropna().tolist())
+    return emails, names
+
+
+def build_course_activity_context(course_label, data):
+    """Build a combined UG-batch activity view filtered to students from a Dates-sheet Course."""
+    emails, names = _course_student_keys(data, course_label)
+    if not emails and not names:
+        return pd.DataFrame(), {"event_info": pd.DataFrame(columns=["column_name", "event_name", "event_type", "event_date", "sheet"]), "country_col": None}
+
+    frames = []
+    event_infos = []
+    country_col = None
+    for s in [x for x in UG_BATCH_SHEETS if x in data.get("activities", {}) and x in data.get("activity_ctx", {})]:
+        src_df = data["activities"][s].copy()
+        if src_df.empty:
+            continue
+        mask = pd.Series(False, index=src_df.index)
+        if emails and "email_key" in src_df.columns:
+            mask = mask | src_df["email_key"].astype(str).isin(emails)
+        if names and "student_key" in src_df.columns:
+            mask = mask | src_df["student_key"].astype(str).isin(names)
+        src_df = src_df.loc[mask].copy()
+        if src_df.empty:
+            continue
+
+        ctx = data.get("activity_ctx", {}).get(s, {})
+        ei = ctx.get("event_info", pd.DataFrame())
+        rename_map = {}
+        if ei is not None and not ei.empty:
+            ei = ei.copy()
+            for idx, row in ei.iterrows():
+                old_col = row.get("column_name")
+                if old_col in src_df.columns:
+                    new_col = f"{normalize_name(s)}__{old_col}"
+                    rename_map[old_col] = new_col
+                    ei.at[idx, "column_name"] = new_col
+            event_infos.append(ei)
+        if rename_map:
+            src_df = src_df.rename(columns=rename_map)
+        frames.append(src_df)
+        if country_col is None and ctx.get("country_col"):
+            country_col = ctx.get("country_col")
+
+    if not frames:
+        return pd.DataFrame(), {"event_info": pd.DataFrame(columns=["column_name", "event_name", "event_type", "event_date", "sheet"]), "country_col": None}
+    combined_df = pd.concat(frames, ignore_index=True, sort=False)
+    combined_df = combined_df.drop_duplicates(subset=[c for c in ["email_key", "student_key", "source_sheet"] if c in combined_df.columns], keep="first")
+    combined_event_info = pd.concat(event_infos, ignore_index=True, sort=False) if event_infos else pd.DataFrame(columns=["column_name", "event_name", "event_type", "event_date", "sheet"])
+    if not combined_event_info.empty:
+        combined_event_info = combined_event_info.drop_duplicates(subset=["column_name", "event_name", "event_type", "event_date", "sheet"]).reset_index(drop=True)
+    return combined_df, {"event_info": combined_event_info, "country_col": country_col}
+
+
+def render_courses_page(data):
+    st.subheader("Courses")
+    tabs = st.tabs(["BFAI UG", "BSAI UG"])
+    for tab, course_label, prefix in zip(tabs, ["BFAI", "BSAI"], ["course_bfai", "course_bsai"]):
+        with tab:
+            course_df, course_ctx = build_course_activity_context(course_label, data)
+            if course_df.empty:
+                st.warning(f"No UG students found for {course_label} in the Dates sheet, or no matching batch activity rows found.")
+                continue
+            render_sheet_detail(f"{course_label} UG", course_df, course_ctx, prefix, data=data)
+
 def render_program_page(title, sheets, data, page_prefix):
     st.subheader(title)
     available = [s for s in sheets if s in data["activities"]]
@@ -6728,7 +6826,7 @@ def main():
 
     with st.sidebar:
         st.markdown("## 🧭 Navigation")
-        default_pages = ["Overview", "Recent Activity", "Success Metrics", "Student Profile", "UG", "PG", "UG vs PG", "Tetr-X", "T-7 & T+7 Analysis", "Conversion", "Retention", "Refund Analytics", "Activities"]
+        default_pages = ["Overview", "Recent Activity", "Success Metrics", "Student Profile", "UG", "PG", "Courses", "UG vs PG", "Tetr-X", "T-7 & T+7 Analysis", "Conversion", "Retention", "Refund Analytics", "Activities"]
         default_index = default_pages.index(st.session_state.get("nav_page", "Overview")) if st.session_state.get("nav_page", "Overview") in default_pages else 0
         page = st.radio("Go to", default_pages, index=default_index, label_visibility="collapsed", key="nav")
         st.session_state["nav_page"] = page
@@ -6762,6 +6860,8 @@ def main():
         render_program_page("UG Batch Sheets", UG_BATCH_SHEETS, data, "ug")
     elif page == "PG":
         render_program_page("PG Batch Sheets", PG_BATCH_SHEETS, data, "pg")
+    elif page == "Courses":
+        render_courses_page(data)
     elif page == "UG vs PG":
         render_ug_vs_pg_page(data)
     elif page == "Tetr-X":
