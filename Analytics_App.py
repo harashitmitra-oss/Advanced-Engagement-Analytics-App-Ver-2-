@@ -2504,26 +2504,101 @@ def render_combined_program_section(title, sheets, data, prefix):
     render_sheet_detail(title, combined_df, combined_ctx, prefix, data=data)
 
 
-def _course_student_keys(data, course_label):
-    """Return normalized email/name keys for UG students in Dates sheet matching the Course value."""
+
+def _course_match_mask(course_series, course_label):
+    """Match a course label from Dates -> Course without letting BMT match IBMT."""
+    token = clean_text(course_label).upper()
+    s = course_series.astype(str).map(clean_text).str.upper()
+    # Use token boundaries so BMT does not match IBMT. Keep flexible for values like "BFAI UG".
+    if token:
+        pattern = rf"(^|[^A-Z0-9]){re.escape(token)}([^A-Z0-9]|$)"
+        return s.str.contains(pattern, regex=True, na=False)
+    return pd.Series(False, index=course_series.index)
+
+
+def _course_dates_frame(data, course_label):
+    """Return Dates-sheet rows for a UG course. Used only for displaying course student details."""
     dates = data.get("dates_df", pd.DataFrame())
     if dates is None or dates.empty or "Course" not in dates.columns:
-        return set(), set()
-    token = clean_text(course_label).upper()
+        return pd.DataFrame()
     d = dates.copy()
-    course_mask = d["Course"].astype(str).str.upper().str.contains(token, na=False)
+    course_mask = _course_match_mask(d["Course"], course_label)
     if "UG PG" in d.columns:
         ug_mask = d["UG PG"].astype(str).str.upper().str.contains("UG", na=False)
+    elif "UG/PG" in d.columns:
+        ug_mask = d["UG/PG"].astype(str).str.upper().str.contains("UG", na=False)
     else:
         ug_mask = pd.Series(True, index=d.index)
     d = d.loc[course_mask & ug_mask].copy()
+    if d.empty:
+        return d
+    # Keep one display row per student using email first, then name+batch.
+    if "email_key" not in d.columns:
+        email_col = next((c for c in d.columns if "email" in clean_text(c).lower()), None)
+        d["email_key"] = d[email_col].map(normalize_email) if email_col else ""
+    if "student_key" not in d.columns:
+        name_col = next((c for c in d.columns if "name" in clean_text(c).lower()), None)
+        d["student_key"] = d[name_col].map(normalize_name) if name_col else ""
+    if "Batch" not in d.columns:
+        d["Batch"] = ""
+    d["_course_display_key"] = np.where(
+        d["email_key"].astype(str).str.len() > 3,
+        "e:" + d["email_key"].astype(str),
+        "n:" + d["student_key"].astype(str) + "|" + d["Batch"].astype(str).map(clean_text),
+    )
+    return d.sort_values(["Batch", "student_name" if "student_name" in d.columns else "_course_display_key"]).drop_duplicates("_course_display_key", keep="first").reset_index(drop=True)
+
+
+def _course_student_keys(data, course_label):
+    """Return normalized email/name keys for UG students in Dates sheet matching the Course value."""
+    d = _course_dates_frame(data, course_label)
+    if d is None or d.empty:
+        return set(), set()
     emails = set(d.get("email_key", pd.Series(dtype=object)).astype(str).map(clean_text).replace("", np.nan).dropna().tolist())
     names = set(d.get("student_key", pd.Series(dtype=object)).astype(str).map(clean_text).replace("", np.nan).dropna().tolist())
     return emails, names
 
 
+def _render_course_student_details(data, course_label, prefix):
+    """Show all Dates-sheet student details for a course above the paid/admitted section."""
+    d = _course_dates_frame(data, course_label)
+    st.markdown("#### All Student Details of this Course")
+    if d is None or d.empty:
+        st.info(f"No {course_label} UG students found in the Dates sheet.")
+        return
+    # Prefer common Dates columns, but keep whatever is available.
+    preferred = [
+        "Name", "student_name", "Email", "email", "Email id", "email_key",
+        "UG/PG", "UG PG", "Batch", "Course", "Offered date", "Deadline",
+        "offered_date_parsed", "deadline_parsed",
+    ]
+    cols = []
+    seen = set()
+    for c in preferred:
+        if c in d.columns and c not in seen:
+            cols.append(c); seen.add(c)
+    # Add a few useful remaining columns without making the table too wide.
+    for c in d.columns:
+        lc = clean_text(c).lower()
+        if c in seen or c.startswith("_"):
+            continue
+        if any(k in lc for k in ["name", "email", "batch", "course", "offer", "deadline", "ug", "pg"]):
+            cols.append(c); seen.add(c)
+    if not cols:
+        cols = [c for c in d.columns if not c.startswith("_")]
+    display = d[cols].copy()
+    for c in display.columns:
+        if pd.api.types.is_datetime64_any_dtype(display[c]):
+            display[c] = pd.to_datetime(display[c], errors="coerce").dt.strftime("%d-%b-%Y").fillna("")
+    st.caption(f"Unique students found in Dates sheet for {course_label} UG: {len(display):,}")
+    st.dataframe(display, use_container_width=True, hide_index=True, height=320, key=f"{prefix}_course_all_student_details")
+
+
 def build_course_activity_context(course_label, data):
-    """Build a combined UG-batch activity view filtered to students from a Dates-sheet Course."""
+    """Build a combined UG-batch activity view filtered to students from a Dates-sheet Course.
+    This restores the earlier course-count behavior: count the matched UG batch activity rows,
+    while the all-course student details table is shown separately from Dates.
+    """
     emails, names = _course_student_keys(data, course_label)
     if not emails and not names:
         return pd.DataFrame(), {"event_info": pd.DataFrame(columns=["column_name", "event_name", "event_type", "event_date", "sheet"]), "country_col": None}
@@ -2574,14 +2649,18 @@ def build_course_activity_context(course_label, data):
 
 def render_courses_page(data):
     st.subheader("Courses")
-    tabs = st.tabs(["BFAI UG", "BSAI UG"])
-    for tab, course_label, prefix in zip(tabs, ["BFAI", "BSAI"], ["course_bfai", "course_bsai"]):
+    course_tabs = ["BFAI UG", "BSAI UG", "BMT UG", "IBMT UG"]
+    course_labels = ["BFAI", "BSAI", "BMT", "IBMT"]
+    prefixes = ["course_bfai", "course_bsai", "course_bmt", "course_ibmt"]
+    tabs = st.tabs(course_tabs)
+    for tab, course_label, title, prefix in zip(tabs, course_labels, course_tabs, prefixes):
         with tab:
             course_df, course_ctx = build_course_activity_context(course_label, data)
+            _render_course_student_details(data, course_label, prefix)
             if course_df.empty:
-                st.warning(f"No UG students found for {course_label} in the Dates sheet, or no matching batch activity rows found.")
+                st.warning(f"No matching UG batch activity rows found for {title}. The student list above is still shown from Dates sheet if available.")
                 continue
-            render_sheet_detail(f"{course_label} UG", course_df, course_ctx, prefix, data=data)
+            render_sheet_detail(title, course_df, course_ctx, prefix, data=data)
 
 def render_program_page(title, sheets, data, page_prefix):
     st.subheader(title)
