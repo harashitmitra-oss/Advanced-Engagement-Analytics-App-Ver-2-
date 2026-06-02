@@ -965,7 +965,7 @@ def parse_master_sheet(raw: pd.DataFrame, program: str, sheet_name: str):
     term_zero_col = best_matching_col(df, ["tetr x/term 0 status", "tetr x term 0 status", "term 0 status", "term zero group", "added to term 0"])
 
     if not name_col:
-        raise ValueError(f"Name column not found in {sheet_name}")
+        return _empty_activity_sheet(sheet_name, f"Name column not found in {sheet_name}")
 
     df = df[df[name_col].apply(is_valid_student_name)].copy()
     df["Program"] = program
@@ -1047,15 +1047,100 @@ def parse_master_sheet(raw: pd.DataFrame, program: str, sheet_name: str):
 
 
 
-def parse_activity_sheet(raw: pd.DataFrame, sheet_name: str):
-    header_row = 5
-    data_start = 6
-    if raw.shape[0] <= header_row:
-        raise ValueError(f"Sheet too short: {sheet_name}")
+def _detect_activity_header_row(raw: pd.DataFrame, default_row: int = 5, max_scan: int = 25):
+    """Detect the student header row in batch/Tetr-X sheets.
+    Most activity sheets use row 6 as header (0-index 5), but newly added sheets
+    can be blank, shifted, or partially formatted. This keeps the dashboard from
+    failing while still using the standard row when valid.
+    """
+    if raw is None or raw.empty:
+        return None
 
-    type_row = raw.iloc[0].tolist() if raw.shape[0] > 0 else []
-    event_row = raw.iloc[1].tolist() if raw.shape[0] > 1 else []
-    date_row = raw.iloc[2].tolist() if raw.shape[0] > 2 else []
+    def row_score(i):
+        vals = [clean_text(v).lower() for v in raw.iloc[i].tolist()]
+        joined = " | ".join(vals)
+        score = 0
+        # Strong identifiers for a real student-data header.
+        if any(v in {"student name", "student names", "name", "full name"} for v in vals):
+            score += 8
+        if "student name" in joined or "student names" in joined:
+            score += 10
+        if any("email" in v for v in vals):
+            score += 5
+        if any("status" in v for v in vals):
+            score += 3
+        if any("country" in v for v in vals):
+            score += 2
+        if any("payment" in v for v in vals):
+            score += 2
+        if any("mobile" in v or "phone" in v or "contact" in v for v in vals):
+            score += 2
+        if sum(1 for v in vals if v) >= 4:
+            score += 1
+        return score
+
+    if raw.shape[0] > default_row and row_score(default_row) >= 8:
+        return default_row
+
+    best_i, best_score = None, -1
+    for i in range(min(max_scan, raw.shape[0])):
+        sc = row_score(i)
+        if sc > best_score:
+            best_i, best_score = i, sc
+    return best_i if best_score >= 8 else None
+
+
+def _empty_activity_sheet(sheet_name: str, reason: str = ""):
+    """Return an empty activity sheet with the standard columns/ctx so optional new
+    sheets (for example newly-created blank PG B8) do not break the whole app.
+    """
+    base_cols = [
+        "Program", "source_sheet", "student_name", "student_key", "email_key",
+        "mobile_key", "Batch", "country", "income", "counsellor_name",
+        "community_status_value", "participation_count", "engagement_score",
+        "engagement_pct", "payment_date_parsed", "sheet_status_raw",
+        "sheet_is_refunded", "sheet_is_paid", "is_active"
+    ]
+    df = pd.DataFrame(columns=base_cols)
+    event_info = pd.DataFrame(columns=["column_name", "event_name", "event_type", "event_date", "sheet"])
+    ctx = {
+        "name_col": None,
+        "email_col": None,
+        "mobile_col": None,
+        "batch_col": None,
+        "country_col": None,
+        "income_col": None,
+        "counsellor_col": None,
+        "counsellor1_col": None,
+        "counsellor2_col": None,
+        "community_status_col": None,
+        "payment_status_col": None,
+        "payment_date_col": None,
+        "engagement_score_col": None,
+        "engagement_pct_col": None,
+        "event_info": event_info,
+        "event_cols": [],
+        "parse_warning": reason,
+    }
+    return df, ctx
+
+
+def parse_activity_sheet(raw: pd.DataFrame, sheet_name: str):
+    header_row = _detect_activity_header_row(raw, default_row=5, max_scan=30)
+    if header_row is None:
+        return _empty_activity_sheet(sheet_name, f"Could not detect student header row in {sheet_name}")
+    data_start = header_row + 1
+    if raw.shape[0] <= header_row:
+        return _empty_activity_sheet(sheet_name, f"Sheet too short: {sheet_name}")
+
+    # Event metadata is normally 5/4/3 rows above the student header.
+    # This preserves the standard structure and supports shifted/new sheets.
+    type_idx = max(0, header_row - 5)
+    event_idx = max(0, header_row - 4)
+    date_idx = max(0, header_row - 3)
+    type_row = raw.iloc[type_idx].tolist() if raw.shape[0] > type_idx else []
+    event_row = raw.iloc[event_idx].tolist() if raw.shape[0] > event_idx else []
+    date_row = raw.iloc[date_idx].tolist() if raw.shape[0] > date_idx else []
     header_cells = raw.iloc[header_row].tolist()
 
     cols = []
@@ -1296,7 +1381,13 @@ def load_dashboard_data(source_mode: str, spreadsheet_id=None, file_bytes=None):
         if sheet in raw_cache:
             raw = raw_cache.get(sheet, pd.DataFrame())
             if not raw.empty:
-                activities[sheet], activity_ctx[sheet] = parse_activity_sheet(raw, sheet)
+                try:
+                    activities[sheet], activity_ctx[sheet] = parse_activity_sheet(raw, sheet)
+                except Exception as e:
+                    # Do not fail the full dashboard because one newly-added/blank batch sheet
+                    # is not formatted yet. The sheet will simply render empty until its header
+                    # follows the expected student-data layout.
+                    activities[sheet], activity_ctx[sheet] = _empty_activity_sheet(sheet, str(e))
 
     if DATES_SHEET in raw_cache and not raw_cache[DATES_SHEET].empty:
         dates_df = parse_dates_sheet(raw_cache[DATES_SHEET])
