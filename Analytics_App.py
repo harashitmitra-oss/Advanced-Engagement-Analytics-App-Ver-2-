@@ -5512,7 +5512,11 @@ def render_sheet_detail(sheet_name, df, ctx, prefix, data=None):
 
     t1, t2 = st.columns(2)
     with t1:
-        top_cols = [c for c in ["student_name", "sheet_status_raw", "engagement_pct", "engagement_score", "community_status_value"] if c in df.columns]
+        top_col_order = ["student_name"]
+        if prefix.startswith("course_") and "Batch" in df.columns:
+            top_col_order.append("Batch")
+        top_col_order += ["sheet_status_raw", "engagement_pct", "engagement_score", "community_status_value"]
+        top_cols = [c for c in top_col_order if c in df.columns]
         students = df[top_cols].sort_values([c for c in ["engagement_pct", "engagement_score"] if c in top_cols], ascending=False).head(20) if top_cols else pd.DataFrame()
         if "sheet_status_raw" in students.columns:
             students = students.rename(columns={"sheet_status_raw": "Status"})
@@ -5533,7 +5537,11 @@ def render_sheet_detail(sheet_name, df, ctx, prefix, data=None):
                 st.info("No pre-payment batch attendance was found for the students in this Tetr-X sheet.")
         else:
             target = df[(~df.get("sheet_is_paid", pd.Series(False, index=df.index))) & (~df.get("sheet_is_refunded", pd.Series(False, index=df.index))) & (df.get("is_active", pd.Series(False, index=df.index)))]
-            cols = [c for c in ["student_name", "sheet_status_raw", "engagement_pct", "engagement_score", "community_status_value"] if c in target.columns]
+            target_col_order = ["student_name"]
+            if prefix.startswith("course_") and "Batch" in target.columns:
+                target_col_order.append("Batch")
+            target_col_order += ["sheet_status_raw", "engagement_pct", "engagement_score", "community_status_value"]
+            cols = [c for c in target_col_order if c in target.columns]
             target = target[cols].sort_values([c for c in ["engagement_pct", "engagement_score"] if c in cols], ascending=False).head(20) if cols else pd.DataFrame()
             if "sheet_status_raw" in target.columns:
                 target = target.rename(columns={"sheet_status_raw": "Status"})
@@ -6055,7 +6063,11 @@ def render_sheet_detail(sheet_name, df, ctx, prefix, data=None):
 
     t1, t2 = st.columns(2)
     with t1:
-        top_cols = [c for c in ["student_name", "sheet_status_raw", "engagement_pct", "engagement_score", "community_status_value"] if c in df.columns]
+        top_col_order = ["student_name"]
+        if prefix.startswith("course_") and "Batch" in df.columns:
+            top_col_order.append("Batch")
+        top_col_order += ["sheet_status_raw", "engagement_pct", "engagement_score", "community_status_value"]
+        top_cols = [c for c in top_col_order if c in df.columns]
         students = df[top_cols].sort_values([c for c in ["engagement_pct", "engagement_score"] if c in top_cols], ascending=False).head(20) if top_cols else pd.DataFrame()
         if "sheet_status_raw" in students.columns:
             students = students.rename(columns={"sheet_status_raw": "Status"})
@@ -6076,7 +6088,11 @@ def render_sheet_detail(sheet_name, df, ctx, prefix, data=None):
                 st.info("No pre-payment batch attendance was found for the students in this Tetr-X sheet.")
         else:
             target = df[(~df.get("sheet_is_paid", pd.Series(False, index=df.index))) & (~df.get("sheet_is_refunded", pd.Series(False, index=df.index))) & (df.get("is_active", pd.Series(False, index=df.index)))]
-            cols = [c for c in ["student_name", "sheet_status_raw", "engagement_pct", "engagement_score", "community_status_value"] if c in target.columns]
+            target_col_order = ["student_name"]
+            if prefix.startswith("course_") and "Batch" in target.columns:
+                target_col_order.append("Batch")
+            target_col_order += ["sheet_status_raw", "engagement_pct", "engagement_score", "community_status_value"]
+            cols = [c for c in target_col_order if c in target.columns]
             target = target[cols].sort_values([c for c in ["engagement_pct", "engagement_score"] if c in cols], ascending=False).head(20) if cols else pd.DataFrame()
             if "sheet_status_raw" in target.columns:
                 target = target.rename(columns={"sheet_status_raw": "Status"})
