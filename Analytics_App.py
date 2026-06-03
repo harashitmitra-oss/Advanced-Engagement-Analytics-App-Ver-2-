@@ -2750,19 +2750,19 @@ def build_course_event_attendance_table(data, course_label, course_df, course_ct
                 event_sheet_batches.append(sh)
 
         eligible_count = 0
-        eligible_batches = []
-        if not cd.empty and pd.notna(ev_date_norm):
-            # Eligible if event date falls between Offered date and Deadline. If a student's dates are missing, they are not counted as date-eligible.
-            offered = pd.to_datetime(cd.get("offered_date_parsed", pd.NaT), errors="coerce")
-            deadline = pd.to_datetime(cd.get("deadline_parsed", pd.NaT), errors="coerce")
-            elig_mask = offered.notna() & deadline.notna() & (offered <= ev_date_norm) & (deadline >= ev_date_norm)
-            elig = cd.loc[elig_mask].copy()
-            if not elig.empty:
-                eligible_count = int(elig["_eligible_key"].nunique())
-                eligible_batches = sorted([x for x in elig["Batch Display"].dropna().astype(str).map(clean_text).unique().tolist() if x])
+        eligible_keys = []
 
-        # Active batches = batches where event exists + batches with eligible students during event date.
-        active_batches = sorted(dict.fromkeys([*event_sheet_batches, *eligible_batches]))
+        # Course eligibility for this event is based ONLY on the batch sheets where the event/activity exists.
+        # Do not expand eligibility using Offered date -> Deadline ranges here.
+        if not cd.empty:
+            event_sheet_batches_norm = {_display_batch_label(x) for x in event_sheet_batches if clean_text(x)}
+            elig = cd[cd["Batch Display"].astype(str).map(_display_batch_label).isin(event_sheet_batches_norm)].copy()
+            if not elig.empty:
+                eligible_keys = sorted([x for x in elig["_eligible_key"].dropna().astype(str).unique().tolist() if clean_text(x)])
+                eligible_count = len(eligible_keys)
+
+        # Active batches = only the batches where this event/activity exists in the batch sheets.
+        active_batches = sorted(dict.fromkeys(event_sheet_batches))
         rows.append({
             "Event / Activity Name": ev_name,
             "Event / Activity Date": ev_date_norm,
@@ -2771,6 +2771,7 @@ def build_course_event_attendance_table(data, course_label, course_df, course_ct
             f"Eligible {course_label} Students": eligible_count,
             "Active Batches": ", ".join(active_batches),
             "Batchwise Attended Students": batchwise,
+            "_eligible_keys": "||".join(eligible_keys),
             "_event_key_name": normalize_name(ev_name),
             "_event_key_date": ev_date_norm,
             "_event_key_type": normalize_event_type_for_profile_graph(ev_type),
@@ -2788,15 +2789,26 @@ def build_course_event_attendance_table(data, course_label, course_df, course_ct
                 if part and part not in vals:
                     vals.append(part)
         return ", ".join(vals)
+    def _merge_key_count(s):
+        vals = set()
+        for x in s:
+            for part in str(x).split("||"):
+                part = clean_text(part)
+                if part:
+                    vals.add(part)
+        return len(vals)
+
     out = raw.groupby(group_cols, dropna=False, as_index=False).agg({
         "Event / Activity Name": "first",
         "Event / Activity Date": "first",
         "Event / Activity Type": "first",
         "Attendance": "sum",
-        f"Eligible {course_label} Students": "max",
+        f"Eligible {course_label} Students": "sum",
+        "_eligible_keys": _merge_key_count,
         "Active Batches": _merge_text,
         "Batchwise Attended Students": _merge_text,
     })
+    out[f"Eligible {course_label} Students"] = out["_eligible_keys"].astype(int)
     out = out[base_cols].sort_values("Event / Activity Date", ascending=False, na_position="last").reset_index(drop=True)
     return out
 
