@@ -1948,7 +1948,12 @@ def render_sheet_detail(sheet_name, df, ctx, prefix, data=None):
 
     t1, t2 = st.columns(2)
     with t1:
-        students = df[["student_name", "engagement_pct", "engagement_score", "community_status_value"]].sort_values(["engagement_pct", "engagement_score"], ascending=False).head(20)
+        top_cols = ["student_name"]
+        if prefix.startswith("course_") and "Batch" in df.columns:
+            top_cols.append("Batch")
+        top_cols += ["engagement_pct", "engagement_score", "community_status_value"]
+        top_cols = [c for c in top_cols if c in df.columns]
+        students = df[top_cols].sort_values(["engagement_pct", "engagement_score"], ascending=False).head(20)
         st.markdown("#### Top Students")
         st.dataframe(students, use_container_width=True, height=390, key=f"{prefix}_top_df")
     with t2:
@@ -1965,7 +1970,12 @@ def render_sheet_detail(sheet_name, df, ctx, prefix, data=None):
             else:
                 st.info("No pre-payment batch attendance was found for the students in this Tetr-X sheet.")
         else:
-            target = df[(~df["sheet_is_paid"]) & (~df["sheet_is_refunded"]) & (df["is_active"])][["student_name", "engagement_pct", "engagement_score", "community_status_value"]].sort_values(["engagement_pct", "engagement_score"], ascending=False).head(20)
+            target_cols = ["student_name"]
+            if prefix.startswith("course_") and "Batch" in df.columns:
+                target_cols.append("Batch")
+            target_cols += ["engagement_pct", "engagement_score", "community_status_value"]
+            target_cols = [c for c in target_cols if c in df.columns]
+            target = df[(~df["sheet_is_paid"]) & (~df["sheet_is_refunded"]) & (df["is_active"])][target_cols].sort_values(["engagement_pct", "engagement_score"], ascending=False).head(20)
             st.markdown("#### Best Upgrade Targets")
             st.dataframe(target, use_container_width=True, height=390, key=f"{prefix}_upgrade_df")
 
@@ -2647,6 +2657,129 @@ def build_course_activity_context(course_label, data):
     return combined_df, {"event_info": combined_event_info, "country_col": country_col}
 
 
+
+
+def _display_batch_label(batch_val):
+    b = clean_text(batch_val)
+    if not b:
+        return ""
+    if re.fullmatch(r"\d+", b):
+        return f"UG B{b}"
+    if re.fullmatch(r"B\d+", b, flags=re.IGNORECASE):
+        return f"UG {b.upper()}"
+    if b.upper().startswith("UG"):
+        return b
+    return b
+
+
+def build_course_event_attendance_table(data, course_label, course_df, course_ctx):
+    """Course-only event table with merged same-name+date events, eligible course students, active batches and batchwise attendance."""
+    base_cols = [
+        "Event / Activity Name", "Event / Activity Date", "Event / Activity Type", "Attendance",
+        f"Eligible {course_label} Students", "Active Batches", "Batchwise Attended Students",
+    ]
+    if course_df is None or course_df.empty or course_ctx is None:
+        return pd.DataFrame(columns=base_cols)
+    event_info = course_ctx.get("event_info", pd.DataFrame())
+    if event_info is None or event_info.empty:
+        return pd.DataFrame(columns=base_cols)
+
+    course_dates = _course_dates_frame(data, course_label)
+    if course_dates is None:
+        course_dates = pd.DataFrame()
+    if not course_dates.empty:
+        cd = course_dates.copy()
+        if "Batch" not in cd.columns:
+            cd["Batch"] = ""
+        cd["Batch Display"] = cd["Batch"].map(_display_batch_label)
+        cd["_eligible_key"] = np.where(
+            cd.get("email_key", pd.Series("", index=cd.index)).astype(str).str.len() > 3,
+            "e:" + cd.get("email_key", pd.Series("", index=cd.index)).astype(str),
+            "n:" + cd.get("student_key", pd.Series("", index=cd.index)).astype(str) + "|" + cd["Batch"].astype(str),
+        )
+    else:
+        cd = pd.DataFrame(columns=["Batch", "Batch Display", "offered_date_parsed", "deadline_parsed", "_eligible_key"])
+
+    rows = []
+    for _, ev in event_info.iterrows():
+        col = ev.get("column_name")
+        if not col or col not in course_df.columns:
+            continue
+        ev_name = clean_text(ev.get("event_name", "")) or clean_text(col)
+        ev_type = clean_text(ev.get("event_type", "")) or "Other"
+        ev_date = pd.to_datetime(ev.get("event_date", pd.NaT), errors="coerce")
+        ev_date_norm = ev_date.normalize() if pd.notna(ev_date) else pd.NaT
+        attended_mask = pd.to_numeric(course_df[col], errors="coerce").fillna(0).gt(0)
+        attendance = int(attended_mask.sum())
+        if attended_mask.any():
+            adf = course_df.loc[attended_mask].copy()
+            if "Batch" in adf.columns:
+                batch_counts_series = adf.groupby("Batch")["student_name"].count().sort_values(ascending=False)
+                batchwise = ", ".join([f"{int(v)} {_display_batch_label(k)}" for k, v in batch_counts_series.items() if clean_text(k)])
+            else:
+                batchwise = ""
+        else:
+            batchwise = ""
+
+        # Event exists in these source batch sheets.
+        sheet_txt = clean_text(ev.get("sheet", ""))
+        event_sheet_batches = []
+        for sh in re.split(r",|;|\|", sheet_txt):
+            sh = clean_text(sh)
+            if sh and "ug" in sh.lower():
+                event_sheet_batches.append(sh)
+
+        eligible_count = 0
+        eligible_batches = []
+        if not cd.empty and pd.notna(ev_date_norm):
+            # Eligible if event date falls between Offered date and Deadline. If a student's dates are missing, they are not counted as date-eligible.
+            offered = pd.to_datetime(cd.get("offered_date_parsed", pd.NaT), errors="coerce")
+            deadline = pd.to_datetime(cd.get("deadline_parsed", pd.NaT), errors="coerce")
+            elig_mask = offered.notna() & deadline.notna() & (offered <= ev_date_norm) & (deadline >= ev_date_norm)
+            elig = cd.loc[elig_mask].copy()
+            if not elig.empty:
+                eligible_count = int(elig["_eligible_key"].nunique())
+                eligible_batches = sorted([x for x in elig["Batch Display"].dropna().astype(str).map(clean_text).unique().tolist() if x])
+
+        # Active batches = batches where event exists + batches with eligible students during event date.
+        active_batches = sorted(dict.fromkeys([*event_sheet_batches, *eligible_batches]))
+        rows.append({
+            "Event / Activity Name": ev_name,
+            "Event / Activity Date": ev_date_norm,
+            "Event / Activity Type": ev_type,
+            "Attendance": attendance,
+            f"Eligible {course_label} Students": eligible_count,
+            "Active Batches": ", ".join(active_batches),
+            "Batchwise Attended Students": batchwise,
+            "_event_key_name": normalize_name(ev_name),
+            "_event_key_date": ev_date_norm,
+            "_event_key_type": normalize_event_type_for_profile_graph(ev_type),
+        })
+    if not rows:
+        return pd.DataFrame(columns=base_cols)
+    raw = pd.DataFrame(rows)
+    # Merge same event/activity name + date + type across multiple sheets.
+    group_cols = ["_event_key_name", "_event_key_date", "_event_key_type"]
+    def _merge_text(s):
+        vals = []
+        for x in s:
+            for part in str(x).split(","):
+                part = clean_text(part)
+                if part and part not in vals:
+                    vals.append(part)
+        return ", ".join(vals)
+    out = raw.groupby(group_cols, dropna=False, as_index=False).agg({
+        "Event / Activity Name": "first",
+        "Event / Activity Date": "first",
+        "Event / Activity Type": "first",
+        "Attendance": "sum",
+        f"Eligible {course_label} Students": "max",
+        "Active Batches": _merge_text,
+        "Batchwise Attended Students": _merge_text,
+    })
+    out = out[base_cols].sort_values("Event / Activity Date", ascending=False, na_position="last").reset_index(drop=True)
+    return out
+
 def render_courses_page(data):
     st.subheader("Courses")
     course_tabs = ["BFAI UG", "BSAI UG", "BMT UG", "IBMT UG"]
@@ -2661,6 +2794,13 @@ def render_courses_page(data):
                 st.warning(f"No matching UG batch activity rows found for {title}. The student list above is still shown from Dates sheet if available.")
                 continue
             render_sheet_detail(title, course_df, course_ctx, prefix, data=data)
+            course_event_table = build_course_event_attendance_table(data, course_label, course_df, course_ctx)
+            if not course_event_table.empty:
+                course_event_table_display = course_event_table.copy()
+                course_event_table_display["Event / Activity Date"] = pd.to_datetime(course_event_table_display["Event / Activity Date"], errors="coerce").dt.strftime("%d %b %Y").fillna("")
+                st.markdown("#### Course Event / Activity Attendance Details")
+                st.caption("Merged by same event/activity name, date and type across UG batch sheets. Eligible students are counted from Dates → Course using Offered Date to Deadline.")
+                st.dataframe(course_event_table_display, use_container_width=True, hide_index=True, height=420, key=f"{prefix}_course_merged_event_attendance")
 
 def render_program_page(title, sheets, data, page_prefix):
     st.subheader(title)
