@@ -2636,6 +2636,19 @@ def build_course_activity_context(course_label, data):
         if src_df.empty:
             continue
 
+        # Courses section only: ensure a visible Batch column is always present
+        # in Top Students / Best Upgrade Targets. Some UG batch sheets either
+        # do not carry a Batch column or store it as B7/7/blank, so use the
+        # source sheet name as the reliable batch label and keep it in the
+        # displayed Batch column (e.g. "UG B7").
+        inferred_batch_label = infer_batch_group_from_sheet_name(s)
+        if "Batch" not in src_df.columns:
+            src_df["Batch"] = inferred_batch_label
+        else:
+            src_df["Batch"] = src_df["Batch"].map(lambda x: _display_batch_label(x) or inferred_batch_label)
+            src_df.loc[src_df["Batch"].astype(str).str.strip().eq(""), "Batch"] = inferred_batch_label
+        src_df["Batch"] = src_df["Batch"].map(lambda x: _display_batch_label(x) if clean_text(x) != inferred_batch_label else inferred_batch_label)
+
         ctx = data.get("activity_ctx", {}).get(s, {})
         ei = ctx.get("event_info", pd.DataFrame())
         rename_map = {}
