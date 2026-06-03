@@ -216,6 +216,13 @@ def map_profile_plot_event_type(event_type: str) -> str:
     return clean_text(event_type) or "Other"
 
 
+
+def normalize_event_type_for_profile_graph(event_type: str) -> str:
+    """Compatibility alias used by Courses event table.
+    Keeps the same event-type grouping as Student Profile graphs.
+    """
+    return map_profile_plot_event_type(event_type)
+
 def normalize_community_status(x):
     s = clean_text(x).strip().lower()
     if s in {"tetr x", "tetrx", "added to term 0"}:
