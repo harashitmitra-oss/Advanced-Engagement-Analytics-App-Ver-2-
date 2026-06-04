@@ -4428,11 +4428,63 @@ def _render_true_retention_overview(data):
         st.dataframe(top_events.rename(columns={"event_name": "Event", "event_type": "Activity Type"}), use_container_width=True, height=360, key="new_ret_top_events_table")
 
 
-def _build_retention_student_postpayment_table(paid_df: pd.DataFrame, events_df: pd.DataFrame, program: str) -> pd.DataFrame:
+def _retention_prepayment_activity_count_for_student(data: dict, stu: pd.Series, program: str) -> int:
+    """Count deduped batch-sheet activities attended before the student's payment date.
+    Used only for Retention UG/PG tables. This intentionally checks batch sheets,
+    not Tetr-X sheets, and keeps other dashboard logic untouched.
+    """
+    pay_dt = pd.to_datetime(stu.get("payment_date", pd.NaT), errors="coerce")
+    if pd.isna(pay_dt):
+        return 0
+    pay_dt = pay_dt.normalize()
+    sid_email = clean_text(stu.get("email_key", ""))
+    sid_name = clean_text(stu.get("student_key", ""))
+    if not sid_email and not sid_name:
+        sid_name = normalize_name(stu.get("student_name", ""))
+
+    activities = data.get("activities", {}) if isinstance(data, dict) else {}
+    contexts = data.get("activity_ctx", {}) if isinstance(data, dict) else {}
+    seen = set()
+    for sheet, df in activities.items():
+        if sheet in {"Tetr-X-UG", "Tetr-X-PG"}:
+            continue
+        if infer_program_from_sheet(sheet) != program:
+            continue
+        if df is None or df.empty:
+            continue
+        match = pd.Series(False, index=df.index)
+        if sid_email and "email_key" in df.columns:
+            match = match | df["email_key"].astype(str).eq(sid_email)
+        if sid_name and "student_key" in df.columns:
+            match = match | df["student_key"].astype(str).eq(sid_name)
+        if not match.any():
+            continue
+        ctx = contexts.get(sheet, {}) if isinstance(contexts, dict) else {}
+        event_info = ctx.get("event_info", pd.DataFrame()) if isinstance(ctx, dict) else pd.DataFrame()
+        if event_info is None or event_info.empty:
+            continue
+        sub = df.loc[match].copy()
+        for _, ev in event_info.iterrows():
+            col = ev.get("column_name", "")
+            if not col or col not in sub.columns:
+                continue
+            ev_dt = pd.to_datetime(ev.get("event_date", pd.NaT), errors="coerce")
+            if pd.isna(ev_dt) or ev_dt.normalize() >= pay_dt:
+                continue
+            attended = pd.to_numeric(sub[col], errors="coerce").fillna(0).gt(0).any()
+            if not attended:
+                continue
+            ev_name = clean_text(ev.get("event_name", col)).lower()
+            ev_type = clean_text(ev.get("event_type", "Other")).lower()
+            seen.add((ev_name, ev_type, ev_dt.normalize().strftime("%Y-%m-%d")))
+    return len(seen)
+
+
+def _build_retention_student_postpayment_table(paid_df: pd.DataFrame, events_df: pd.DataFrame, program: str, data: dict = None) -> pd.DataFrame:
     """Student-level post-payment retention table for Retention UG/PG tabs only."""
     columns = [
         "Name", "Email", "Payment Date", "Last Engaged Date", "Days passed since Engaged",
-        "Activities done post payment", "0-15 days", "16-30 days", "31-45 days", "46-60 days", "60+ days",
+        "Activities done pre-payment", "Activities done post payment", "0-15 days", "16-30 days", "31-45 days", "46-60 days", "60+ days",
         "Online Event and Masterclass Attended", "Competition and hackathon Participated",
         "General/Fun/Quiz/poll/fun task Participated", "Names of Events/activities they participated in",
     ]
@@ -4499,6 +4551,7 @@ def _build_retention_student_postpayment_table(paid_df: pd.DataFrame, events_df:
         else:
             event_names = ""
         pay_dt = pd.to_datetime(stu.get("payment_date", pd.NaT), errors="coerce")
+        pre_count = _retention_prepayment_activity_count_for_student(data or {}, stu, program)
         email = clean_text(stu.get("email_key", ""))
         # If the normalized email is unavailable, fall back to any raw email-ish column.
         if not email:
@@ -4512,6 +4565,7 @@ def _build_retention_student_postpayment_table(paid_df: pd.DataFrame, events_df:
             "Payment Date": pay_dt.strftime("%d-%b-%Y") if pd.notna(pay_dt) else "",
             "Last Engaged Date": last_dt.strftime("%d-%b-%Y") if pd.notna(last_dt) else "",
             "Days passed since Engaged": days_since,
+            "Activities done pre-payment": pre_count,
             "Activities done post payment": total_count,
             "0-15 days": _count_between(0, 15),
             "16-30 days": _count_between(16, 30),
@@ -4527,10 +4581,10 @@ def _build_retention_student_postpayment_table(paid_df: pd.DataFrame, events_df:
     return out.sort_values(["Payment Date", "Activities done post payment", "Name"], ascending=[False, False, True]).reset_index(drop=True)
 
 
-def _render_retention_program_student_tab(paid_df: pd.DataFrame, events_df: pd.DataFrame, program: str, key_prefix: str):
+def _render_retention_program_student_tab(paid_df: pd.DataFrame, events_df: pd.DataFrame, program: str, key_prefix: str, data: dict = None):
     st.markdown(f"### Retention {program}")
     st.caption("Status = Admitted students only. All activity counts are deduped post-payment Tetr-X activities after each student's payment date.")
-    table = _build_retention_student_postpayment_table(paid_df, events_df, program)
+    table = _build_retention_student_postpayment_table(paid_df, events_df, program, data=data)
     if table.empty:
         st.info(f"No admitted Tetr-X {program} students with usable payment dates were found.")
         return
@@ -4554,9 +4608,9 @@ def render_true_retention_page(data):
         _render_true_retention_overview(data)
     paid_df, events_df, occurrences_df, available_df, metrics = build_retention_analytics_v2(data)
     with tabs[1]:
-        _render_retention_program_student_tab(paid_df, events_df, "UG", "retention_ug")
+        _render_retention_program_student_tab(paid_df, events_df, "UG", "retention_ug", data=data)
     with tabs[2]:
-        _render_retention_program_student_tab(paid_df, events_df, "PG", "retention_pg")
+        _render_retention_program_student_tab(paid_df, events_df, "PG", "retention_pg", data=data)
 
 def render_recent_activity_page(data):
     st.subheader("Recent Activity")
