@@ -2013,7 +2013,13 @@ def render_sheet_detail(sheet_name, df, ctx, prefix, data=None):
 
 
 
-def collect_student_profile_events(data, email_key: str, student_key: str, student_name: str, pay_dt=pd.NaT, offered_dt=pd.NaT, deadline_dt=pd.NaT):
+def collect_student_profile_events(data, email_key: str, student_key: str, student_name: str, pay_dt=pd.NaT, offered_dt=pd.NaT, deadline_dt=pd.NaT, mobile_key: str = ""):
+    """Collect and dedupe all attended events for a student profile.
+
+    Robust matching is important for UG records because some UG batch rows can
+    have email/phone/name variations. Match order is email, normalized name,
+    then normalized phone suffix as a fallback.
+    """
     rows = []
     for sheet, ctx in data.get("activity_ctx", {}).items():
         sdf = data.get("activities", {}).get(sheet, pd.DataFrame())
@@ -2024,6 +2030,14 @@ def collect_student_profile_events(data, email_key: str, student_key: str, stude
             mask = mask | sdf["email_key"].astype(str).eq(email_key)
         if student_key and "student_key" in sdf.columns:
             mask = mask | sdf["student_key"].astype(str).eq(student_key)
+        if mobile_key and "mobile_key" in sdf.columns:
+            mk = normalize_phone(mobile_key)
+            if mk:
+                # compare full normalized phone and last-10 digits to handle country-code differences
+                sm = sdf["mobile_key"].astype(str).map(normalize_phone)
+                mask = mask | sm.eq(mk)
+                if len(mk) >= 10:
+                    mask = mask | sm.str.endswith(mk[-10:], na=False)
         part = sdf.loc[mask].copy()
         if part.empty:
             continue
@@ -2209,13 +2223,29 @@ def render_student_profile(data):
     pdf_payloads = []
 
     for i, student_name in enumerate(final_names):
-        matches = overview_df[overview_df["student_name"].str.lower() == student_name.lower()]
-        if matches.empty:
-            matches = overview_df[overview_df["student_key"] == normalize_name(student_name)]
+        # Robust master lookup: exact display-name match first, then normalized name,
+        # then a conservative contains fallback. This prevents UG profiles from going
+        # blank when names have extra spaces/case/punctuation differences.
+        q_name = clean_text(student_name)
+        q_key = normalize_name(q_name)
+        matches = overview_df[overview_df["student_name"].astype(str).str.lower().str.strip() == q_name.lower()]
+        if matches.empty and "student_key" in overview_df.columns:
+            matches = overview_df[overview_df["student_key"].astype(str).eq(q_key)]
+        if matches.empty and q_key and "student_key" in overview_df.columns:
+            matches = overview_df[overview_df["student_key"].astype(str).str.contains(re.escape(q_key), na=False)]
         if matches.empty:
             st.warning(f"No master profile found for {student_name}")
             continue
 
+        # If duplicate names exist, prefer the row with email/payment/context available.
+        if len(matches) > 1:
+            matches = matches.copy()
+            matches["_profile_rank"] = (
+                matches.get("email_key", pd.Series("", index=matches.index)).astype(str).ne("").astype(int) * 3
+                + pd.to_datetime(matches.get("resolved_payment_date", pd.Series(pd.NaT, index=matches.index)), errors="coerce").notna().astype(int) * 2
+                + matches.get("Batch", pd.Series("", index=matches.index)).astype(str).ne("").astype(int)
+            )
+            matches = matches.sort_values("_profile_rank", ascending=False)
         master = matches.iloc[0]
         email_key = master.get("email_key", "")
         name_key = master.get("student_key", "")
@@ -2228,13 +2258,28 @@ def render_student_profile(data):
                 pmask = pmask | profile_source_df["email_key"].astype(str).eq(email_key)
             if name_key and "student_key" in profile_source_df.columns:
                 pmask = pmask | profile_source_df["student_key"].astype(str).eq(name_key)
+            mobile_key = master.get("mobile_key", "")
+            if mobile_key and "mobile_key" in profile_source_df.columns:
+                mk = normalize_phone(mobile_key)
+                sm = profile_source_df["mobile_key"].astype(str).map(normalize_phone)
+                pmask = pmask | sm.eq(mk)
+                if len(mk) >= 10:
+                    pmask = pmask | sm.str.endswith(mk[-10:], na=False)
             related_df = profile_source_df.loc[pmask].copy()
             if "profile_source" in related_df.columns:
                 related_df = related_df[related_df["profile_source"].astype(str).ne("master")].copy()
         else:
             related = []
             for sheet, df in data["activities"].items():
-                part = df[(df["email_key"] == email_key) | (df["student_key"] == name_key)].copy()
+                mobile_key = master.get("mobile_key", "")
+                mask = (df["email_key"] == email_key) | (df["student_key"] == name_key)
+                if mobile_key and "mobile_key" in df.columns:
+                    mk = normalize_phone(mobile_key)
+                    sm = df["mobile_key"].astype(str).map(normalize_phone)
+                    mask = mask | sm.eq(mk)
+                    if len(mk) >= 10:
+                        mask = mask | sm.str.endswith(mk[-10:], na=False)
+                part = df[mask].copy()
                 if not part.empty:
                     related.append(part)
             related_df = pd.concat(related, ignore_index=True) if related else pd.DataFrame()
@@ -2283,7 +2328,7 @@ def render_student_profile(data):
         deadline_dt = pd.to_datetime(dates_row.get("deadline_parsed", pd.NaT), errors="coerce") if dates_row is not None else pd.NaT
         course_val = clean_text(dates_row.get("Course", "")) if dates_row is not None else ""
 
-        profile_event_df = collect_student_profile_events(data, email_key, name_key, master.get("student_name", ""), pay_dt=pay_dt, offered_dt=offered_dt, deadline_dt=deadline_dt)
+        profile_event_df = collect_student_profile_events(data, email_key, name_key, master.get("student_name", ""), pay_dt=pay_dt, offered_dt=offered_dt, deadline_dt=deadline_dt, mobile_key=master.get("mobile_key", ""))
 
         # Use this student's already-deduped events for T-window metrics instead of rebuilding all admitted students.
         stu_window = pd.DataFrame()
