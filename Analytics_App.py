@@ -946,30 +946,101 @@ def parse_winner_sheet(raw: pd.DataFrame):
     return out.reset_index(drop=True)
 
 
+def _detect_master_header_row(raw: pd.DataFrame, max_scan: int = 12):
+    """Detect Master UG/PG header row safely.
+
+    Master sheets normally have headers on row 1 and real student rows from row 4,
+    but the live Google Sheet can shift after new columns are inserted. We score rows
+    using exact/near header labels so Master UG does not silently load as empty.
+    """
+    if raw is None or raw.empty:
+        return None
+    best_i, best_score = None, -1
+    for i in range(min(max_scan, raw.shape[0])):
+        vals = [clean_text(v).lower() for v in raw.iloc[i].tolist()]
+        score = 0
+        if any(v in {"name", "student name", "student names", "full name"} for v in vals):
+            score += 10
+        if any("email" in v for v in vals):
+            score += 6
+        if any("country" in v for v in vals):
+            score += 3
+        if any(v == "status" or v.endswith(" status") for v in vals):
+            score += 3
+        if any("payment" in v for v in vals):
+            score += 2
+        if score > best_score:
+            best_i, best_score = i, score
+    return best_i if best_score >= 12 else 0
+
+
+def _first_exact_or_contains_col(df: pd.DataFrame, exact_candidates, contains_candidates=None, hard_excludes=None):
+    """Prefer exact header matches, then safe contains matches."""
+    hard_excludes = [clean_text(x).lower() for x in (hard_excludes or [])]
+    normalized = {clean_text(c).lower(): c for c in df.columns}
+    for cand in exact_candidates:
+        key = clean_text(cand).lower()
+        if key in normalized:
+            return normalized[key]
+    contains_candidates = contains_candidates or exact_candidates
+    for cand in contains_candidates:
+        key = clean_text(cand).lower()
+        for c in df.columns:
+            low = clean_text(c).lower()
+            if any(ex in low for ex in hard_excludes):
+                continue
+            if key and key in low:
+                return c
+    return None
+
+
 def parse_master_sheet(raw: pd.DataFrame, program: str, sheet_name: str):
-    header_row = 0
-    data_start = 3
+    header_row = _detect_master_header_row(raw)
+    if header_row is None:
+        return _empty_activity_sheet(sheet_name, f"Header row not found in {sheet_name}")
+
+    # Master sheets have two summary rows directly under the header; real students start on row 4.
+    # If the header is shifted, preserve that same relative layout.
+    data_start = header_row + 3
+    if raw.shape[0] <= data_start:
+        data_start = header_row + 1
+
     header = make_unique(raw.iloc[header_row].tolist())
     df = raw.iloc[data_start:].copy().reset_index(drop=True)
     df.columns = header
     df = df.dropna(how="all")
 
-    name_col = best_matching_col(df, ["name"])
-    email_col = best_matching_col(df, ["email"])
-    mobile_col = best_matching_col(df, ["mobile", "phone", "contact"])
-    batch_col = best_matching_col(df, ["batch"])
-    country_col = best_matching_col(df, ["country"])
-    income_col = best_matching_col(df, ["income"])
-    status_col = best_matching_col(df, ["status"])
-    payment_col = best_matching_col(df, ["payment"])
-    payment_date_col = best_matching_col(df, ["payment date", "date of payment", "paid date"])
+    name_col = _first_exact_or_contains_col(
+        df,
+        ["Name", "Student Name", "Student Names", "Full Name"],
+        ["student name", "student names", "full name", "name"],
+        hard_excludes=["counsellor", "mentor", "persona", "winner", "challenge"],
+    )
+    email_col = _first_exact_or_contains_col(df, ["Email", "Email ID", "Email id", "Student Email"], ["email"])
+    mobile_col = _first_exact_or_contains_col(df, ["Contact Number", "ContactNumber", "Mobile", "Phone", "Phone Number"], ["mobile", "phone", "contact"])
+    batch_col = _first_exact_or_contains_col(df, ["Batch"], ["batch"])
+    country_col = _first_exact_or_contains_col(df, ["Country"], ["country"])
+    income_col = _first_exact_or_contains_col(df, ["Income", "Household Income"], ["income"])
+    status_col = _first_exact_or_contains_col(df, ["Status"], ["status"], hard_excludes=["term 0", "tetr x", "community", "group"])
+    payment_col = _first_exact_or_contains_col(df, ["Payment"], ["payment"], hard_excludes=["date"])
+    payment_date_col = _first_exact_or_contains_col(df, ["Payment Date", "Date of Payment", "Paid Date"], ["payment date", "date of payment", "paid date"])
+
     # Overview active-student source of truth: newly added master-sheet column.
-    # It is intentionally detected before generic event-column parsing so it is not treated as an event.
-    batch_engagement_pct_col = next((c for c in df.columns if clean_text(c).lower() == "engagement % (batch data)"), None)
-    if batch_engagement_pct_col is None:
-        batch_engagement_pct_col = best_matching_col(df, ["engagement % (batch data)", "batch data engagement %"])
-    community_status_col = best_matching_col(df, ["tetr x/term 0 status", "tetr x term 0 status", "term 0 status", "community status", "admitted group"])
-    term_zero_col = best_matching_col(df, ["tetr x/term 0 status", "tetr x term 0 status", "term 0 status", "term zero group", "added to term 0"])
+    batch_engagement_pct_col = _first_exact_or_contains_col(
+        df,
+        ["Engagement % (Batch Data)"],
+        ["engagement % (batch data)", "batch data engagement %"],
+    )
+    community_status_col = _first_exact_or_contains_col(
+        df,
+        ["Tetr X/Term 0 Status", "Tetr X Term 0 Status", "Term Zero Group", "Term 0 Status", "Admitted Group (Batch onwards)", "Admitted Group (Batch Onwards) (working)"],
+        ["tetr x/term 0 status", "tetr x term 0 status", "term zero group", "term 0 status", "community status", "admitted group"],
+    )
+    term_zero_col = _first_exact_or_contains_col(
+        df,
+        ["Tetr X/Term 0 Status", "Tetr X Term 0 Status", "Term Zero Group", "Term 0 Status"],
+        ["tetr x/term 0 status", "tetr x term 0 status", "term zero group", "term 0 status", "term zero"],
+    )
 
     if not name_col:
         return _empty_activity_sheet(sheet_name, f"Name column not found in {sheet_name}")
@@ -982,6 +1053,7 @@ def parse_master_sheet(raw: pd.DataFrame, program: str, sheet_name: str):
     df["student_key"] = df["student_name"].map(normalize_name)
     df["email_key"] = df[email_col].map(normalize_email) if email_col else ""
     df["mobile_key"] = df[mobile_col].map(normalize_phone) if mobile_col else ""
+
     community_base = df[community_status_col].map(clean_text) if community_status_col else pd.Series("", index=df.index)
     if term_zero_col:
         term_zero_series = df[term_zero_col].map(clean_text)
@@ -1000,10 +1072,11 @@ def parse_master_sheet(raw: pd.DataFrame, program: str, sheet_name: str):
         df["master_payment_date_parsed"] = df["master_payment_value"].apply(parse_date_safe)
 
     event_cols = []
-    protected = {name_col, email_col, batch_col, country_col, income_col, status_col, payment_col, payment_date_col,
-                 batch_engagement_pct_col, community_status_col,
+    protected = {name_col, email_col, mobile_col, batch_col, country_col, income_col, status_col, payment_col, payment_date_col,
+                 batch_engagement_pct_col, community_status_col, term_zero_col,
                  "Program", "Batch", "source_sheet", "student_name", "student_key", "email_key", "mobile_key", "community_status_value",
                  "master_is_paid", "master_is_refunded", "master_status_value", "master_payment_value", "master_payment_date_parsed"}
+    protected = {c for c in protected if c is not None}
     for col in df.columns:
         if col in protected:
             continue
@@ -1013,8 +1086,7 @@ def parse_master_sheet(raw: pd.DataFrame, program: str, sheet_name: str):
             df[col] = s.map(normalize_yes_no)
 
     df["participation_count_master"] = df[event_cols].sum(axis=1) if event_cols else 0
-    # Active students in Overview now come from Engagement % (Batch Data) > 0 when that column exists.
-    # Fallback keeps the older behavior for older workbooks.
+
     if batch_engagement_pct_col and batch_engagement_pct_col in df.columns:
         batch_pct = df[batch_engagement_pct_col].apply(parse_numeric_percent)
         if not batch_pct.dropna().empty and batch_pct.max(skipna=True) <= 1.05:
@@ -1024,6 +1096,7 @@ def parse_master_sheet(raw: pd.DataFrame, program: str, sheet_name: str):
     else:
         df["engagement_batch_data_pct"] = np.nan
         df["active_master"] = df["participation_count_master"] > 0
+
     df["is_paid"] = df["master_is_paid"]
     df["is_refunded"] = df["master_is_refunded"]
     df["status_bucket"] = np.select(
@@ -1049,9 +1122,10 @@ def parse_master_sheet(raw: pd.DataFrame, program: str, sheet_name: str):
         "batch_engagement_pct_col": batch_engagement_pct_col,
         "community_status_col": community_status_col,
         "event_cols": event_cols,
+        "header_row": header_row,
+        "data_start_row": data_start,
     }
     return df, ctx
-
 
 
 def _detect_activity_header_row(raw: pd.DataFrame, default_row: int = 5, max_scan: int = 25):
