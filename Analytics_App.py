@@ -4487,6 +4487,7 @@ def _build_retention_student_postpayment_table(paid_df: pd.DataFrame, events_df:
         "Activities done pre-payment", "Activities done post payment", "0-15 days", "16-30 days", "31-45 days", "46-60 days", "60+ days",
         "Online Event and Masterclass Attended", "Competition and hackathon Participated",
         "General/Fun/Quiz/poll/fun task Participated", "Names of Events/activities they participated in",
+        "Date of Activation Post-Payment", "Activation Event/Activity Name - Post Payment",
     ]
     if paid_df is None or paid_df.empty:
         return pd.DataFrame(columns=columns)
@@ -4540,14 +4541,22 @@ def _build_retention_student_postpayment_table(paid_df: pd.DataFrame, events_df:
         online_master = int(sub.loc[type_lower.eq("online events & masterclasses"), "dedupe_key"].nunique()) if (not sub.empty and "dedupe_key" in sub.columns) else 0
         comp_hack = int(sub.loc[type_lower.eq("competitions & hackathons"), "dedupe_key"].nunique()) if (not sub.empty and "dedupe_key" in sub.columns) else 0
         general_fun = int(sub.loc[type_lower.eq("general/fun"), "dedupe_key"].nunique()) if (not sub.empty and "dedupe_key" in sub.columns) else 0
+        activation_dt = pd.NaT
+        activation_event_name = ""
         if not sub.empty:
             names = []
-            for _, e in sub.sort_values("event_date").iterrows():
+            sub_sorted = sub.sort_values(["event_date", "event_name"], na_position="last") if "event_date" in sub.columns else sub.copy()
+            for _, e in sub_sorted.iterrows():
                 nm = clean_text(e.get("event_name", ""))
                 dt = pd.to_datetime(e.get("event_date", pd.NaT), errors="coerce")
                 if nm:
                     names.append(f"{nm} ({dt.strftime('%d-%b-%Y') if pd.notna(dt) else '-'})")
             event_names = "; ".join(dict.fromkeys(names))
+            dated_sub = sub_sorted[pd.to_datetime(sub_sorted.get("event_date", pd.Series(dtype=object)), errors="coerce").notna()].copy()
+            if not dated_sub.empty:
+                first_event = dated_sub.iloc[0]
+                activation_dt = pd.to_datetime(first_event.get("event_date", pd.NaT), errors="coerce")
+                activation_event_name = clean_text(first_event.get("event_name", ""))
         else:
             event_names = ""
         pay_dt = pd.to_datetime(stu.get("payment_date", pd.NaT), errors="coerce")
@@ -4576,6 +4585,8 @@ def _build_retention_student_postpayment_table(paid_df: pd.DataFrame, events_df:
             "Competition and hackathon Participated": comp_hack,
             "General/Fun/Quiz/poll/fun task Participated": general_fun,
             "Names of Events/activities they participated in": event_names,
+            "Date of Activation Post-Payment": activation_dt.strftime("%d-%b-%Y") if pd.notna(activation_dt) else "",
+            "Activation Event/Activity Name - Post Payment": activation_event_name,
         })
     out = pd.DataFrame(rows, columns=columns)
     return out.sort_values(["Payment Date", "Activities done post payment", "Name"], ascending=[False, False, True]).reset_index(drop=True)
