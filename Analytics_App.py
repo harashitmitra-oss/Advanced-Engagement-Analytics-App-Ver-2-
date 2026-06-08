@@ -4497,14 +4497,16 @@ def _build_retention_student_postpayment_table(paid_df: pd.DataFrame, events_df:
     base["program"] = base.get("program", "").astype(str)
     base = base[base["program"].eq(program)].copy()
 
-    # Requirement: Status = Admitted students only for these UG/PG Retention tables.
+    # Requirement update: include Status = Admitted plus Deferral students in the UG/PG Retention tables.
+    # UG: include rows whose Tetr-X-UG status contains "Deferral".
+    # PG: include rows whose Tetr-X-PG status contains "Admitted:Deferral" or "Deferral".
+    status_text = base.get("sheet_status_raw", pd.Series("", index=base.index)).fillna("").astype(str).str.strip().str.lower()
     if "retention_is_admitted" in base.columns:
         admitted_mask = base["retention_is_admitted"].fillna(False).astype(bool)
-    elif "sheet_status_raw" in base.columns:
-        admitted_mask = base["sheet_status_raw"].fillna("").astype(str).str.strip().str.lower().eq("admitted")
     else:
-        admitted_mask = ~base.get("is_churned", pd.Series(False, index=base.index)).fillna(False).astype(bool)
-    base = base[admitted_mask].copy()
+        admitted_mask = status_text.eq("admitted")
+    deferral_mask = status_text.str.contains("deferral", na=False)
+    base = base[(admitted_mask | deferral_mask)].copy()
     if base.empty:
         return pd.DataFrame(columns=columns)
 
@@ -7243,13 +7245,190 @@ def render_activities_page(data):
     with unpaid_pg_tab:
         _render_unpaid_activity_matrix(data, "PG", "Unpaid PG", "activities_unpaid_pg")
 
+# ---------------- Hritabh Page ----------------
+HRITABH_AMA_COLUMNS = [
+    "Welcome webinar",
+    "AMA with Pratham",
+    "AMA with Tarun",
+    "AMA with Amitoj",
+    "AMA with Dr. Garima",
+    "AMA with Capstone",
+    "AMA with Jessica",
+]
+
+
+def _hritabh_ama_label(event_name, event_type):
+    name = clean_text(event_name).lower()
+    typ = _activity_event_type_norm(event_type) if "_activity_event_type_norm" in globals() else clean_text(event_type)
+    if typ == "Online Event":
+        if any(x in name for x in ["shahrose", "welcome webinar", "harshit"]):
+            return "Welcome webinar"
+        if "pratham" in name:
+            return "AMA with Pratham"
+        if "tarun" in name:
+            return "AMA with Tarun"
+        if "amitoj" in name:
+            return "AMA with Amitoj"
+        if "garima" in name:
+            return "AMA with Dr. Garima"
+        if any(x in name for x in ["kritee", "ayush", "saarthak", "sarthak"]):
+            return "AMA with Capstone"
+        if any(x in name for x in ["jessica", "yuliia", "yulia"]):
+            return "AMA with Jessica"
+    return None
+
+
+def _hritabh_student_match_mask(df, email_key="", student_key="", mobile_key=""):
+    if df is None or df.empty:
+        return pd.Series(False, index=[])
+    mask = pd.Series(False, index=df.index)
+    if email_key and "email_key" in df.columns:
+        mask = mask | df["email_key"].astype(str).eq(email_key)
+    if student_key and "student_key" in df.columns:
+        mask = mask | df["student_key"].astype(str).eq(student_key)
+    if mobile_key and "mobile_key" in df.columns:
+        mask = mask | df["mobile_key"].astype(str).eq(mobile_key)
+    return mask
+
+
+def _hritabh_relevant_sheets(program):
+    program = clean_text(program).upper()
+    if program == "UG":
+        return UG_BATCH_SHEETS + ["Tetr-X-UG"]
+    return PG_BATCH_SHEETS + ["Tetr-X-PG"]
+
+
+def _hritabh_collect_attendance(data, program, email_key="", student_key="", mobile_key=""):
+    """Return attended AMA labels and attended masterclass event names for one student.
+    Checks respective batch sheets and Tetr-X sheet; any attendance in any matching row = Yes.
+    """
+    ama_yes = {c: False for c in HRITABH_AMA_COLUMNS}
+    masterclass_yes = {}
+    activities = data.get("activities", {}) if isinstance(data, dict) else {}
+    contexts = data.get("activity_ctx", {}) if isinstance(data, dict) else {}
+    for sheet in _hritabh_relevant_sheets(program):
+        df = activities.get(sheet, pd.DataFrame())
+        ctx = contexts.get(sheet, {}) if isinstance(contexts, dict) else {}
+        if df is None or df.empty:
+            continue
+        event_info = ctx.get("event_info", pd.DataFrame()) if isinstance(ctx, dict) else pd.DataFrame()
+        if event_info is None or event_info.empty:
+            continue
+        mask = _hritabh_student_match_mask(df, email_key, student_key, mobile_key)
+        if not mask.any():
+            continue
+        sub = df.loc[mask].copy()
+        for _, ev in event_info.iterrows():
+            col = ev.get("column_name", "")
+            if not col or col not in sub.columns:
+                continue
+            attended = pd.to_numeric(sub[col], errors="coerce").fillna(0).gt(0).any()
+            if not attended:
+                continue
+            ev_name = clean_text(ev.get("event_name", "")) or clean_text(col)
+            ev_type = _activity_event_type_norm(ev.get("event_type", "")) if "_activity_event_type_norm" in globals() else clean_text(ev.get("event_type", ""))
+            ama_label = _hritabh_ama_label(ev_name, ev_type)
+            if ama_label:
+                ama_yes[ama_label] = True
+            if ev_type == "Masterclass":
+                # Keep a clean, stable column label; same name from multiple sheets remains one column.
+                masterclass_yes[ev_name] = True
+    return ama_yes, masterclass_yes
+
+
+def _hritabh_master_rows(data, program):
+    sheet = "Master UG" if clean_text(program).upper() == "UG" else "Master PG"
+    df = data.get("masters", {}).get(sheet, pd.DataFrame()) if isinstance(data, dict) else pd.DataFrame()
+    ctx = data.get("master_ctx", {}).get(sheet, {}) if isinstance(data, dict) else {}
+    if df is None or df.empty:
+        return pd.DataFrame(), {}
+    return df.copy(), ctx if isinstance(ctx, dict) else {}
+
+
+def _hritabh_build_tables(data, program):
+    master, ctx = _hritabh_master_rows(data, program)
+    base_cols = ["Name", "Email", "Contact Number", "Batch"]
+    if master is None or master.empty:
+        return pd.DataFrame(columns=base_cols + HRITABH_AMA_COLUMNS), pd.DataFrame(columns=base_cols + ["Masterclass"])
+
+    email_col = ctx.get("email_col")
+    mobile_col = ctx.get("mobile_col")
+    batch_col = ctx.get("batch_col")
+    ama_rows = []
+    mc_rows = []
+    all_masterclasses = set()
+    temp_mc_rows = []
+
+    for _, r in master.iterrows():
+        student_name = clean_text(r.get("student_name", ""))
+        email = clean_text(r.get(email_col, "")) if email_col and email_col in r.index else clean_text(r.get("email_key", ""))
+        contact = clean_text(r.get(mobile_col, "")) if mobile_col and mobile_col in r.index else clean_text(r.get("mobile_key", ""))
+        batch = clean_text(r.get(batch_col, "")) if batch_col and batch_col in r.index else clean_text(r.get("Batch", ""))
+        if batch:
+            btoken = normalize_batch_token(batch)
+            if btoken and not btoken.upper().startswith("UG") and not btoken.upper().startswith("PG"):
+                batch = f"{clean_text(program).upper()} {btoken}"
+        email_key = clean_text(r.get("email_key", "")) or normalize_email(email)
+        student_key = clean_text(r.get("student_key", "")) or normalize_name(student_name)
+        mobile_key = clean_text(r.get("mobile_key", "")) or normalize_phone(contact)
+        ama_yes, mc_yes = _hritabh_collect_attendance(data, program, email_key, student_key, mobile_key)
+
+        base = {"Name": student_name, "Email": email, "Contact Number": contact, "Batch": batch}
+        ama_row = dict(base)
+        for col in ["AMA with Amitoj", "AMA with Dr. Garima", "AMA with Pratham", "AMA with Tarun", "AMA with Capstone", "AMA with Jessica", "Welcome webinar"]:
+            ama_row[col] = "Yes" if ama_yes.get(col, False) else "No"
+        ama_rows.append(ama_row)
+        temp_mc_rows.append((base, mc_yes))
+        all_masterclasses.update(mc_yes.keys())
+
+    masterclass_cols = sorted([c for c in all_masterclasses if clean_text(c)], key=lambda x: clean_text(x).lower())
+    for base, mc_yes in temp_mc_rows:
+        row = dict(base)
+        any_mc = False
+        for col in masterclass_cols:
+            val = bool(mc_yes.get(col, False))
+            row[col] = "Yes" if val else "No"
+            any_mc = any_mc or val
+        row["Masterclass"] = "Yes" if any_mc else "No"
+        mc_rows.append(row)
+
+    ama_order = ["Name", "Email", "Contact Number", "Batch", "AMA with Amitoj", "AMA with Dr. Garima", "AMA with Pratham", "AMA with Tarun", "AMA with Capstone", "AMA with Jessica", "Welcome webinar"]
+    ama_df = pd.DataFrame(ama_rows)
+    if not ama_df.empty:
+        ama_df = ama_df[[c for c in ama_order if c in ama_df.columns]]
+    mc_order = base_cols + masterclass_cols + ["Masterclass"]
+    mc_df = pd.DataFrame(mc_rows)
+    if not mc_df.empty:
+        mc_df = mc_df[[c for c in mc_order if c in mc_df.columns]]
+    return ama_df, mc_df
+
+
+def render_hritabh_page(data):
+    st.subheader("Hritabh")
+    st.caption("Attendance matrix from Master UG/PG order, matched against respective batch sheets and Tetr-X sheets. A Yes means the student attended at least once in any matching sheet.")
+    tabs = st.tabs(["UG", "PG"])
+    for tab, program in zip(tabs, ["UG", "PG"]):
+        with tab:
+            ama_df, mc_df = _hritabh_build_tables(data, program)
+            st.markdown(f"### {program} AMA Attendance")
+            if ama_df.empty:
+                st.info(f"No {program} master records found.")
+            else:
+                st.dataframe(ama_df, use_container_width=True, hide_index=True, height=520, key=f"hritabh_{program.lower()}_ama_table")
+            st.markdown(f"### {program} Masterclass Attendance")
+            if mc_df.empty:
+                st.info(f"No {program} masterclass attendance records found.")
+            else:
+                st.dataframe(mc_df, use_container_width=True, hide_index=True, height=560, key=f"hritabh_{program.lower()}_masterclass_table")
+
+
 def main():
     cfg = resolve_source()
     render_header(cfg)
 
     with st.sidebar:
         st.markdown("## 🧭 Navigation")
-        default_pages = ["Overview", "Recent Activity", "Success Metrics", "Student Profile", "UG", "PG", "Courses", "UG vs PG", "Tetr-X", "T-7 & T+7 Analysis", "Conversion", "Retention", "Refund Analytics", "Activities"]
+        default_pages = ["Overview", "Recent Activity", "Success Metrics", "Student Profile", "UG", "PG", "Courses", "UG vs PG", "Tetr-X", "T-7 & T+7 Analysis", "Conversion", "Retention", "Refund Analytics", "Activities", "Hritabh"]
         default_index = default_pages.index(st.session_state.get("nav_page", "Overview")) if st.session_state.get("nav_page", "Overview") in default_pages else 0
         page = st.radio("Go to", default_pages, index=default_index, label_visibility="collapsed", key="nav")
         st.session_state["nav_page"] = page
@@ -7299,6 +7478,8 @@ def main():
         render_recent_activity_page(data)
     elif page == "Refund Analytics":
         render_refund_analytics_page(data)
+    elif page == "Hritabh":
+        render_hritabh_page(data)
 
 
 if __name__ == "__main__":
