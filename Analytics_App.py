@@ -4169,7 +4169,21 @@ def build_retention_analytics_v2(data):
         # Use existing parser flags as fallback only; exact Admitted rule remains strict.
         if "sheet_is_refunded" in frame.columns:
             frame["retention_is_refunded"] = frame["retention_is_refunded"] | frame["sheet_is_refunded"].fillna(False).astype(bool)
-        frame["retention_in_paid_cohort"] = frame["retention_is_admitted"] | frame["retention_is_refunded"]
+
+        # Retention UG/PG requirement: include deferral students from Tetr-X sheets in the
+        # student-level Retention tables. The cohort builder must include them here first;
+        # otherwise they never reach _build_retention_student_postpayment_table(...).
+        # UG: Status contains "Deferral". PG: Status contains "Admitted:Deferral" or "Deferral".
+        frame["retention_is_deferral"] = broad_status_text.str.contains("deferral", case=False, na=False)
+        if "sheet_status_raw" in frame.columns:
+            raw_status = frame["sheet_status_raw"].fillna("").astype(str).str.strip().str.lower()
+            frame["retention_is_deferral"] = frame["retention_is_deferral"] | raw_status.str.contains("deferral", na=False)
+
+        frame["retention_in_paid_cohort"] = (
+            frame["retention_is_admitted"]
+            | frame["retention_is_refunded"]
+            | frame["retention_is_deferral"]
+        )
         tx_rows.append(frame)
 
     empty_paid = pd.DataFrame(columns=["student_id", "student_name", "program", "payment_date", "is_churned", "is_retained_60d"])
@@ -4188,7 +4202,8 @@ def build_retention_analytics_v2(data):
     # Churn/refund is any refund row for the student in Tetr-X. Keep one cohort row per student.
     refunded_ids = set(cohort_all.loc[cohort_all["retention_is_refunded"].fillna(False).astype(bool), "student_id"].astype(str).tolist())
     admitted_ids = set(cohort_all.loc[cohort_all["retention_is_admitted"].fillna(False).astype(bool), "student_id"].astype(str).tolist())
-    cohort_ids = admitted_ids | refunded_ids
+    deferral_ids = set(cohort_all.loc[cohort_all.get("retention_is_deferral", pd.Series(False, index=cohort_all.index)).fillna(False).astype(bool), "student_id"].astype(str).tolist())
+    cohort_ids = admitted_ids | refunded_ids | deferral_ids
     cohort_all = cohort_all[cohort_all["student_id"].astype(str).isin(cohort_ids)].copy()
     cohort = cohort_all.sort_values(["payment_date", "student_name"], na_position="last").drop_duplicates("student_id", keep="first").reset_index(drop=True)
     cohort["is_churned"] = cohort["student_id"].astype(str).isin(refunded_ids)
