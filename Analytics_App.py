@@ -7437,13 +7437,245 @@ def render_hritabh_page(data):
                 st.dataframe(mc_df, use_container_width=True, hide_index=True, height=560, key=f"hritabh_{program.lower()}_masterclass_table")
 
 
+
+# ---------------- Community Impact ----------------
+
+def _community_impact_paid_students(data: dict) -> pd.DataFrame:
+    """Paid cohort for Community Impact.
+
+    Source of truth: Tetr-X sheets. Include Admitted + Deferral students, exclude any refund rows.
+    Payment date is the Tetr-X payment_date_parsed field. Touchpoints are pre-payment batch-sheet
+    activities, deduped by student + event name + event type + date.
+    """
+    rows = []
+    activities = data.get("activities", {}) or {}
+    activity_ctx = data.get("activity_ctx", {}) or {}
+    dates_df = data.get("dates_df", pd.DataFrame())
+
+    for tx_sheet in TX_SHEETS:
+        tx = activities.get(tx_sheet, pd.DataFrame())
+        if tx is None or tx.empty:
+            continue
+        ctx = activity_ctx.get(tx_sheet, {}) or {}
+        program = "UG" if tx_sheet.endswith("UG") else "PG"
+        country_col = ctx.get("country_col")
+        income_col = ctx.get("income_col")
+        mobile_col = ctx.get("mobile_col")
+        for _, r in tx.iterrows():
+            name = clean_text(r.get("student_name", ""))
+            email = clean_text(r.get("email_key", ""))
+            student_key = clean_text(r.get("student_key", "")) or normalize_name(name)
+            sid = clean_text(student_unique_id_from_row(r))
+            if not sid:
+                continue
+            status_raw = clean_text(r.get("sheet_status_raw", ""))
+            status_l = status_raw.lower()
+            is_refund = "refund" in status_l
+            is_paid_or_deferral = status_l.strip() == "admitted" or "deferral" in status_l
+            if is_refund or not is_paid_or_deferral:
+                continue
+            pay_dt = pd.to_datetime(r.get("payment_date_parsed", pd.NaT), errors="coerce")
+            batch = clean_text(r.get("Batch", ""))
+            country = clean_text(r.get(country_col, "")) if country_col and country_col in r.index else clean_text(r.get("Country", ""))
+            income = clean_text(r.get(income_col, "")) if income_col and income_col in r.index else clean_text(r.get("Income", ""))
+            phone = clean_text(r.get(mobile_col, "")) if mobile_col and mobile_col in r.index else clean_text(r.get("mobile_key", ""))
+            drow = find_student_dates_row(dates_df, name, email, student_key, program, batch) if dates_df is not None and not dates_df.empty else None
+            offered_dt = pd.to_datetime(drow.get("offered_date_parsed", pd.NaT), errors="coerce") if drow is not None else pd.NaT
+            deadline_dt = pd.to_datetime(drow.get("deadline_parsed", pd.NaT), errors="coerce") if drow is not None else pd.NaT
+            rows.append({
+                "student_id": sid,
+                "Name": name,
+                "Email": email,
+                "Country": country,
+                "Income": income,
+                "Phone": phone,
+                "UG/PG": program,
+                "Batch": batch,
+                "Status": status_raw,
+                "Payment Date": pay_dt,
+                "Offered Date": offered_dt,
+                "Deadline": deadline_dt,
+                "source_sheet": tx_sheet,
+                "student_key": student_key,
+                "email_key": email,
+            })
+
+    cohort = pd.DataFrame(rows)
+    if cohort.empty:
+        return pd.DataFrame(columns=["student_id", "Name", "Email", "Country", "UG/PG", "Batch", "Payment Date", "Offered Date", "Total Touchpoints (n)", "Impact score", "Impact"])
+
+    # Deduplicate by student id; retain earliest usable payment date and first non-empty descriptors.
+    out_rows = []
+    for sid, g in cohort.groupby("student_id", dropna=False):
+        g = g.copy()
+        pay_dates = pd.to_datetime(g["Payment Date"], errors="coerce").dropna()
+        offer_dates = pd.to_datetime(g["Offered Date"], errors="coerce").dropna()
+        first = g.iloc[0].copy()
+        first["Payment Date"] = pay_dates.min() if not pay_dates.empty else pd.NaT
+        first["Offered Date"] = offer_dates.min() if not offer_dates.empty else pd.NaT
+        for col in ["Name", "Email", "Country", "Income", "Phone", "Batch", "Status", "source_sheet", "student_key", "email_key", "UG/PG"]:
+            vals = [clean_text(x) for x in g[col].tolist() if clean_text(x)] if col in g.columns else []
+            if vals:
+                first[col] = vals[0]
+        out_rows.append(first.to_dict())
+    cohort = pd.DataFrame(out_rows).reset_index(drop=True)
+
+    touchpoints = []
+    for _, r in cohort.iterrows():
+        pay_dt = pd.to_datetime(r.get("Payment Date", pd.NaT), errors="coerce")
+        offered_dt = pd.to_datetime(r.get("Offered Date", pd.NaT), errors="coerce")
+        deadline_dt = pd.to_datetime(r.get("Deadline", pd.NaT), errors="coerce")
+        ev = collect_student_profile_events(
+            data,
+            clean_text(r.get("email_key", "")),
+            clean_text(r.get("student_key", "")),
+            clean_text(r.get("Name", "")),
+            pay_dt=pay_dt,
+            offered_dt=offered_dt,
+            deadline_dt=deadline_dt,
+        )
+        if ev is None or ev.empty or pd.isna(pay_dt):
+            n = 0
+        else:
+            ev2 = ev.copy()
+            ev2["event_date"] = pd.to_datetime(ev2.get("event_date", pd.NaT), errors="coerce")
+            source = ev2.get("source_group", pd.Series("", index=ev2.index)).astype(str).str.lower()
+            # Pre-payment touchpoints come from batch sheets and include payment-date activities because we do not have times.
+            mask = source.str.contains("batch", na=False) & ev2["event_date"].notna() & ev2["event_date"].le(pay_dt.normalize())
+            n = int(ev2.loc[mask, "dedupe_key"].nunique()) if "dedupe_key" in ev2.columns else int(mask.sum())
+        touchpoints.append(n)
+
+    cohort["Total Touchpoints (n)"] = touchpoints
+
+    def _impact_score(n):
+        try:
+            n = int(n)
+        except Exception:
+            n = 0
+        if n <= 0:
+            return 0.0, "No Impact"
+        if n <= 3:
+            return 0.33, "Low Impact"
+        if n <= 7:
+            return 0.66, "Medium Impact"
+        return 1.0, "High Impact"
+
+    vals = cohort["Total Touchpoints (n)"].apply(_impact_score)
+    cohort["Impact score"] = vals.apply(lambda x: x[0])
+    cohort["Impact"] = vals.apply(lambda x: x[1])
+    cohort["Days from Offer to Payment"] = (pd.to_datetime(cohort["Payment Date"], errors="coerce") - pd.to_datetime(cohort["Offered Date"], errors="coerce")).dt.days
+
+    def _pay_bucket(days):
+        if pd.isna(days):
+            return "Unknown"
+        try:
+            d = int(days)
+        except Exception:
+            return "Unknown"
+        if d <= 5:
+            return "1-5"
+        if d <= 10:
+            return "6-10"
+        if d <= 15:
+            return "11-15"
+        if d <= 20:
+            return "16-20"
+        if d <= 25:
+            return "21-25"
+        if d <= 30:
+            return "26-30"
+        return "30+"
+    cohort["Payment After Offer Range"] = cohort["Days from Offer to Payment"].apply(_pay_bucket)
+    return cohort
+
+
+def _format_community_impact_table(df: pd.DataFrame) -> pd.DataFrame:
+    if df is None or df.empty:
+        return pd.DataFrame()
+    out = df.copy()
+    for col in ["Payment Date", "Offered Date", "Deadline"]:
+        if col in out.columns:
+            out[col] = pd.to_datetime(out[col], errors="coerce").dt.strftime("%d %b %Y").fillna("")
+    cols = ["Name", "Email", "Country", "UG/PG", "Batch", "Payment Date", "Offered Date", "Total Touchpoints (n)", "Impact score", "Impact"]
+    return out[[c for c in cols if c in out.columns]].sort_values(["Impact score", "Total Touchpoints (n)", "Name"], ascending=[False, False, True])
+
+
+def _render_community_impact_scope(df: pd.DataFrame, scope_label: str, key_prefix: str):
+    st.markdown(f"### {scope_label}")
+    if df is None or df.empty:
+        st.info(f"No paid/admitted/deferral non-refund students found for {scope_label}.")
+        return
+
+    total_students = int(df["student_id"].nunique()) if "student_id" in df.columns else int(len(df))
+    total_score = float(pd.to_numeric(df.get("Impact score", 0), errors="coerce").fillna(0).sum())
+    impact_counts = df.get("Impact", pd.Series(dtype=str)).value_counts().to_dict()
+    c1, c2, c3, c4, c5 = st.columns(5)
+    c1.metric("Paid Students", f"{total_students:,}")
+    c2.metric("Total Impact Score", f"{total_score:.2f}")
+    c3.metric("No Impact", f"{int(impact_counts.get('No Impact', 0)):,}")
+    c4.metric("Low Impact", f"{int(impact_counts.get('Low Impact', 0)):,}")
+    c5.metric("Medium + High", f"{int(impact_counts.get('Medium Impact', 0) + impact_counts.get('High Impact', 0)):,}")
+
+    st.markdown("#### Student-Level Community Impact")
+    display = _format_community_impact_table(df)
+    st.dataframe(display, use_container_width=True, hide_index=True, height=430, key=f"{key_prefix}_impact_students")
+
+    imp_order = ["No Impact", "Low Impact", "Medium Impact", "High Impact"]
+    imp_df = pd.DataFrame({"Impact": imp_order, "Admissions": [int(impact_counts.get(x, 0)) for x in imp_order]})
+    a, b = st.columns([1, 1])
+    with a:
+        fig = px.bar(imp_df, x="Impact", y="Admissions", title="Admissions by Community Impact", text="Admissions")
+        fig.update_traces(marker_color=GREEN_2)
+        st.plotly_chart(nice_layout(fig, height=360), use_container_width=True, key=f"{key_prefix}_impact_bar")
+    with b:
+        score_df = df.groupby("Impact", as_index=False)["Impact score"].sum().rename(columns={"Impact score": "Impact Score Sum"})
+        score_df["Impact"] = pd.Categorical(score_df["Impact"], categories=imp_order, ordered=True)
+        score_df = score_df.sort_values("Impact")
+        fig = px.bar(score_df, x="Impact", y="Impact Score Sum", title="Impact Score Contribution", text="Impact Score Sum")
+        fig.update_traces(marker_color=GREEN_3, texttemplate="%{text:.2f}")
+        st.plotly_chart(nice_layout(fig, height=360), use_container_width=True, key=f"{key_prefix}_score_bar")
+
+    st.markdown("#### Payment Timing After Offer")
+    pay_cols = ["Name", "Email", "UG/PG", "Batch", "Offered Date", "Payment Date", "Days from Offer to Payment", "Payment After Offer Range"]
+    timing = df[[c for c in pay_cols if c in df.columns]].copy()
+    for col in ["Payment Date", "Offered Date"]:
+        if col in timing.columns:
+            timing[col] = pd.to_datetime(timing[col], errors="coerce").dt.strftime("%d %b %Y").fillna("")
+    st.dataframe(timing.sort_values(["Payment After Offer Range", "Name"]), use_container_width=True, hide_index=True, height=360, key=f"{key_prefix}_payment_timing_table")
+
+    bucket_order = ["1-5", "6-10", "11-15", "16-20", "21-25", "26-30", "30+", "Unknown"]
+    bdf = df.get("Payment After Offer Range", pd.Series(dtype=str)).value_counts().reindex(bucket_order, fill_value=0).reset_index()
+    bdf.columns = ["Range", "Students"]
+    bdf = bdf[bdf["Students"] > 0].copy()
+    if not bdf.empty:
+        c, d = st.columns([1, 1])
+        with c:
+            fig = px.bar(bdf, x="Range", y="Students", title="Students by Payment Timing Range", text="Students")
+            fig.update_traces(marker_color=GREEN)
+            st.plotly_chart(nice_layout(fig, height=350), use_container_width=True, key=f"{key_prefix}_payment_timing_bar")
+        with d:
+            st.dataframe(bdf, use_container_width=True, hide_index=True, height=350, key=f"{key_prefix}_payment_timing_summary")
+
+
+def render_community_impact_page(data):
+    st.subheader("Community Impact")
+    st.caption("Paid cohort = Tetr-X students with Status = Admitted or Status containing Deferral, excluding rows whose status contains Refund. Touchpoints count deduped batch-sheet activities attended on/before payment date.")
+    cohort = _community_impact_paid_students(data)
+    tabs = st.tabs(["Total", "UG", "PG"])
+    with tabs[0]:
+        _render_community_impact_scope(cohort, "Total", "community_impact_total")
+    with tabs[1]:
+        _render_community_impact_scope(cohort[cohort.get("UG/PG", pd.Series(dtype=str)).astype(str).str.upper().eq("UG")].copy() if not cohort.empty else cohort, "UG", "community_impact_ug")
+    with tabs[2]:
+        _render_community_impact_scope(cohort[cohort.get("UG/PG", pd.Series(dtype=str)).astype(str).str.upper().eq("PG")].copy() if not cohort.empty else cohort, "PG", "community_impact_pg")
+
 def main():
     cfg = resolve_source()
     render_header(cfg)
 
     with st.sidebar:
         st.markdown("## 🧭 Navigation")
-        default_pages = ["Overview", "Recent Activity", "Success Metrics", "Student Profile", "UG", "PG", "Courses", "UG vs PG", "Tetr-X", "T-7 & T+7 Analysis", "Conversion", "Retention", "Refund Analytics", "Activities", "Hritabh"]
+        default_pages = ["Overview", "Recent Activity", "Success Metrics", "Student Profile", "UG", "PG", "Courses", "UG vs PG", "Tetr-X", "T-7 & T+7 Analysis", "Conversion", "Retention", "Refund Analytics", "Community Impact", "Activities", "Hritabh"]
         default_index = default_pages.index(st.session_state.get("nav_page", "Overview")) if st.session_state.get("nav_page", "Overview") in default_pages else 0
         page = st.radio("Go to", default_pages, index=default_index, label_visibility="collapsed", key="nav")
         st.session_state["nav_page"] = page
@@ -7493,6 +7725,8 @@ def main():
         render_recent_activity_page(data)
     elif page == "Refund Analytics":
         render_refund_analytics_page(data)
+    elif page == "Community Impact":
+        render_community_impact_page(data)
     elif page == "Hritabh":
         render_hritabh_page(data)
 
