@@ -2013,6 +2013,52 @@ def render_sheet_detail(sheet_name, df, ctx, prefix, data=None):
 
 
 
+def resolve_student_profile_payment_date(data, email_key: str, student_key: str, student_name: str, mobile_key: str = ""):
+    """Resolve payment date for Student Profile directly from Tetr-X sheets.
+
+    Student Profile metrics must work for every Tetr-X paid-status row that can
+    carry a payment date: Admitted, Deferral / Admitted:Deferral, and Refunded.
+    This helper is intentionally used only by Student Profile so no other
+    dashboard sections are affected.
+    """
+    target_name = student_key or normalize_name(student_name)
+    target_mobile = normalize_phone(mobile_key)
+    found_dates = []
+    paid_status_keywords = ("admitted", "deferral", "refund")
+    for sheet in TX_SHEETS:
+        tx = data.get("activities", {}).get(sheet, pd.DataFrame())
+        if tx is None or tx.empty:
+            continue
+        mask = pd.Series(False, index=tx.index)
+        if email_key and "email_key" in tx.columns:
+            mask = mask | tx["email_key"].astype(str).eq(email_key)
+        if target_name and "student_key" in tx.columns:
+            mask = mask | tx["student_key"].astype(str).eq(target_name)
+        if target_mobile and "mobile_key" in tx.columns:
+            mask = mask | tx["mobile_key"].astype(str).eq(target_mobile)
+        part = tx.loc[mask].copy()
+        if part.empty:
+            continue
+
+        # Keep all rows that represent a paid/payment-status record. This includes
+        # Admitted, Deferral / Admitted:Deferral and Refunded rows. If the status
+        # column is missing, keep the matched row and rely on the payment-date value.
+        if "sheet_status_raw" in part.columns:
+            status_low = part["sheet_status_raw"].astype(str).str.lower()
+            status_mask = status_low.apply(lambda v: any(k in v for k in paid_status_keywords))
+            if status_mask.any():
+                part = part.loc[status_mask].copy()
+
+        for c in ["payment_date_parsed", "tx_payment_date", "resolved_payment_date", "Payment date (c3)", "Payment date", "Payment Date"]:
+            if c in part.columns:
+                vals = pd.to_datetime(part[c], errors="coerce").dropna()
+                if not vals.empty:
+                    found_dates.extend(vals.tolist())
+    if found_dates:
+        return min(found_dates)
+    return pd.NaT
+
+
 def collect_student_profile_events(data, email_key: str, student_key: str, student_name: str, pay_dt=pd.NaT, offered_dt=pd.NaT, deadline_dt=pd.NaT):
     rows = []
     for sheet, ctx in data.get("activity_ctx", {}).items():
@@ -2265,7 +2311,20 @@ def render_student_profile(data):
             if not comm_series.empty:
                 batch_comm = comm_series.mode().iat[0] if not comm_series.mode().empty else comm_series.iloc[0]
 
-        pay_dt = pd.to_datetime(master.get("resolved_payment_date", pd.NaT), errors="coerce")
+        # Student Profile payment date must come from Tetr-X for every paid/payment status
+        # that has a payment date: Admitted, Deferral / Admitted:Deferral and Refunded.
+        # Prefer the matched Tetr-X row first, then fall back to the master-resolved value.
+        tx_profile_pay = resolve_student_profile_payment_date(
+            data,
+            email_key,
+            name_key,
+            master.get("student_name", ""),
+            master.get("mobile_key", ""),
+        )
+        if pd.notna(tx_profile_pay):
+            pay_dt = pd.to_datetime(tx_profile_pay, errors="coerce")
+        else:
+            pay_dt = pd.to_datetime(master.get("resolved_payment_date", pd.NaT), errors="coerce")
         if pd.isna(pay_dt) and not related_df.empty and "payment_date_parsed" in related_df.columns:
             rel_pay = pd.to_datetime(related_df["payment_date_parsed"], errors="coerce").dropna()
             if not rel_pay.empty:
@@ -2356,16 +2415,16 @@ def render_student_profile(data):
                 "Community Status (Batch)": batch_comm,
             }
             st.dataframe(pd.DataFrame(master_display.items(), columns=["Field", "Value"]), use_container_width=True, hide_index=True, key=f"profile_info_{i}")
-        admitted_flag = clean_text(master.get("resolved_status", "")).lower() == "admitted"
+        profile_has_payment_date = pd.notna(pay_dt)
         with c2:
             stat_row_1 = st.columns(3)
             stat_row_1[0].metric("Total Participation", total_events)
             stat_row_1[1].metric("First 30 Days", first30_count)
-            stat_row_1[2].metric("After Payment", after_paid_count if admitted_flag else 0)
+            stat_row_1[2].metric("After Payment", after_paid_count if profile_has_payment_date else 0)
 
             stat_row_2 = st.columns(2)
-            stat_row_2[0].metric("T-7 Count", t7_count if admitted_flag else 0)
-            stat_row_2[1].metric("T+7 Count", tp7_count if admitted_flag else 0)
+            stat_row_2[0].metric("T-7 Count", t7_count if profile_has_payment_date else 0)
+            stat_row_2[1].metric("T+7 Count", tp7_count if profile_has_payment_date else 0)
 
             stat_row_3 = st.columns(3)
             stat_row_3[0].metric("Winner", winner_count)
