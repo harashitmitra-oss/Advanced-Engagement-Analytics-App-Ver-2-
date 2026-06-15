@@ -281,7 +281,10 @@ def build_recent_activity_data(data, start_date=None, end_date=None):
     batch_student_recent = {}
 
     def _empty_recent_df():
-        return pd.DataFrame(columns=["student_name", "email_key", "Batch", "Program", "recent_attendance_count", "recent_events"])
+        return pd.DataFrame(columns=[
+            "student_name", "email_key", "Batch", "Program", "status",
+            "recent_attendance_count", "recent_events", "recent_active_dates", "reactivation_date"
+        ])
 
     batch_sheet_list = [s for s in (UG_BATCH_SHEETS + PG_BATCH_SHEETS) if s in activities and s in activity_ctx]
     for sheet in batch_sheet_list:
@@ -304,6 +307,8 @@ def build_recent_activity_data(data, start_date=None, end_date=None):
         active_rows = []
         for _, row in df.iterrows():
             attended_names = []
+            attended_dates = []
+            seen_recent_attendance = set()
             for _, ev in recent_events.iterrows():
                 col = ev.get("column_name")
                 if not col or col not in row.index:
@@ -313,17 +318,27 @@ def build_recent_activity_data(data, start_date=None, end_date=None):
                     ev_name = clean_text(ev.get("event_name", "")) or clean_text(col)
                     ev_type = clean_text(ev.get("event_type", "Other")) or "Other"
                     ev_date = pd.to_datetime(ev.get("event_date", pd.NaT), errors="coerce")
+                    dedupe_key = f"{normalize_name(ev_name)}|{clean_text(ev_type).lower()}|{ev_date.strftime('%Y-%m-%d') if pd.notna(ev_date) else ''}"
+                    if dedupe_key in seen_recent_attendance:
+                        continue
+                    seen_recent_attendance.add(dedupe_key)
                     if pd.notna(ev_date):
-                        attended_names.append(f"{ev_name} ({ev_type}, {ev_date.strftime('%d-%b')})")
+                        ev_norm = ev_date.normalize()
+                        attended_dates.append(ev_norm)
+                        attended_names.append(f"{ev_name} ({ev_type}, {ev_norm.strftime('%d-%b-%Y')})")
                     else:
                         attended_names.append(f"{ev_name} ({ev_type})")
+            unique_active_dates = sorted({d for d in attended_dates if pd.notna(d)})
             active_rows.append({
                 "student_name": row.get("student_name", ""),
                 "email_key": row.get("email_key", ""),
                 "Batch": row.get("Batch", infer_batch_group_from_sheet_name(sheet)),
                 "Program": row.get("Program", infer_program_from_sheet(sheet)),
+                "status": clean_text(row.get("sheet_status_raw", row.get("status_value", ""))),
                 "recent_attendance_count": len(attended_names),
                 "recent_events": "; ".join(attended_names),
+                "recent_active_dates": "; ".join([d.strftime('%d-%b-%Y') for d in unique_active_dates]),
+                "reactivation_date": unique_active_dates[0].strftime('%d-%b-%Y') if unique_active_dates else "",
             })
         batch_student_recent[sheet] = pd.DataFrame(active_rows) if active_rows else _empty_recent_df()
 
@@ -4719,7 +4734,7 @@ def render_recent_activity_page(data):
     recent = build_recent_activity_data(data, start_date=start_date, end_date=end_date)
     st.caption(f"Showing activity from {start_date.strftime('%d %b %Y')} to {end_date.strftime('%d %b %Y')}")
 
-    tabs = st.tabs(["Recent Payments", "Recent Active Students", "Recent Inactive Students", "Recent Events"])
+    tabs = st.tabs(["Recent Payments", "Recent Active Students", "Recent Student Activity", "Recent Inactive Students", "Recent Events"])
 
     with tabs[0]:
         recent_payments = recent.get("recent_payments", [])
@@ -4755,6 +4770,61 @@ def render_recent_activity_page(data):
             st.info("No active students were found in recently done events for the selected range.")
 
     with tabs[2]:
+        def _render_recent_student_activity_program(program_label: str):
+            frames = []
+            for sheet in [s for s in (UG_BATCH_SHEETS + PG_BATCH_SHEETS) if s in recent["batch_student_recent"]]:
+                df = recent["batch_student_recent"].get(sheet, pd.DataFrame())
+                if df is None or df.empty:
+                    continue
+                sub = df[df.get("Program", pd.Series("", index=df.index)).astype(str).str.upper().eq(program_label)].copy()
+                if sub.empty:
+                    continue
+                sub = sub[pd.to_numeric(sub.get("recent_attendance_count", 0), errors="coerce").fillna(0).gt(0)].copy()
+                if sub.empty:
+                    continue
+                frames.append(sub)
+            if not frames:
+                st.info(f"No active {program_label} students were found for the selected range.")
+                return
+            combined = pd.concat(frames, ignore_index=True)
+            combined["_sid"] = combined.apply(lambda r: clean_text(r.get("email_key", "")) or normalize_name(r.get("student_name", "")), axis=1)
+            rows = []
+            for _, grp in combined.groupby("_sid", sort=False):
+                first = grp.iloc[0]
+                active_dates = []
+                events = []
+                for _, r in grp.iterrows():
+                    ev_txt = clean_text(r.get("recent_events", ""))
+                    if ev_txt:
+                        events.extend([clean_text(x) for x in ev_txt.split(";") if clean_text(x)])
+                    date_txt = clean_text(r.get("recent_active_dates", ""))
+                    if date_txt:
+                        active_dates.extend([clean_text(x) for x in date_txt.split(";") if clean_text(x)])
+                unique_events = list(dict.fromkeys(events))
+                parsed_dates = sorted([pd.to_datetime(d, errors="coerce", dayfirst=True) for d in set(active_dates) if pd.notna(pd.to_datetime(d, errors="coerce", dayfirst=True))])
+                rows.append({
+                    "Name": clean_text(first.get("student_name", "")),
+                    "Email": clean_text(first.get("email_key", "")),
+                    "Program": program_label,
+                    "Batch": clean_text(first.get("Batch", "")),
+                    "Status": clean_text(first.get("status", "")),
+                    "Recent activities participated count": len(unique_events),
+                    "Recent activities they participated in (with event dates)": "; ".join(unique_events),
+                    "Dates they were active on": "; ".join([d.strftime("%d-%b-%Y") for d in parsed_dates]),
+                    "Date of reactivation": parsed_dates[0].strftime("%d-%b-%Y") if parsed_dates else clean_text(first.get("reactivation_date", "")),
+                })
+            out = pd.DataFrame(rows)
+            if out.empty:
+                st.info(f"No active {program_label} students were found for the selected range.")
+                return
+            out = out.sort_values(["Recent activities participated count", "Name"], ascending=[False, True]).reset_index(drop=True)
+            st.markdown(f"#### {program_label} Table")
+            st.dataframe(out, use_container_width=True, hide_index=True, height=min(520, 80 + 35 * len(out)), key=f"recent_student_activity_{program_label.lower()}")
+
+        _render_recent_student_activity_program("UG")
+        _render_recent_student_activity_program("PG")
+
+    with tabs[3]:
         any_inactive = False
         for sheet in [s for s in (UG_BATCH_SHEETS + PG_BATCH_SHEETS) if s in recent["batch_student_recent"]]:
             df = recent["batch_student_recent"][sheet]
@@ -4769,7 +4839,7 @@ def render_recent_activity_page(data):
         if not any_inactive:
             st.info("No inactive students were found for the selected range.")
 
-    with tabs[3]:
+    with tabs[4]:
         recent_events_df = recent.get("recent_events_df", pd.DataFrame())
         if recent_events_df.empty:
             st.info("No recent events were found in the selected range.")
