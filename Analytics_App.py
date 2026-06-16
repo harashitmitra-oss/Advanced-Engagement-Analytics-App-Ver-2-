@@ -7854,7 +7854,7 @@ def _community_impact_paid_students(data: dict) -> pd.DataFrame:
         comp = _int0(row.get("_Competition Count", 0))
         gen = _int0(row.get("_General/Fun Count", 0))
         winner_count = _int0(row.get("Pre-Payment Winner", 0))
-        all_non_general = n > 0 and gen == 0
+        three_all_non_general = n == 3 and gen == 0
         has_non_general = (om + comp) >= 1
 
         # Upgrade to High Impact.
@@ -7866,8 +7866,8 @@ def _community_impact_paid_students(data: dict) -> pd.DataFrame:
             return 1.0, "High Impact"
 
         # Upgrade Low to Medium when not already upgraded to High.
-        # Keep only: all attended events are non-General/Fun, OR winner count >= 1 with at least one non-General/Fun event.
-        if impact == "Low Impact" and all_non_general:
+        # Keep only: exactly 3 attended events and all are non-General/Fun, OR winner count >= 1 with at least one non-General/Fun event.
+        if impact == "Low Impact" and three_all_non_general:
             return 0.66, "Medium Impact"
         if impact == "Low Impact" and winner_count >= 1 and has_non_general:
             return 0.66, "Medium Impact"
