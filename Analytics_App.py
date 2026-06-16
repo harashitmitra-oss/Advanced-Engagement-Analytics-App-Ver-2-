@@ -1697,8 +1697,11 @@ def render_overview(data):
     )
 
     total_students, total_active, total_paid, total_refunded, ug_students, pg_students, ug_paid, pg_paid, ug_refunded, pg_refunded = overview_metrics(overview_df)
-    joined_wa = int(is_community_in_series(overview_df.get("community_status_value", pd.Series("", index=overview_df.index))).sum()) if not overview_df.empty else 0
-    active_joined = int((overview_df.get("is_active", pd.Series(False, index=overview_df.index)).fillna(False).astype(bool) & is_community_in_series(overview_df.get("community_status_value", pd.Series("", index=overview_df.index)))).sum()) if not overview_df.empty else 0
+    # Overview-only Joined WA rule: include In, TetrX, Tetr X, Added to Term 0, and Left.
+    _overview_comm_series = overview_df.get("community_status_value", pd.Series("", index=overview_df.index)).astype(str)
+    _overview_joined_mask = is_community_in_series(_overview_comm_series) | _overview_comm_series.map(lambda x: clean_text(x).strip().lower() == "left")
+    joined_wa = int(_overview_joined_mask.sum()) if not overview_df.empty else 0
+    active_joined = int((overview_df.get("is_active", pd.Series(False, index=overview_df.index)).fillna(False).astype(bool) & _overview_joined_mask).sum()) if not overview_df.empty else 0
     joined_rate = round((joined_wa / total_students * 100), 1) if total_students else 0
     active_rate = round((total_active / total_students * 100), 1) if total_students else 0
     active_joined_rate = round((active_joined / joined_wa * 100), 1) if joined_wa else 0
@@ -7594,25 +7597,29 @@ def render_hritabh_page(data):
 # ---------------- Community Impact ----------------
 
 def _community_impact_event_bucket(event_type: str) -> str:
-    """Canonical event buckets for Community Impact scoring."""
+    """Canonical event buckets for Community Impact scoring.
+
+    Community Impact grouping:
+    - Online Event + Masterclass are counted together.
+    - Competition + Hackathon are counted together.
+    - General/Fun includes General, Fun, Fun Task, Quiz, and Poll.
+    """
     typ = _activity_event_type_norm(event_type)
     typ_l = clean_text(typ).lower()
     raw_l = clean_text(event_type).lower()
-    if typ == "Masterclass":
-        return "Masterclass"
+    if typ in {"Online Event", "Masterclass"}:
+        return "Online Events & Masterclasses"
     if typ in {"Competition", "Hackathon"}:
         return "Competition"
-    if typ in {"Fun", "Poll"} or any(x in raw_l or x in typ_l for x in ["general", "fun", "poll", "quiz", "fun task"]):
+    if typ in {"General", "Fun", "Fun Task", "Poll", "Quiz"} or any(x in raw_l or x in typ_l for x in ["general", "fun", "poll", "quiz", "fun task"]):
         return "General/Fun"
-    if typ == "Online Event":
-        return "Online Event"
     return clean_text(typ) or "Other"
 
 
 def _community_impact_event_breakdown_text(counts: dict) -> str:
     if not counts:
         return ""
-    ordered = ["Online Event", "Masterclass", "Competition", "General/Fun", "Other"]
+    ordered = ["Online Events & Masterclasses", "Competition", "General/Fun", "Other"]
     parts = []
     for k in ordered:
         v = int(counts.get(k, 0) or 0)
@@ -7646,19 +7653,18 @@ def _community_challenge_matches_event(challenge_name: str, event_names) -> bool
     return False
 
 
-def _community_pre_payment_winner_flag(data: dict, row: pd.Series, prepay_events: pd.DataFrame, pay_dt) -> bool:
-    """Winner/Spotlight flag for Community Impact.
+def _community_pre_payment_winner_count(data: dict, row: pd.Series, pay_dt) -> int:
+    """Winner/Spotlight count for Community Impact.
 
-    Updated rule: do not require matching the winner/spotlight challenge to a pre-payment
-    participated event. If the student appears in Winner sheet as Winner or Spotlight and
-    the announcement date is on/before payment date + 10 days, mark Yes.
+    Rule: mark/count Winner or Spotlight rows for the student from the Winner sheet when
+    the announcement date is on/before payment date + 10 days. We do not require matching
+    the winner challenge to a pre-payment participation event.
     """
     winner_df = data.get("winner_df", pd.DataFrame()) if isinstance(data, dict) else pd.DataFrame()
     if winner_df is None or winner_df.empty:
-        return False
+        return 0
     w = winner_df.copy()
 
-    # Include both Winner and Spotlight rows.
     kind_mask = pd.Series(False, index=w.index)
     if "is_winner" in w.columns:
         kind_mask = kind_mask | w["is_winner"].fillna(False).astype(bool)
@@ -7667,7 +7673,7 @@ def _community_pre_payment_winner_flag(data: dict, row: pd.Series, prepay_events
     if kind_mask.any():
         w = w.loc[kind_mask].copy()
     if w.empty:
-        return False
+        return 0
 
     email = clean_text(row.get("Email", "")) or clean_text(row.get("email_key", ""))
     name_key = clean_text(row.get("student_key", "")) or normalize_name(row.get("Name", ""))
@@ -7678,15 +7684,20 @@ def _community_pre_payment_winner_flag(data: dict, row: pd.Series, prepay_events
         mask = mask | w["student_key"].astype(str).map(clean_text).eq(name_key)
     w = w.loc[mask].copy()
     if w.empty:
-        return False
+        return 0
 
     pay_dt = pd.to_datetime(pay_dt, errors="coerce")
     if pd.isna(pay_dt) or "announcement_date" not in w.columns:
-        return False
+        return 0
     ann = pd.to_datetime(w["announcement_date"], errors="coerce")
-    # Any Winner/Spotlight announced before payment or within 10 days after payment counts.
     w = w.loc[ann.notna() & ann.le(pay_dt.normalize() + pd.Timedelta(days=10))].copy()
-    return not w.empty
+    if w.empty:
+        return 0
+    # Count distinct winner/spotlight records; if challenge names/dates repeat, count once.
+    dedupe_cols = [c for c in ["challenge_key", "announcement_date", "kind", "Challenge name", "Winner/Spotlight"] if c in w.columns]
+    if dedupe_cols:
+        return int(w.drop_duplicates(subset=dedupe_cols).shape[0])
+    return int(len(w))
 
 def _community_impact_paid_students(data: dict) -> pd.DataFrame:
     """Paid cohort for Community Impact.
@@ -7770,8 +7781,8 @@ def _community_impact_paid_students(data: dict) -> pd.DataFrame:
 
     touchpoints = []
     event_breakdowns = []
-    pre_payment_winners = []
-    masterclass_counts = []
+    pre_payment_winner_counts = []
+    online_masterclass_counts = []
     competition_counts = []
     general_fun_counts = []
 
@@ -7808,15 +7819,15 @@ def _community_impact_paid_students(data: dict) -> pd.DataFrame:
 
         touchpoints.append(n)
         event_breakdowns.append(_community_impact_event_breakdown_text(counts))
-        pre_payment_winners.append("Yes" if _community_pre_payment_winner_flag(data, r, prepay, pay_dt) else "No")
-        masterclass_counts.append(int(counts.get("Masterclass", 0)))
+        pre_payment_winner_counts.append(_community_pre_payment_winner_count(data, r, pay_dt))
+        online_masterclass_counts.append(int(counts.get("Online Events & Masterclasses", 0)))
         competition_counts.append(int(counts.get("Competition", 0)))
         general_fun_counts.append(int(counts.get("General/Fun", 0)))
 
     cohort["Total Touchpoints (n)"] = touchpoints
     cohort["Event Breakdown"] = event_breakdowns
-    cohort["Pre-Payment Winner"] = pre_payment_winners
-    cohort["_Masterclass Count"] = masterclass_counts
+    cohort["Pre-Payment Winner"] = pre_payment_winner_counts
+    cohort["_OnlineMasterclass Count"] = online_masterclass_counts
     cohort["_Competition Count"] = competition_counts
     cohort["_General/Fun Count"] = general_fun_counts
 
@@ -7839,24 +7850,25 @@ def _community_impact_paid_students(data: dict) -> pd.DataFrame:
             return 0 if pd.isna(v) else int(v)
         n = _int0(row.get("Total Touchpoints (n)", 0))
         score, impact = _baseline_impact(n)
-        mc = _int0(row.get("_Masterclass Count", 0))
+        om = _int0(row.get("_OnlineMasterclass Count", 0))
         comp = _int0(row.get("_Competition Count", 0))
         gen = _int0(row.get("_General/Fun Count", 0))
-        winner = clean_text(row.get("Pre-Payment Winner", "")).lower() == "yes"
+        winner_count = _int0(row.get("Pre-Payment Winner", 0))
         all_non_general = n > 0 and gen == 0
+        has_non_general = (om + comp) >= 1
 
         # Upgrade to High Impact.
-        if n > 0 and (mc >= 3 or comp >= 3):
+        if n > 0 and (om >= 5 or comp >= 5):
             return 1.0, "High Impact"
-        if impact == "Medium Impact" and winner:
+        if impact == "Medium Impact" and winner_count > 2:
             return 1.0, "High Impact"
-        if impact == "Medium Impact" and n in {6, 7} and all_non_general:
-            return 1.0, "High Impact"
-        if impact == "Low Impact" and winner and all_non_general:
+        if impact == "Medium Impact" and n in {6, 7} and winner_count >= 1:
             return 1.0, "High Impact"
 
         # Upgrade Low to Medium when not already upgraded to High.
-        if impact == "Low Impact" and all_non_general:
+        if impact == "Low Impact" and (om >= 1 or comp >= 1 or all_non_general):
+            return 0.66, "Medium Impact"
+        if impact == "Low Impact" and winner_count >= 1 and (all_non_general or has_non_general):
             return 0.66, "Medium Impact"
         return score, impact
 
