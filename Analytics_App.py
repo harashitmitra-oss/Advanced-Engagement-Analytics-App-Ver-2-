@@ -984,6 +984,10 @@ def parse_master_sheet(raw: pd.DataFrame, program: str, sheet_name: str):
     if batch_engagement_pct_col is None:
         batch_engagement_pct_col = best_matching_col(df, ["engagement % (batch data)", "batch data engagement %"])
     community_status_col = best_matching_col(df, ["tetr x/term 0 status", "tetr x term 0 status", "term 0 status", "community status", "admitted group"])
+    # Overview Joined WA source of truth for Master UG / Master PG.
+    # Keep the raw value because values like "Left" must count as Joined WA in Overview,
+    # while the normalized community status intentionally maps them to Out elsewhere.
+    admitted_group_batch_col = exact_matching_col(df, ["Admitted Group (Batch onwards)"]) or best_matching_col(df, ["admitted group (batch onwards)", "admitted group"])
     term_zero_col = best_matching_col(df, ["tetr x/term 0 status", "tetr x term 0 status", "term 0 status", "term zero group", "added to term 0"])
 
     if not name_col:
@@ -998,6 +1002,7 @@ def parse_master_sheet(raw: pd.DataFrame, program: str, sheet_name: str):
     df["email_key"] = df[email_col].map(normalize_email) if email_col else ""
     df["mobile_key"] = df[mobile_col].map(normalize_phone) if mobile_col else ""
     community_base = df[community_status_col].map(clean_text) if community_status_col else pd.Series("", index=df.index)
+    df["admitted_group_batch_onwards_raw"] = df[admitted_group_batch_col].map(clean_text) if admitted_group_batch_col else community_base
     if term_zero_col:
         term_zero_series = df[term_zero_col].map(clean_text)
         community_base = community_base.where(term_zero_series.eq(""), term_zero_series)
@@ -1063,6 +1068,7 @@ def parse_master_sheet(raw: pd.DataFrame, program: str, sheet_name: str):
         "payment_date_col": payment_date_col,
         "batch_engagement_pct_col": batch_engagement_pct_col,
         "community_status_col": community_status_col,
+        "admitted_group_batch_col": admitted_group_batch_col,
         "event_cols": event_cols,
     }
     return df, ctx
@@ -1697,9 +1703,17 @@ def render_overview(data):
     )
 
     total_students, total_active, total_paid, total_refunded, ug_students, pg_students, ug_paid, pg_paid, ug_refunded, pg_refunded = overview_metrics(overview_df)
-    # Overview-only Joined WA rule: include In, TetrX, Tetr X, Added to Term 0, and Left.
-    _overview_comm_series = overview_df.get("community_status_value", pd.Series("", index=overview_df.index)).astype(str)
-    _overview_joined_mask = is_community_in_series(_overview_comm_series) | _overview_comm_series.map(lambda x: clean_text(x).strip().lower() == "left")
+    # Overview-only Joined WA rule: use Master UG / Master PG `Admitted Group (Batch onwards)`.
+    # Count In, TetrX, Tetr X, Added to Term 0, and Left irrespective of uppercase/lowercase.
+    _overview_comm_series = overview_df.get(
+        "admitted_group_batch_onwards_raw",
+        overview_df.get("community_status_value", pd.Series("", index=overview_df.index))
+    ).astype(str)
+    def _overview_is_joined_wa_value(x):
+        s = clean_text(x).strip().lower().replace("-", " ")
+        s = " ".join(s.split())
+        return s in {"in", "tetrx", "tetr x", "added to term 0", "left"}
+    _overview_joined_mask = _overview_comm_series.map(_overview_is_joined_wa_value).fillna(False).astype(bool)
     joined_wa = int(_overview_joined_mask.sum()) if not overview_df.empty else 0
     active_joined = int((overview_df.get("is_active", pd.Series(False, index=overview_df.index)).fillna(False).astype(bool) & _overview_joined_mask).sum()) if not overview_df.empty else 0
     joined_rate = round((joined_wa / total_students * 100), 1) if total_students else 0
