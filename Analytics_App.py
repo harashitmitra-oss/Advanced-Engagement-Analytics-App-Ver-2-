@@ -7854,11 +7854,16 @@ def _community_impact_paid_students(data: dict) -> pd.DataFrame:
         comp = _int0(row.get("_Competition Count", 0))
         gen = _int0(row.get("_General/Fun Count", 0))
         winner_count = _int0(row.get("Pre-Payment Winner", 0))
+        non_general_count = max(0, n - gen)
         three_all_non_general = n == 3 and gen == 0
-        has_non_general = (om + comp) >= 1
+        has_non_general = non_general_count >= 1
 
         # Upgrade to High Impact.
         if n > 0 and (om >= 5 or comp >= 5):
+            return 1.0, "High Impact"
+        if winner_count >= 1 and non_general_count >= 3:
+            return 1.0, "High Impact"
+        if winner_count >= 2 and non_general_count >= 1:
             return 1.0, "High Impact"
         if impact == "Medium Impact" and winner_count > 2:
             return 1.0, "High Impact"
