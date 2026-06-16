@@ -1677,12 +1677,19 @@ def render_overview(data):
     country_col = master_ug_ctx.get("country_col") or master_pg_ctx.get("country_col")
     income_col = master_ug_ctx.get("income_col") or master_pg_ctx.get("income_col")
 
-    # Overview-only paid rule: include Admitted + any Deferral / Admitted:Deferral status, exclude refunds.
+    # Overview-only paid rule, based on the source master sheet:
+    # - Master UG: Admitted OR any status containing Deferral
+    # - Master PG: Admitted OR status containing Admitted:Deferral / Admitted: Deferral
+    # Refund rows are excluded from Paid / Admitted.
     overview_df = overview_df.copy()
     _status_for_overview = overview_df.get("resolved_status", overview_df.get("master_status_value", pd.Series("", index=overview_df.index))).astype(str).str.lower()
+    _program_for_overview = overview_df.get("Program", pd.Series("", index=overview_df.index)).astype(str).str.upper().str.strip()
     _refund_for_overview = overview_df.get("is_refunded", pd.Series(False, index=overview_df.index)).fillna(False).astype(bool) | _status_for_overview.str.contains("refund", na=False)
+    _is_admitted_exact = _status_for_overview.str.strip().eq("admitted")
+    _is_ug_deferral = _program_for_overview.eq("UG") & _status_for_overview.str.contains("deferral", na=False)
+    _is_pg_admitted_deferral = _program_for_overview.eq("PG") & _status_for_overview.str.contains(r"admitted\s*:\s*deferral", na=False, regex=True)
     overview_df["is_refunded"] = _refund_for_overview
-    overview_df["is_paid"] = (_status_for_overview.str.strip().eq("admitted") | _status_for_overview.str.contains("deferral", na=False)) & (~_refund_for_overview)
+    overview_df["is_paid"] = (_is_admitted_exact | _is_ug_deferral | _is_pg_admitted_deferral) & (~_refund_for_overview)
     overview_df["status_bucket"] = np.select(
         [overview_df["is_refunded"], overview_df["is_paid"]],
         ["Refunded", "Paid / Admitted"],
@@ -1692,6 +1699,7 @@ def render_overview(data):
     total_students, total_active, total_paid, total_refunded, ug_students, pg_students, ug_paid, pg_paid, ug_refunded, pg_refunded = overview_metrics(overview_df)
     joined_wa = int(is_community_in_series(overview_df.get("community_status_value", pd.Series("", index=overview_df.index))).sum()) if not overview_df.empty else 0
     active_joined = int((overview_df.get("is_active", pd.Series(False, index=overview_df.index)).fillna(False).astype(bool) & is_community_in_series(overview_df.get("community_status_value", pd.Series("", index=overview_df.index)))).sum()) if not overview_df.empty else 0
+    joined_rate = round((joined_wa / total_students * 100), 1) if total_students else 0
     active_rate = round((total_active / total_students * 100), 1) if total_students else 0
     active_joined_rate = round((active_joined / joined_wa * 100), 1) if joined_wa else 0
     paid_rate = round((total_paid / total_students * 100), 1) if total_students else 0
@@ -1699,8 +1707,8 @@ def render_overview(data):
 
     m1, m2, m3, m4, m5, m6 = st.columns(6)
     m1.metric("Total Offered Students", f"{total_students:,}")
-    m2.metric("Joined WA", f"{joined_wa:,}")
-    m3.metric("Active Students", f"{total_active:,}", delta=f"{active_joined_rate}% of Joined WA")
+    m2.metric("Joined WA", f"{joined_wa:,}", delta=f"{joined_rate}% of Total Offered")
+    m3.metric("Active Students", f"{total_active:,}", delta=f"{active_rate}% of Total | {active_joined_rate}% of Joined WA")
     m4.metric("Paid / Admitted", f"{total_paid:,}", delta=f"{paid_rate}% paid")
     m5.metric("Refunded", f"{total_refunded:,}", delta=f"{refunded_rate}% refunded")
     m6.metric("UG vs PG", f"{ug_students:,} / {pg_students:,}")
