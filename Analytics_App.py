@@ -5412,22 +5412,39 @@ def _success_report_group_sets(base: pd.DataFrame, ids: set):
     return out
 
 
-def _success_report_table_from_metrics(metric_sets, offered_sets, visible_groups):
+def _success_report_table_from_metrics(metric_sets, offered_sets, visible_groups, in_community_sets=None):
+    """Build Success Metrics -> Report table.
+
+    Each metric entry can be either:
+    - (metric_name, ids_by_group)
+    - (metric_name, ids_by_group, primary_denominator_sets)
+
+    The primary % uses the row-specific denominator when provided; otherwise it uses Offered.
+    The extra `% of In Community` column always uses Joined WA / In Community as the denominator.
+    """
+    in_community_sets = in_community_sets or {"Total": set(), "UG": set(), "PG": set()}
     rows = []
-    for metric_name, ids_by_group in metric_sets:
+    for entry in metric_sets:
+        if len(entry) >= 3:
+            metric_name, ids_by_group, primary_denoms = entry[0], entry[1], entry[2]
+        else:
+            metric_name, ids_by_group = entry[0], entry[1]
+            primary_denoms = offered_sets
         row = {"Metric": metric_name}
         for group in visible_groups:
             cnt = len(set(ids_by_group.get(group, set())))
-            denom = len(set(offered_sets.get(group, set())))
+            primary_denom = len(set(primary_denoms.get(group, set())))
+            community_denom = len(set(in_community_sets.get(group, set())))
             row[group] = cnt
-            row[f"{group} %"] = round((cnt / denom * 100), 1) if denom else 0.0
+            row[f"{group} %"] = round((cnt / primary_denom * 100), 1) if primary_denom else 0.0
+            row[f"{group} % of In Community"] = round((cnt / community_denom * 100), 1) if community_denom else 0.0
         rows.append(row)
     return pd.DataFrame(rows)
 
 
 def render_success_metrics_report(data):
     st.markdown("### Report")
-    st.caption("Report metrics are calculated as of the selected date. Percentages use Offered Students in the selected filters as the denominator.")
+    st.caption("Report metrics are calculated as of the selected date. `%` uses Offered Students by default, while `and paid` rows use their activated metric as denominator. `% of In Community` uses Joined WA / In Community as denominator.")
 
     base_all = _success_report_student_base(data)
     if base_all.empty:
@@ -5476,7 +5493,7 @@ def render_success_metrics_report(data):
         with f1:
             pending_as_of_date = st.date_input("Report as of date", value=current_as_of, key="success_report_as_of_date_pending")
         with f2:
-            pending_view_choice = st.radio("UG / PG view", ["Total + UG + PG", "UG", "PG"], index=["Total + UG + PG", "UG", "PG"].index(current_view), horizontal=False, key="success_report_program_view_pending")
+            pending_view_choice = st.selectbox("Program", ["Total + UG + PG", "UG", "PG"], index=["Total + UG + PG", "UG", "PG"].index(current_view), key="success_report_program_view_pending")
         with f3:
             pending_batches = st.multiselect("Batches (blank = all)", batch_options, default=current_batches, key="success_report_batches_pending")
         with f4:
@@ -5502,7 +5519,7 @@ def render_success_metrics_report(data):
     selected_batches = [x for x in applied_filters.get("selected_batches", []) if x in batch_options]
     selected_courses = [x for x in applied_filters.get("selected_courses", []) if x in course_options]
 
-    active_filter_bits = [f"As of: {pd.to_datetime(as_of).strftime('%d-%b-%Y')}", f"View: {view_choice}"]
+    active_filter_bits = [f"As of: {pd.to_datetime(as_of).strftime('%d-%b-%Y')}", f"Program: {view_choice}"]
     if selected_batches:
         active_filter_bits.append("Batches: " + ", ".join(selected_batches))
     if selected_courses:
@@ -5555,6 +5572,7 @@ def render_success_metrics_report(data):
         final_admitted_ids = set(payments.loc[final_mask, "student_id"].astype(str).tolist())
 
     joined_ids = set(base.loc[base["community_raw"].map(_success_report_is_joined_wa_value).fillna(False).astype(bool), "student_id"].astype(str).tolist())
+    joined_sets = _success_report_group_sets(base, joined_ids)
     active_ids = set(acts["student_id"].astype(str).tolist()) if not acts.empty else set()
     general_ids = set(acts.loc[acts["event_bucket"].eq("General/Fun"), "student_id"].astype(str).tolist()) if not acts.empty else set()
     event_ids = set(acts.loc[acts["event_bucket"].eq("Online Events + Masterclasses"), "student_id"].astype(str).tolist()) if not acts.empty else set()
@@ -5587,34 +5605,42 @@ def render_success_metrics_report(data):
     def gs(ids):
         return _success_report_group_sets(base, set(ids))
 
+    general_sets = gs(general_ids)
+    event_sets = gs(event_ids)
+    comp_sets = gs(comp_ids)
+    win_sets = gs(win_ids)
+    low_sets = gs(low_ids)
+    med_sets = gs(med_ids)
+    high_sets = gs(high_ids)
+
     metric_sets = [
         ("Offered", offered_sets),
-        ("Onboarded (WA)", gs(joined_ids)),
+        ("Onboarded (WA)", joined_sets),
         ("Activated (1+ touchpoint)", gs(active_ids)),
         ("Medium and high engaged (4+ touchpoints)", gs(med_high_ids)),
         ("Paid", gs(paid_ids)),
         ("Refund", gs(refund_ids)),
         ("Final admitted", gs(final_admitted_ids)),
-        ("Joined WhatsApp", gs(joined_ids)),
-        ("General activated (at least 1 touchpoint)", gs(general_ids)),
-        ("General activated and paid", gs(general_ids & paid_ids)),
-        ("Events activated (at least 1 online event)", gs(event_ids)),
-        ("Events activated and paid", gs(event_ids & paid_ids)),
-        ("Competitions (at least 1 competition)", gs(comp_ids)),
-        ("Competitions activated and paid", gs(comp_ids & paid_ids)),
-        ("Winner/Spotlight activated (at least 1 winner/spotlight)", gs(win_ids)),
-        ("Winner/spotlight and paid", gs(win_ids & paid_ids)),
-        ("Total engagement = {1,3} - Low engagement", gs(low_ids)),
-        ("Low engagement and paid", gs(low_ids & paid_ids)),
-        ("Total engagement = {4,7} - Medium engagement", gs(med_ids)),
-        ("Medium engagement and paid", gs(med_ids & paid_ids)),
-        ("Total engagement = {8,+} - High engagement", gs(high_ids)),
-        ("High engagement and paid", gs(high_ids & paid_ids)),
+        ("Joined WhatsApp", joined_sets),
+        ("General activated (at least 1 touchpoint)", general_sets),
+        ("General activated and paid", gs(general_ids & paid_ids), general_sets),
+        ("Events activated (at least 1 online event)", event_sets),
+        ("Events activated and paid", gs(event_ids & paid_ids), event_sets),
+        ("Competitions (at least 1 competition)", comp_sets),
+        ("Competitions activated and paid", gs(comp_ids & paid_ids), comp_sets),
+        ("Winner/Spotlight activated (at least 1 winner/spotlight)", win_sets),
+        ("Winner/spotlight and paid", gs(win_ids & paid_ids), win_sets),
+        ("Total engagement = {1,3} - Low engagement", low_sets),
+        ("Low engagement and paid", gs(low_ids & paid_ids), low_sets),
+        ("Total engagement = {4,7} - Medium engagement", med_sets),
+        ("Medium engagement and paid", gs(med_ids & paid_ids), med_sets),
+        ("Total engagement = {8,+} - High engagement", high_sets),
+        ("High engagement and paid", gs(high_ids & paid_ids), high_sets),
         ("Overall paid", gs(paid_ids)),
     ]
 
     visible_groups = ["Total", "UG", "PG"] if view_choice == "Total + UG + PG" else [view_choice]
-    report_table = _success_report_table_from_metrics(metric_sets, offered_sets, visible_groups)
+    report_table = _success_report_table_from_metrics(metric_sets, offered_sets, visible_groups, joined_sets)
     st.dataframe(report_table, use_container_width=True, hide_index=True, height=820, key="success_report_table")
 
     with st.expander("Report definitions used"):
@@ -5625,6 +5651,8 @@ def render_success_metrics_report(data):
 - **Paid / Overall paid:** student has a payment date in Tetr-X UG/PG on/before the selected report date.
 - **Final admitted:** UG = Admitted or status contains Deferral; PG = Admitted or status contains Admitted: Deferral; refunds excluded.
 - **Events activated:** Online Events + Masterclasses. **Competitions:** Competition + Hackathon. **General activated:** General/Fun/Quiz/Poll/Fun Task.
+- **% columns:** default denominator is Offered Students. For `... and paid` rows, the denominator is the total activated students in that same metric.
+- **% of In Community columns:** denominator is Joined WA / In Community students in the selected filters.
 - **Low/Medium/High engagement:** touchpoints in the first 30 days after offer date, capped by the selected report date.
             """
         )
