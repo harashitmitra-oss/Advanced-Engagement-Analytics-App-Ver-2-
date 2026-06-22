@@ -5209,9 +5209,385 @@ def render_success_comp_t7_student_list(comp_before7: pd.DataFrame, data):
     out = pd.DataFrame(rows).sort_values(["Winner Status", "Events Attended in T-7 to T", "Student Name"], ascending=[True, False, True])
     st.dataframe(out, use_container_width=True, hide_index=True, height=300, key="success_comp_t7_student_list")
 
+
+
+def _success_report_activity_bucket(event_type: str) -> str:
+    """Event buckets for Success Metrics -> Report only."""
+    typ = clean_text(event_type).strip().lower()
+    if typ in {"online event", "online ama", "online amas", "ama", "masterclass", "skill bootcamp", "bootcamp"}:
+        return "Online Events + Masterclasses"
+    if typ in {"competition", "competitions", "hackathon", "hackerthon"}:
+        return "Competition & Hackathon"
+    if typ in {"general", "fun", "fun task", "quiz", "poll"}:
+        return "General/Fun"
+    return "Other"
+
+
+def _success_report_is_joined_wa_value(x) -> bool:
+    s = clean_text(x).strip().lower().replace("-", " ")
+    s = " ".join(s.split())
+    return s in {"in", "tetrx", "tetr x", "added to term 0", "left"}
+
+
+def _success_report_student_base(data):
+    """One row per Master UG/PG student, enriched with Dates sheet course/offer data."""
+    overview = data.get("overview_df", pd.DataFrame())
+    dates_df = data.get("dates_df", pd.DataFrame())
+    cols = [
+        "student_id", "student_name", "email_key", "program", "batch", "batch_key",
+        "course", "offered_date", "community_raw"
+    ]
+    if overview is None or overview.empty:
+        return pd.DataFrame(columns=cols)
+
+    rows = []
+    for _, r in overview.iterrows():
+        sid = _student_id_from_values(r.get("email_key", ""), r.get("student_key", ""), r.get("student_name", ""))
+        if not sid:
+            continue
+        program = clean_text(r.get("Program", "")).upper()
+        batch = clean_text(r.get("Batch", ""))
+        offered = pd.to_datetime(r.get("offered_date_parsed", pd.NaT), errors="coerce")
+        course = ""
+        drow = None
+        if dates_df is not None and not dates_df.empty:
+            drow = find_student_dates_row(
+                dates_df,
+                r.get("student_name", ""),
+                r.get("email_key", ""),
+                r.get("student_key", ""),
+                program,
+                batch,
+            )
+        if drow is not None:
+            course = clean_text(drow.get("Course", ""))
+            if pd.isna(offered):
+                offered = pd.to_datetime(drow.get("offered_date_parsed", pd.NaT), errors="coerce")
+            if not batch:
+                batch = clean_text(drow.get("Batch", ""))
+        rows.append({
+            "student_id": sid,
+            "student_name": clean_text(r.get("student_name", "")),
+            "email_key": clean_text(r.get("email_key", "")),
+            "program": program,
+            "batch": batch,
+            "batch_key": normalize_batch_token(batch),
+            "course": course,
+            "offered_date": offered.normalize() if pd.notna(offered) else pd.NaT,
+            "community_raw": clean_text(r.get("admitted_group_batch_onwards_raw", r.get("community_status_value", ""))),
+        })
+
+    base = pd.DataFrame(rows, columns=cols)
+    if base.empty:
+        return base
+    base = base.drop_duplicates("student_id", keep="first").reset_index(drop=True)
+    return base
+
+
+def _success_report_payment_rows(data):
+    """Tetr-X rows with payment dates. For Report: paid = has payment date in Tetr-X."""
+    rows = []
+    activities = data.get("activities", {})
+    for tx_sheet in TX_SHEETS:
+        df = activities.get(tx_sheet, pd.DataFrame())
+        if df is None or df.empty:
+            continue
+        program = "UG" if tx_sheet.endswith("UG") else "PG"
+        for _, r in df.iterrows():
+            sid = _student_id_from_values(r.get("email_key", ""), r.get("student_key", ""), r.get("student_name", ""))
+            if not sid:
+                continue
+            pay_dt = pd.to_datetime(r.get("payment_date_parsed", pd.NaT), errors="coerce")
+            if pd.isna(pay_dt):
+                continue
+            status = clean_text(r.get("sheet_status_raw", ""))
+            rows.append({
+                "student_id": sid,
+                "program": program,
+                "student_name": clean_text(r.get("student_name", "")),
+                "status": status,
+                "status_lower": status.lower().strip(),
+                "payment_date": pay_dt.normalize(),
+            })
+    out = pd.DataFrame(rows)
+    if out.empty:
+        return pd.DataFrame(columns=["student_id", "program", "student_name", "status", "status_lower", "payment_date"])
+    # If duplicated, keep earliest payment date but preserve a non-empty/current status where possible.
+    out = out.sort_values(["payment_date", "student_name"], na_position="last").drop_duplicates("student_id", keep="first").reset_index(drop=True)
+    return out
+
+
+def _success_report_all_activity_attendees(data):
+    """All attended student-event rows across batch + Tetr-X sheets for the Success Report."""
+    activities = data.get("activities", {})
+    activity_ctx = data.get("activity_ctx", {})
+    rows = []
+    for sheet in UG_BATCH_SHEETS + PG_BATCH_SHEETS + TX_SHEETS:
+        df = activities.get(sheet, pd.DataFrame())
+        ctx = activity_ctx.get(sheet, {})
+        if df is None or df.empty or not ctx:
+            continue
+        event_info = ctx.get("event_info", pd.DataFrame())
+        if event_info is None or event_info.empty:
+            continue
+        program = infer_program_from_sheet(sheet)
+        sheet_batch = infer_batch_group_from_sheet_name(sheet)
+        for _, ev in event_info.iterrows():
+            col = ev.get("column_name")
+            if not col or col not in df.columns:
+                continue
+            ev_date = pd.to_datetime(ev.get("event_date", pd.NaT), errors="coerce")
+            if pd.isna(ev_date):
+                continue
+            ev_date = ev_date.normalize()
+            ev_type_raw = clean_text(ev.get("event_type", "")) or "Other"
+            bucket = _success_report_activity_bucket(ev_type_raw)
+            ev_name = clean_text(ev.get("event_name", "")) or clean_text(col)
+            event_key = "|".join([program, normalize_name(ev_name), bucket.lower(), ev_date.strftime("%Y-%m-%d")])
+            attended_mask = pd.to_numeric(df[col], errors="coerce").fillna(0) > 0
+            if not attended_mask.any():
+                continue
+            for _, r in df.loc[attended_mask].iterrows():
+                sid = _student_id_from_values(r.get("email_key", ""), r.get("student_key", ""), r.get("student_name", ""))
+                if not sid:
+                    continue
+                rows.append({
+                    "student_id": sid,
+                    "student_name": clean_text(r.get("student_name", "")),
+                    "program": program,
+                    "batch": clean_text(r.get("Batch", "")) or sheet_batch,
+                    "source_sheet": sheet,
+                    "event_name": ev_name,
+                    "event_type_raw": ev_type_raw,
+                    "event_bucket": bucket,
+                    "event_date": ev_date,
+                    "event_key": event_key,
+                    "dedupe_key": "|".join([sid, event_key]),
+                })
+    out = pd.DataFrame(rows)
+    if out.empty:
+        return pd.DataFrame(columns=[
+            "student_id", "student_name", "program", "batch", "source_sheet", "event_name",
+            "event_type_raw", "event_bucket", "event_date", "event_key", "dedupe_key"
+        ])
+    return out.drop_duplicates("dedupe_key").reset_index(drop=True)
+
+
+def _success_report_winner_rows(data):
+    winner_df = data.get("winner_df", pd.DataFrame())
+    if winner_df is None or winner_df.empty:
+        return pd.DataFrame(columns=["student_id", "program", "announcement_date"])
+    rows = []
+    w = winner_df.copy()
+    if "is_winner" in w.columns or "is_spotlight" in w.columns:
+        w = w[w.get("is_winner", False).fillna(False).astype(bool) | w.get("is_spotlight", False).fillna(False).astype(bool)].copy()
+    for _, r in w.iterrows():
+        sid = _student_id_from_values(r.get("email_key", ""), r.get("student_key", ""), r.get("winner_name", ""))
+        if not sid:
+            continue
+        ann = pd.to_datetime(r.get("announcement_date", pd.NaT), errors="coerce")
+        rows.append({
+            "student_id": sid,
+            "announcement_date": ann.normalize() if pd.notna(ann) else pd.NaT,
+            "challenge_name": clean_text(r.get("challenge_name", "")),
+            "entry_type": clean_text(r.get("entry_type", "")),
+        })
+    return pd.DataFrame(rows)
+
+
+def _success_report_group_sets(base: pd.DataFrame, ids: set):
+    out = {"Total": set(), "UG": set(), "PG": set()}
+    if base is None or base.empty:
+        return out
+    ids = set(ids or set())
+    sub = base[base["student_id"].isin(ids)].copy()
+    for _, r in sub.iterrows():
+        sid = clean_text(r.get("student_id", ""))
+        program = clean_text(r.get("program", ""))
+        if not sid:
+            continue
+        out["Total"].add(sid)
+        if program in {"UG", "PG"}:
+            out[program].add(sid)
+    return out
+
+
+def _success_report_table_from_metrics(metric_sets, offered_sets, visible_groups):
+    rows = []
+    for metric_name, ids_by_group in metric_sets:
+        row = {"Metric": metric_name}
+        for group in visible_groups:
+            cnt = len(set(ids_by_group.get(group, set())))
+            denom = len(set(offered_sets.get(group, set())))
+            row[group] = cnt
+            row[f"{group} %"] = round((cnt / denom * 100), 1) if denom else 0.0
+        rows.append(row)
+    return pd.DataFrame(rows)
+
+
+def render_success_metrics_report(data):
+    st.markdown("### Report")
+    st.caption("Report metrics are calculated as of the selected date. Percentages use Offered Students in the selected filters as the denominator.")
+
+    base_all = _success_report_student_base(data)
+    if base_all.empty:
+        st.info("No Master UG / Master PG students found for this report.")
+        return
+
+    activities_all = _success_report_all_activity_attendees(data)
+    payments_all = _success_report_payment_rows(data)
+    winners_all = _success_report_winner_rows(data)
+
+    date_candidates = []
+    for series in [base_all.get("offered_date"), activities_all.get("event_date"), payments_all.get("payment_date"), winners_all.get("announcement_date")]:
+        if series is not None:
+            vals = pd.to_datetime(series, errors="coerce").dropna()
+            if not vals.empty:
+                date_candidates.append(vals.max())
+    default_as_of = max(date_candidates).date() if date_candidates else pd.Timestamp.today().date()
+
+    f1, f2, f3, f4 = st.columns([1.1, 1.1, 1.3, 1.3])
+    with f1:
+        as_of_date = st.date_input("Report as of date", value=default_as_of, key="success_report_as_of_date")
+    as_of = pd.to_datetime(as_of_date).normalize()
+    with f2:
+        view_choice = st.radio("UG / PG view", ["Total + UG + PG", "UG", "PG"], horizontal=False, key="success_report_program_view")
+
+    batch_options = sorted([x for x in base_all["batch"].map(clean_text).dropna().unique().tolist() if x])
+    course_options = sorted([x for x in base_all["course"].map(clean_text).dropna().unique().tolist() if x])
+    with f3:
+        selected_batches = st.multiselect("Batches (blank = all)", batch_options, default=[], key="success_report_batches")
+    with f4:
+        selected_courses = st.multiselect("Courses (blank = all)", course_options, default=[], key="success_report_courses")
+
+    base = base_all.copy()
+    if view_choice in {"UG", "PG"}:
+        base = base[base["program"].eq(view_choice)].copy()
+    if selected_batches:
+        wanted_batches = set(clean_text(x) for x in selected_batches)
+        wanted_batch_keys = set(normalize_batch_token(x) for x in selected_batches)
+        base = base[base["batch"].map(clean_text).isin(wanted_batches) | base["batch_key"].isin(wanted_batch_keys)].copy()
+    if selected_courses:
+        wanted_courses = set(clean_text(x) for x in selected_courses)
+        base = base[base["course"].map(clean_text).isin(wanted_courses)].copy()
+
+    # Offered-as-of denominator. Offered date comes from Dates sheet; rows without offered date are only kept for current/latest views.
+    offered_mask = pd.to_datetime(base["offered_date"], errors="coerce").notna() & (pd.to_datetime(base["offered_date"], errors="coerce") <= as_of)
+    base = base.loc[offered_mask].copy()
+    if base.empty:
+        st.info("No offered students match the selected date/filter combination.")
+        return
+
+    base_ids = set(base["student_id"].astype(str))
+    offered_sets = _success_report_group_sets(base, base_ids)
+
+    acts = activities_all.copy()
+    if not acts.empty:
+        acts["event_date"] = pd.to_datetime(acts["event_date"], errors="coerce").dt.normalize()
+        acts = acts[acts["student_id"].isin(base_ids) & acts["event_date"].notna() & (acts["event_date"] <= as_of)].copy()
+
+    payments = payments_all.copy()
+    if not payments.empty:
+        payments["payment_date"] = pd.to_datetime(payments["payment_date"], errors="coerce").dt.normalize()
+        payments = payments[payments["student_id"].isin(base_ids) & payments["payment_date"].notna() & (payments["payment_date"] <= as_of)].copy()
+    paid_ids = set(payments["student_id"].astype(str).tolist()) if not payments.empty else set()
+
+    refund_ids = set()
+    final_admitted_ids = set()
+    if not payments.empty:
+        pay_status = payments["status_lower"].astype(str)
+        refund_mask = pay_status.str.contains("refund", na=False)
+        refund_ids = set(payments.loc[refund_mask, "student_id"].astype(str).tolist())
+        prog = payments["program"].astype(str).str.upper()
+        admitted_exact = pay_status.str.strip().eq("admitted")
+        ug_final = prog.eq("UG") & (admitted_exact | pay_status.str.contains("deferral", na=False))
+        pg_final = prog.eq("PG") & (admitted_exact | pay_status.str.contains(r"admitted\s*:\s*deferral", regex=True, na=False))
+        final_mask = (ug_final | pg_final) & (~refund_mask)
+        final_admitted_ids = set(payments.loc[final_mask, "student_id"].astype(str).tolist())
+
+    joined_ids = set(base.loc[base["community_raw"].map(_success_report_is_joined_wa_value).fillna(False).astype(bool), "student_id"].astype(str).tolist())
+    active_ids = set(acts["student_id"].astype(str).tolist()) if not acts.empty else set()
+    general_ids = set(acts.loc[acts["event_bucket"].eq("General/Fun"), "student_id"].astype(str).tolist()) if not acts.empty else set()
+    event_ids = set(acts.loc[acts["event_bucket"].eq("Online Events + Masterclasses"), "student_id"].astype(str).tolist()) if not acts.empty else set()
+    comp_ids = set(acts.loc[acts["event_bucket"].eq("Competition & Hackathon"), "student_id"].astype(str).tolist()) if not acts.empty else set()
+
+    win_ids = set()
+    if not winners_all.empty:
+        wins = winners_all.copy()
+        wins["announcement_date"] = pd.to_datetime(wins["announcement_date"], errors="coerce").dt.normalize()
+        wins = wins[wins["student_id"].isin(base_ids)].copy()
+        # With a report date selected, count only Winner/Spotlight announcements on or before that date.
+        wins = wins[wins["announcement_date"].notna() & (wins["announcement_date"] <= as_of)].copy()
+        win_ids = set(wins["student_id"].astype(str).tolist()) if not wins.empty else set()
+
+    # First-30-days engagement bands after offer date, capped by report date.
+    eng_counts = pd.Series(dtype="int64")
+    if not acts.empty:
+        offer_lookup = base.set_index("student_id")["offered_date"].to_dict()
+        tmp = acts.copy()
+        tmp["offered_date"] = pd.to_datetime(tmp["student_id"].map(offer_lookup), errors="coerce").dt.normalize()
+        tmp = tmp[tmp["offered_date"].notna()].copy()
+        tmp = tmp[(tmp["event_date"] >= tmp["offered_date"]) & (tmp["event_date"] <= tmp["offered_date"] + pd.Timedelta(days=30))].copy()
+        if not tmp.empty:
+            eng_counts = tmp.groupby("student_id")["dedupe_key"].nunique()
+    low_ids = set(eng_counts[(eng_counts >= 1) & (eng_counts <= 3)].index.astype(str).tolist()) if not eng_counts.empty else set()
+    med_ids = set(eng_counts[(eng_counts >= 4) & (eng_counts <= 7)].index.astype(str).tolist()) if not eng_counts.empty else set()
+    high_ids = set(eng_counts[eng_counts >= 8].index.astype(str).tolist()) if not eng_counts.empty else set()
+    med_high_ids = med_ids | high_ids
+
+    def gs(ids):
+        return _success_report_group_sets(base, set(ids))
+
+    metric_sets = [
+        ("Offered", offered_sets),
+        ("Onboarded (WA)", gs(joined_ids)),
+        ("Activated (1+ touchpoint)", gs(active_ids)),
+        ("Medium and high engaged (4+ touchpoints)", gs(med_high_ids)),
+        ("Paid", gs(paid_ids)),
+        ("Refund", gs(refund_ids)),
+        ("Final admitted", gs(final_admitted_ids)),
+        ("Joined WhatsApp", gs(joined_ids)),
+        ("General activated (at least 1 touchpoint)", gs(general_ids)),
+        ("General activated and paid", gs(general_ids & paid_ids)),
+        ("Events activated (at least 1 online event)", gs(event_ids)),
+        ("Events activated and paid", gs(event_ids & paid_ids)),
+        ("Competitions (at least 1 competition)", gs(comp_ids)),
+        ("Competitions activated and paid", gs(comp_ids & paid_ids)),
+        ("Winner/Spotlight activated (at least 1 winner/spotlight)", gs(win_ids)),
+        ("Winner/spotlight and paid", gs(win_ids & paid_ids)),
+        ("Total engagement = {1,3} - Low engagement", gs(low_ids)),
+        ("Low engagement and paid", gs(low_ids & paid_ids)),
+        ("Total engagement = {4,7} - Medium engagement", gs(med_ids)),
+        ("Medium engagement and paid", gs(med_ids & paid_ids)),
+        ("Total engagement = {8,+} - High engagement", gs(high_ids)),
+        ("High engagement and paid", gs(high_ids & paid_ids)),
+        ("Overall paid", gs(paid_ids)),
+    ]
+
+    visible_groups = ["Total", "UG", "PG"] if view_choice == "Total + UG + PG" else [view_choice]
+    report_table = _success_report_table_from_metrics(metric_sets, offered_sets, visible_groups)
+    st.dataframe(report_table, use_container_width=True, hide_index=True, height=820, key="success_report_table")
+
+    with st.expander("Report definitions used"):
+        st.markdown(
+            """
+- **Offered denominator:** Master UG + Master PG students with Offered Date on/before the selected report date.
+- **Joined WA / Onboarded / In Community:** `In`, `TetrX`, `Tetr X`, `Added to Term 0`, `Left` from `Admitted Group (Batch onwards)`.
+- **Paid / Overall paid:** student has a payment date in Tetr-X UG/PG on/before the selected report date.
+- **Final admitted:** UG = Admitted or status contains Deferral; PG = Admitted or status contains Admitted: Deferral; refunds excluded.
+- **Events activated:** Online Events + Masterclasses. **Competitions:** Competition + Hackathon. **General activated:** General/Fun/Quiz/Poll/Fun Task.
+- **Low/Medium/High engagement:** touchpoints in the first 30 days after offer date, capped by the selected report date.
+            """
+        )
+
 def render_success_metrics_page(data):
     st.subheader("Success Metrics")
     st.caption("All event/activity attendance is deduped by same student + same event name + same event type + same date. Event occurrences are deduped by program + event name + event type + date, so duplicated events across batch sheets count once.")
+    _success_subsection = st.radio("Success Metrics subsection", ["Summary", "Report"], horizontal=True, key="success_metrics_subsection")
+    if _success_subsection == "Report":
+        render_success_metrics_report(data)
+        return
+
     sm = build_success_metrics_data(data)
     attendees = sm["attendees"]
     occurrences = sm["occurrences"]
