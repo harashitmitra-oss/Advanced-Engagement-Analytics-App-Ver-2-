@@ -5446,19 +5446,68 @@ def render_success_metrics_report(data):
                 date_candidates.append(vals.max())
     default_as_of = max(date_candidates).date() if date_candidates else pd.Timestamp.today().date()
 
-    f1, f2, f3, f4 = st.columns([1.1, 1.1, 1.3, 1.3])
-    with f1:
-        as_of_date = st.date_input("Report as of date", value=default_as_of, key="success_report_as_of_date")
-    as_of = pd.to_datetime(as_of_date).normalize()
-    with f2:
-        view_choice = st.radio("UG / PG view", ["Total + UG + PG", "UG", "PG"], horizontal=False, key="success_report_program_view")
-
     batch_options = sorted([x for x in base_all["batch"].map(clean_text).dropna().unique().tolist() if x])
     course_options = sorted([x for x in base_all["course"].map(clean_text).dropna().unique().tolist() if x])
-    with f3:
-        selected_batches = st.multiselect("Batches (blank = all)", batch_options, default=[], key="success_report_batches")
-    with f4:
-        selected_courses = st.multiselect("Courses (blank = all)", course_options, default=[], key="success_report_courses")
+
+    applied_key = "success_report_applied_filters"
+    default_filters = {
+        "as_of_date": default_as_of,
+        "view_choice": "Total + UG + PG",
+        "selected_batches": [],
+        "selected_courses": [],
+    }
+    if applied_key not in st.session_state:
+        st.session_state[applied_key] = default_filters.copy()
+    applied_filters = st.session_state.get(applied_key, default_filters.copy()) or default_filters.copy()
+
+    current_as_of = applied_filters.get("as_of_date", default_as_of)
+    try:
+        current_as_of = pd.to_datetime(current_as_of).date()
+    except Exception:
+        current_as_of = default_as_of
+    current_view = applied_filters.get("view_choice", "Total + UG + PG")
+    if current_view not in {"Total + UG + PG", "UG", "PG"}:
+        current_view = "Total + UG + PG"
+    current_batches = [x for x in applied_filters.get("selected_batches", []) if x in batch_options]
+    current_courses = [x for x in applied_filters.get("selected_courses", []) if x in course_options]
+
+    with st.form("success_report_filters_form"):
+        f1, f2, f3, f4, f5 = st.columns([1.05, 1.05, 1.25, 1.25, 0.7])
+        with f1:
+            pending_as_of_date = st.date_input("Report as of date", value=current_as_of, key="success_report_as_of_date_pending")
+        with f2:
+            pending_view_choice = st.radio("UG / PG view", ["Total + UG + PG", "UG", "PG"], index=["Total + UG + PG", "UG", "PG"].index(current_view), horizontal=False, key="success_report_program_view_pending")
+        with f3:
+            pending_batches = st.multiselect("Batches (blank = all)", batch_options, default=current_batches, key="success_report_batches_pending")
+        with f4:
+            pending_courses = st.multiselect("Courses (blank = all)", course_options, default=current_courses, key="success_report_courses_pending")
+        with f5:
+            st.markdown("<div style='height: 1.85rem;'></div>", unsafe_allow_html=True)
+            submitted_filters = st.form_submit_button("Show", use_container_width=True)
+
+    if submitted_filters:
+        st.session_state[applied_key] = {
+            "as_of_date": pending_as_of_date,
+            "view_choice": pending_view_choice,
+            "selected_batches": list(pending_batches or []),
+            "selected_courses": list(pending_courses or []),
+        }
+
+    applied_filters = st.session_state.get(applied_key, default_filters.copy()) or default_filters.copy()
+    as_of_date = applied_filters.get("as_of_date", default_as_of)
+    as_of = pd.to_datetime(as_of_date).normalize()
+    view_choice = applied_filters.get("view_choice", "Total + UG + PG")
+    if view_choice not in {"Total + UG + PG", "UG", "PG"}:
+        view_choice = "Total + UG + PG"
+    selected_batches = [x for x in applied_filters.get("selected_batches", []) if x in batch_options]
+    selected_courses = [x for x in applied_filters.get("selected_courses", []) if x in course_options]
+
+    active_filter_bits = [f"As of: {pd.to_datetime(as_of).strftime('%d-%b-%Y')}", f"View: {view_choice}"]
+    if selected_batches:
+        active_filter_bits.append("Batches: " + ", ".join(selected_batches))
+    if selected_courses:
+        active_filter_bits.append("Courses: " + ", ".join(selected_courses))
+    st.caption("Applied filters · " + " | ".join(active_filter_bits))
 
     base = base_all.copy()
     if view_choice in {"UG", "PG"}:
@@ -5583,130 +5632,129 @@ def render_success_metrics_report(data):
 def render_success_metrics_page(data):
     st.subheader("Success Metrics")
     st.caption("All event/activity attendance is deduped by same student + same event name + same event type + same date. Event occurrences are deduped by program + event name + event type + date, so duplicated events across batch sheets count once.")
-    _success_subsection = st.radio("Success Metrics subsection", ["Summary", "Report"], horizontal=True, key="success_metrics_subsection")
-    if _success_subsection == "Report":
+    success_summary_tab, success_report_tab = st.tabs(["Summary", "Report"])
+    with success_report_tab:
         render_success_metrics_report(data)
-        return
+    with success_summary_tab:
+        sm = build_success_metrics_data(data)
+        attendees = sm["attendees"]
+        occurrences = sm["occurrences"]
+        denoms = {"students": sm["student_denoms"], "paid": sm["paid_sets"]}
 
-    sm = build_success_metrics_data(data)
-    attendees = sm["attendees"]
-    occurrences = sm["occurrences"]
-    denoms = {"students": sm["student_denoms"], "paid": sm["paid_sets"]}
+        total_students = len(sm["student_denoms"].get("Total", set()))
+        total_paid = len(sm["paid_sets"].get("Total", set()))
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Total Unique Students", f"{total_students:,}")
+        c2.metric("Paid / Admitted Students", f"{total_paid:,}")
+        c3.metric("Winner Students", f"{len(sm['winner_ids']):,}")
 
-    total_students = len(sm["student_denoms"].get("Total", set()))
-    total_paid = len(sm["paid_sets"].get("Total", set()))
-    c1, c2, c3 = st.columns(3)
-    c1.metric("Total Unique Students", f"{total_students:,}")
-    c2.metric("Paid / Admitted Students", f"{total_paid:,}")
-    c3.metric("Winner Students", f"{len(sm['winner_ids']):,}")
+        st.markdown("---")
+        st.markdown("### Online Events + Masterclasses")
+        online_occ = occurrences[occurrences["event_type"].eq("Online Events + Masterclasses")].copy() if not occurrences.empty else pd.DataFrame()
+        online_att = attendees[attendees["event_type"].eq("Online Events + Masterclasses")].copy() if not attendees.empty else pd.DataFrame()
 
-    st.markdown("---")
-    st.markdown("### Online Events + Masterclasses")
-    online_occ = occurrences[occurrences["event_type"].eq("Online Events + Masterclasses")].copy() if not occurrences.empty else pd.DataFrame()
-    online_att = attendees[attendees["event_type"].eq("Online Events + Masterclasses")].copy() if not attendees.empty else pd.DataFrame()
+        occ_by_group = {"Total": set(online_occ.get("occurrence_key", pd.Series(dtype=str)).astype(str).tolist()) if not online_occ.empty else set(),
+                        "UG": set(online_occ.loc[online_occ.get("program", pd.Series(dtype=str)).eq("UG"), "occurrence_key"].astype(str).tolist()) if not online_occ.empty else set(),
+                        "PG": set(online_occ.loc[online_occ.get("program", pd.Series(dtype=str)).eq("PG"), "occurrence_key"].astype(str).tolist()) if not online_occ.empty else set()}
+        online_att_sets = _group_sets_from_frame(online_att)
+        online_paid_att = online_att[online_att.get("is_paid", False).fillna(False).astype(bool)].copy() if not online_att.empty else pd.DataFrame()
+        online_paid_att_sets = _group_sets_from_frame(online_paid_att)
+        online_before_payment = online_att[online_att.get("before_payment", False).fillna(False).astype(bool)].copy() if not online_att.empty else pd.DataFrame()
+        online_before_payment_sets = _group_sets_from_frame(online_before_payment)
+        online_before7 = online_att[online_att.get("before_7_payment", False).fillna(False).astype(bool)].copy() if not online_att.empty else pd.DataFrame()
+        online_before7_sets = _group_sets_from_frame(online_before7)
 
-    occ_by_group = {"Total": set(online_occ.get("occurrence_key", pd.Series(dtype=str)).astype(str).tolist()) if not online_occ.empty else set(),
-                    "UG": set(online_occ.loc[online_occ.get("program", pd.Series(dtype=str)).eq("UG"), "occurrence_key"].astype(str).tolist()) if not online_occ.empty else set(),
-                    "PG": set(online_occ.loc[online_occ.get("program", pd.Series(dtype=str)).eq("PG"), "occurrence_key"].astype(str).tolist()) if not online_occ.empty else set()}
-    online_att_sets = _group_sets_from_frame(online_att)
-    online_paid_att = online_att[online_att.get("is_paid", False).fillna(False).astype(bool)].copy() if not online_att.empty else pd.DataFrame()
-    online_paid_att_sets = _group_sets_from_frame(online_paid_att)
-    online_before_payment = online_att[online_att.get("before_payment", False).fillna(False).astype(bool)].copy() if not online_att.empty else pd.DataFrame()
-    online_before_payment_sets = _group_sets_from_frame(online_before_payment)
-    online_before7 = online_att[online_att.get("before_7_payment", False).fillna(False).astype(bool)].copy() if not online_att.empty else pd.DataFrame()
-    online_before7_sets = _group_sets_from_frame(online_before7)
+        metric_rows = [
+            ("Events / Masterclasses Done", occ_by_group, "share_total"),
+            ("Total Unique Students Attended", online_att_sets, "students"),
+            ("At least 1 Before Payment", online_before_payment_sets, "paid"),
+            ("Paid Students Attended", online_paid_att_sets, "paid"),
+            ("Paid Students Attended in T-7 to T", online_before7_sets, "paid"),
+        ]
+        st.dataframe(_success_metric_table(metric_rows, denoms), use_container_width=True, hide_index=True, key="success_online_summary")
 
-    metric_rows = [
-        ("Events / Masterclasses Done", occ_by_group, "share_total"),
-        ("Total Unique Students Attended", online_att_sets, "students"),
-        ("At least 1 Before Payment", online_before_payment_sets, "paid"),
-        ("Paid Students Attended", online_paid_att_sets, "paid"),
-        ("Paid Students Attended in T-7 to T", online_before7_sets, "paid"),
-    ]
-    st.dataframe(_success_metric_table(metric_rows, denoms), use_container_width=True, hide_index=True, key="success_online_summary")
+        # at least 1 / 3 / 5 online events before payment
+        thresholds = []
+        if not online_before_payment.empty:
+            per_student = online_before_payment.groupby(["student_id", "program"])["dedupe_key"].nunique().reset_index(name="attended_count")
+            for th in [1, 3, 5]:
+                sub = per_student[per_student["attended_count"] >= th]
+                thresholds.append((f"Paid Students with ≥{th} Online/Masterclass Before Payment", _group_sets_from_frame(sub), "paid"))
+        if thresholds:
+            st.markdown("##### Before-payment attendance depth")
+            st.dataframe(_success_metric_table(thresholds, denoms), use_container_width=True, hide_index=True, key="success_online_thresholds")
 
-    # at least 1 / 3 / 5 online events before payment
-    thresholds = []
-    if not online_before_payment.empty:
-        per_student = online_before_payment.groupby(["student_id", "program"])["dedupe_key"].nunique().reset_index(name="attended_count")
-        for th in [1, 3, 5]:
-            sub = per_student[per_student["attended_count"] >= th]
-            thresholds.append((f"Paid Students with ≥{th} Online/Masterclass Before Payment", _group_sets_from_frame(sub), "paid"))
-    if thresholds:
-        st.markdown("##### Before-payment attendance depth")
-        st.dataframe(_success_metric_table(thresholds, denoms), use_container_width=True, hide_index=True, key="success_online_thresholds")
+        if not online_occ.empty:
+            chart_df = online_occ.groupby(["program", "event_type"], as_index=False)["occurrence_key"].nunique().rename(columns={"occurrence_key": "Event Occurrences"})
+            fig = px.bar(chart_df, x="program", y="Event Occurrences", color="program", title="Online Events + Masterclasses Done by Program")
+            st.plotly_chart(nice_layout(fig, height=320), use_container_width=True, key="success_online_occ_chart")
 
-    if not online_occ.empty:
-        chart_df = online_occ.groupby(["program", "event_type"], as_index=False)["occurrence_key"].nunique().rename(columns={"occurrence_key": "Event Occurrences"})
-        fig = px.bar(chart_df, x="program", y="Event Occurrences", color="program", title="Online Events + Masterclasses Done by Program")
-        st.plotly_chart(nice_layout(fig, height=320), use_container_width=True, key="success_online_occ_chart")
+        st.markdown("---")
+        st.markdown("### Competition & Hackathon")
+        comp_occ = occurrences[occurrences["event_type"].eq("Competition & Hackathon")].copy() if not occurrences.empty else pd.DataFrame()
+        comp_att = attendees[attendees["event_type"].eq("Competition & Hackathon")].copy() if not attendees.empty else pd.DataFrame()
+        comp_att_sets = _group_sets_from_frame(comp_att)
+        comp_paid_att = comp_att[comp_att.get("is_paid", False).fillna(False).astype(bool)].copy() if not comp_att.empty else pd.DataFrame()
+        comp_paid_att_sets = _group_sets_from_frame(comp_paid_att)
+        comp_paid_winners = comp_paid_att[comp_paid_att.get("is_winner", False).fillna(False).astype(bool)].copy() if not comp_paid_att.empty else pd.DataFrame()
+        comp_paid_winner_sets = _group_sets_from_frame(comp_paid_winners)
+        comp_before7 = comp_att[comp_att.get("before_7_payment", False).fillna(False).astype(bool)].copy() if not comp_att.empty else pd.DataFrame()
+        comp_before7_sets = _group_sets_from_frame(comp_before7)
+        comp_before7_winners = comp_before7[comp_before7.get("is_winner", False).fillna(False).astype(bool)].copy() if not comp_before7.empty else pd.DataFrame()
+        comp_before7_winner_sets = _group_sets_from_frame(comp_before7_winners)
+        denoms["comp_paid_attendees"] = comp_paid_att_sets
+        denoms["comp_before7_attendees"] = comp_before7_sets
+        comp_rows = [
+            ("Unique Students Participated", comp_att_sets, "students"),
+            ("Unique Students Participated and Paid", comp_paid_att_sets, "paid"),
+            ("Paid Students Participated and Won", comp_paid_winner_sets, "comp_paid_attendees"),
+            ("Paid Students Attended Competition in T-7 to T", comp_before7_sets, "paid"),
+            ("Paid Students Attended and Won Competition in T-7 to T", comp_before7_winner_sets, "comp_before7_attendees"),
+        ]
+        st.dataframe(_success_metric_table(comp_rows, denoms), use_container_width=True, hide_index=True, key="success_comp_summary")
+        render_success_comp_t7_student_list(comp_before7, data)
 
-    st.markdown("---")
-    st.markdown("### Competition & Hackathon")
-    comp_occ = occurrences[occurrences["event_type"].eq("Competition & Hackathon")].copy() if not occurrences.empty else pd.DataFrame()
-    comp_att = attendees[attendees["event_type"].eq("Competition & Hackathon")].copy() if not attendees.empty else pd.DataFrame()
-    comp_att_sets = _group_sets_from_frame(comp_att)
-    comp_paid_att = comp_att[comp_att.get("is_paid", False).fillna(False).astype(bool)].copy() if not comp_att.empty else pd.DataFrame()
-    comp_paid_att_sets = _group_sets_from_frame(comp_paid_att)
-    comp_paid_winners = comp_paid_att[comp_paid_att.get("is_winner", False).fillna(False).astype(bool)].copy() if not comp_paid_att.empty else pd.DataFrame()
-    comp_paid_winner_sets = _group_sets_from_frame(comp_paid_winners)
-    comp_before7 = comp_att[comp_att.get("before_7_payment", False).fillna(False).astype(bool)].copy() if not comp_att.empty else pd.DataFrame()
-    comp_before7_sets = _group_sets_from_frame(comp_before7)
-    comp_before7_winners = comp_before7[comp_before7.get("is_winner", False).fillna(False).astype(bool)].copy() if not comp_before7.empty else pd.DataFrame()
-    comp_before7_winner_sets = _group_sets_from_frame(comp_before7_winners)
-    denoms["comp_paid_attendees"] = comp_paid_att_sets
-    denoms["comp_before7_attendees"] = comp_before7_sets
-    comp_rows = [
-        ("Unique Students Participated", comp_att_sets, "students"),
-        ("Unique Students Participated and Paid", comp_paid_att_sets, "paid"),
-        ("Paid Students Participated and Won", comp_paid_winner_sets, "comp_paid_attendees"),
-        ("Paid Students Attended Competition in T-7 to T", comp_before7_sets, "paid"),
-        ("Paid Students Attended and Won Competition in T-7 to T", comp_before7_winner_sets, "comp_before7_attendees"),
-    ]
-    st.dataframe(_success_metric_table(comp_rows, denoms), use_container_width=True, hide_index=True, key="success_comp_summary")
-    render_success_comp_t7_student_list(comp_before7, data)
+        # Before-payment attendance depth for Competition & Hackathon.
+        # "Before payment" means all attended competition/hackathon activities on or before the payment date,
+        # not only the T-7 window. Stop displaying thresholds once the count becomes zero.
+        comp_before_payment = comp_att[comp_att.get("before_payment", False).fillna(False).astype(bool)].copy() if not comp_att.empty else pd.DataFrame()
+        comp_thresholds = []
+        if not comp_before_payment.empty:
+            comp_per_student = (
+                comp_before_payment.groupby(["student_id", "program"], as_index=False)["dedupe_key"]
+                .nunique()
+                .rename(columns={"dedupe_key": "attended_count"})
+            )
+            th = 1
+            while True:
+                sub = comp_per_student[comp_per_student["attended_count"] >= th]
+                if sub.empty:
+                    break
+                comp_thresholds.append((f"Paid Students with ≥{th} Competition/Hackathon Before Payment", _group_sets_from_frame(sub), "paid"))
+                th += 1
+                if th > 100:  # safety guard for unexpected data issues
+                    break
+        if comp_thresholds:
+            st.markdown("##### Before-payment attendance depth")
+            st.dataframe(_success_metric_table(comp_thresholds, denoms), use_container_width=True, hide_index=True, key="success_comp_thresholds")
 
-    # Before-payment attendance depth for Competition & Hackathon.
-    # "Before payment" means all attended competition/hackathon activities on or before the payment date,
-    # not only the T-7 window. Stop displaying thresholds once the count becomes zero.
-    comp_before_payment = comp_att[comp_att.get("before_payment", False).fillna(False).astype(bool)].copy() if not comp_att.empty else pd.DataFrame()
-    comp_thresholds = []
-    if not comp_before_payment.empty:
-        comp_per_student = (
-            comp_before_payment.groupby(["student_id", "program"], as_index=False)["dedupe_key"]
-            .nunique()
-            .rename(columns={"dedupe_key": "attended_count"})
-        )
-        th = 1
-        while True:
-            sub = comp_per_student[comp_per_student["attended_count"] >= th]
-            if sub.empty:
-                break
-            comp_thresholds.append((f"Paid Students with ≥{th} Competition/Hackathon Before Payment", _group_sets_from_frame(sub), "paid"))
-            th += 1
-            if th > 100:  # safety guard for unexpected data issues
-                break
-    if comp_thresholds:
-        st.markdown("##### Before-payment attendance depth")
-        st.dataframe(_success_metric_table(comp_thresholds, denoms), use_container_width=True, hide_index=True, key="success_comp_thresholds")
+        if not comp_att.empty:
+            chart_df = comp_att.groupby(["program", "event_type"], as_index=False)["student_id"].nunique().rename(columns={"student_id": "Unique Students"})
+            fig = px.bar(chart_df, x="program", y="Unique Students", color="program", title="Competition & Hackathon Unique Participants")
+            st.plotly_chart(nice_layout(fig, height=320), use_container_width=True, key="success_comp_participants_chart")
 
-    if not comp_att.empty:
-        chart_df = comp_att.groupby(["program", "event_type"], as_index=False)["student_id"].nunique().rename(columns={"student_id": "Unique Students"})
-        fig = px.bar(chart_df, x="program", y="Unique Students", color="program", title="Competition & Hackathon Unique Participants")
-        st.plotly_chart(nice_layout(fig, height=320), use_container_width=True, key="success_comp_participants_chart")
-
-    with st.expander("Audit tables: deduped event occurrences and attendees"):
-        a, b = st.tabs(["Event Occurrences", "Attended Student Events"])
-        with a:
-            disp = occurrences.copy()
-            if not disp.empty:
-                disp["event_date"] = pd.to_datetime(disp["event_date"], errors="coerce").dt.strftime("%d-%b-%Y")
-            st.dataframe(disp, use_container_width=True, height=320, key="success_occ_audit")
-        with b:
-            disp = attendees.copy()
-            if not disp.empty:
-                disp["event_date"] = pd.to_datetime(disp["event_date"], errors="coerce").dt.strftime("%d-%b-%Y")
-            st.dataframe(disp[[c for c in ["student_name", "program", "batch", "event_name", "event_type", "event_date", "is_paid", "before_payment", "before_7_payment", "is_winner"] if c in disp.columns]], use_container_width=True, height=360, key="success_att_audit")
+        with st.expander("Audit tables: deduped event occurrences and attendees"):
+            a, b = st.tabs(["Event Occurrences", "Attended Student Events"])
+            with a:
+                disp = occurrences.copy()
+                if not disp.empty:
+                    disp["event_date"] = pd.to_datetime(disp["event_date"], errors="coerce").dt.strftime("%d-%b-%Y")
+                st.dataframe(disp, use_container_width=True, height=320, key="success_occ_audit")
+            with b:
+                disp = attendees.copy()
+                if not disp.empty:
+                    disp["event_date"] = pd.to_datetime(disp["event_date"], errors="coerce").dt.strftime("%d-%b-%Y")
+                st.dataframe(disp[[c for c in ["student_name", "program", "batch", "event_name", "event_type", "event_date", "is_paid", "before_payment", "before_7_payment", "is_winner"] if c in disp.columns]], use_container_width=True, height=360, key="success_att_audit")
 
 
 # ---------------- Refund Analytics ----------------
