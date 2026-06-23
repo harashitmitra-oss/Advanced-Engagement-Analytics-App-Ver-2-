@@ -156,7 +156,9 @@ def inject_css():
             margin-top: 8px;
             margin-bottom: 12px;
         }}
-        .nav-section-item {{
+        .nav-section-item,
+        a.nav-section-item,
+        a.nav-section-item:visited {{
             display: flex;
             align-items: center;
             justify-content: flex-start;
@@ -172,8 +174,16 @@ def inject_css():
             font-weight: 800;
             line-height: 1.15;
             box-shadow: 0 2px 8px rgba(11, 61, 46, 0.035);
-            min-height: 38px;
+            min-height: 36px;
             margin: 0 0 7px 0;
+            cursor: pointer;
+        }}
+        a.nav-section-item:hover {{
+            background: #eef8f2;
+            border-color: #b7dec7;
+            border-left-color: #b7dec7;
+            color: #0b3d2e !important;
+            transform: translateX(2px);
         }}
         .nav-section-item.active {{
             background: #dff3e7;
@@ -9616,25 +9626,31 @@ def _nav_button_key(page: str) -> str:
 
 
 def render_active_left_border_nav(visible_pages, current_page: str) -> str:
-    """Render Option A same-page rounded left-aligned navigation without icons or anchor links."""
-    selected_page = current_page
+    """Render Option A same-page rounded left-aligned navigation without icons.
+
+    Non-active items are normal same-tab links that update the `section` query
+    parameter. This avoids Streamlit button centering issues while keeping page
+    changes inside the same browser tab.
+    """
     st.markdown('<div class="nav-section-menu">', unsafe_allow_html=True)
     for page in visible_pages:
+        page_label = html.escape(page)
         if page == current_page:
-            st.markdown(
-                f'<div class="nav-section-item active" aria-current="page">'
-                f'<span class="nav-section-title">{html.escape(page)}</span>'
-                f'</div>',
-                unsafe_allow_html=True,
+            item_html = (
+                '<div class="nav-section-item active" aria-current="page">'
+                f'<span class="nav-section-title">{page_label}</span>'
+                '</div>'
             )
         else:
-            if st.button(page, key=_nav_button_key(page), use_container_width=True):
-                selected_page = page
-                st.session_state["nav_page"] = page
-                _safe_set_query_param("section", page)
-                safe_rerun()
+            href = f'?section={quote(page)}'
+            item_html = (
+                f'<a class="nav-section-item" href="{href}" target="_self">'
+                f'<span class="nav-section-title">{page_label}</span>'
+                '</a>'
+            )
+        st.markdown(item_html, unsafe_allow_html=True)
     st.markdown('</div>', unsafe_allow_html=True)
-    return selected_page
+    return current_page
 
 
 def render_navigation_sidebar():
