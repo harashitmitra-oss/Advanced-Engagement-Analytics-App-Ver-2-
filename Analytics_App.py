@@ -1,8 +1,10 @@
 import json
+import html
 import re
 from datetime import datetime
 from io import BytesIO
 from pathlib import Path
+from urllib.parse import quote
 
 import numpy as np
 import pandas as pd
@@ -36,6 +38,25 @@ ALL_NAV_PAGES = [
     "Conversion", "Retention", "Refund Analytics", "Community Impact",
     "Activities", "Hritabh",
 ]
+
+NAV_PAGE_ICONS = {
+    "Overview": "📊",
+    "Recent Activity": "⚡",
+    "Success Metrics": "✅",
+    "Student Profile": "👤",
+    "UG": "🎓",
+    "PG": "🎯",
+    "Courses": "📚",
+    "UG vs PG": "⚖️",
+    "Tetr-X": "🚀",
+    "T-7 & T+7 Analysis": "⏱️",
+    "Conversion": "📈",
+    "Retention": "🔁",
+    "Refund Analytics": "💰",
+    "Community Impact": "🌐",
+    "Activities": "🎲",
+    "Hritabh": "🧩",
+}
 # ---------------- Global Navigation Lock ----------------
 # Put sections here when you want them hidden for EVERY normal user.
 # These sections will not appear in navigation unless the admin opens the
@@ -147,6 +168,63 @@ def inject_css():
             padding: 10px 14px;
         }}
         .stTabs [aria-selected="true"] {{ background: #dff3e7; border-color: #8fcaab; }}
+        .nav-section-menu {{
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+            margin-top: 6px;
+            margin-bottom: 10px;
+        }}
+        .nav-section-link {{
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            width: 100%;
+            box-sizing: border-box;
+            padding: 10px 12px 10px 13px;
+            border-radius: 13px;
+            border: 1px solid #cfe8d9;
+            border-left: 5px solid transparent;
+            background: #ffffff;
+            color: #12372a !important;
+            text-decoration: none !important;
+            font-weight: 750;
+            line-height: 1.15;
+            box-shadow: 0 2px 8px rgba(11, 61, 46, 0.035);
+            transition: background 0.12s ease, border-color 0.12s ease, transform 0.12s ease;
+        }}
+        .nav-section-link:hover {{
+            background: #eef8f2;
+            border-color: #b7dec7;
+            color: #0b3d2e !important;
+            transform: translateX(2px);
+        }}
+        .nav-section-link.active {{
+            background: #dff3e7;
+            border-color: #8fcaab;
+            border-left-color: #1f7a56;
+            color: #0b3d2e !important;
+            box-shadow: 0 4px 12px rgba(31, 122, 86, 0.11);
+        }}
+        .nav-section-icon {{
+            display: inline-flex;
+            width: 22px;
+            min-width: 22px;
+            justify-content: center;
+            align-items: center;
+            font-size: 15px;
+        }}
+        .nav-section-title {{
+            display: inline-block;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }}
+        .nav-section-caption {{
+            color: #557166;
+            font-size: 12px;
+            margin: 4px 0 8px 2px;
+        }}
         </style>
         """,
         unsafe_allow_html=True,
@@ -9485,18 +9563,105 @@ def get_hidden_nav_sections():
     return sanitize_hidden_nav_sections(GLOBAL_HIDDEN_NAV_SECTIONS)
 
 
+def _safe_get_query_param(name: str) -> str:
+    """Read a query parameter across Streamlit versions without breaking the app."""
+    try:
+        if hasattr(st, "query_params"):
+            value = st.query_params.get(name, "")
+        else:
+            params = st.experimental_get_query_params()
+            value = params.get(name, "")
+        if isinstance(value, (list, tuple)):
+            value = value[0] if value else ""
+        return clean_text(value)
+    except Exception:
+        return ""
+
+
+def _match_nav_page(raw_page: str, visible_pages) -> str:
+    raw = clean_text(raw_page)
+    if not raw:
+        return ""
+    for page in visible_pages:
+        if page.lower() == raw.lower():
+            return page
+    return ""
+
+
+def _nav_link_html(page: str, active: bool) -> str:
+    icon = NAV_PAGE_ICONS.get(page, "•")
+    section_param = quote(page, safe="")
+    css_class = "nav-section-link active" if active else "nav-section-link"
+    aria = ' aria-current="page"' if active else ""
+    return (
+        f'<a class="{css_class}" href="?section={section_param}"{aria}>'
+        f'<span class="nav-section-icon">{html.escape(icon)}</span>'
+        f'<span class="nav-section-title">{html.escape(page)}</span>'
+        f'</a>'
+    )
+
+
+def render_active_left_border_nav(visible_pages, current_page: str) -> str:
+    """Render the radio replacement: active-left-border navigation links."""
+    links = [_nav_link_html(page, page == current_page) for page in visible_pages]
+    st.markdown('<div class="nav-section-menu">' + "".join(links) + '</div>', unsafe_allow_html=True)
+    return current_page
+
+
 def render_navigation_sidebar():
     """Render navigation with global hidden-section locking.
 
     Normal users cannot reveal locked pages. Admin reveal is password-protected
     and affects only the admin's current session; it does not change page logic
     or paid/deferral calculations.
+
+    UI order: normal navigation first, Secret Navigation Space below it.
     """
     st.markdown("## 🧭 Navigation")
 
     hidden_sections = get_hidden_nav_sections()
-    admin_show_hidden = False
+    expected = _safe_secret_value("NAV_ADMIN_PASSWORD", "tetr-admin")
+    allow_admin_reveal = _secret_bool("NAV_ALLOW_ADMIN_REVEAL", True)
 
+    # Because the Secret Navigation Space is rendered below the page selector,
+    # read its saved session values first so an already-unlocked admin can see
+    # hidden pages immediately on the next Streamlit rerun.
+    entered_password = clean_text(st.session_state.get("nav_secret_password", ""))
+    nav_admin_unlocked = bool(st.session_state.get("nav_secret_unlocked", False)) or bool(entered_password and entered_password == expected)
+    if nav_admin_unlocked:
+        st.session_state["nav_secret_unlocked"] = True
+
+    admin_show_hidden = bool(
+        nav_admin_unlocked
+        and allow_admin_reveal
+        and st.session_state.get("admin_show_hidden_nav", False)
+    )
+
+    if admin_show_hidden:
+        visible_pages = list(ALL_NAV_PAGES)
+    else:
+        visible_pages = [p for p in ALL_NAV_PAGES if p not in set(hidden_sections)]
+    if not visible_pages:
+        visible_pages = ["Overview"]
+
+    query_page = _match_nav_page(_safe_get_query_param("section"), visible_pages)
+    if not query_page:
+        # Backward compatible with any old URL that used ?nav=Page or ?nav_page=Page.
+        query_page = _match_nav_page(_safe_get_query_param("nav"), visible_pages) or _match_nav_page(_safe_get_query_param("nav_page"), visible_pages)
+
+    current_page = query_page or st.session_state.get("nav_page", "Overview")
+    if current_page not in visible_pages:
+        current_page = "Overview" if "Overview" in visible_pages else visible_pages[0]
+
+    page = render_active_left_border_nav(visible_pages, current_page)
+    st.session_state["nav_page"] = page
+
+    if hidden_sections and not admin_show_hidden:
+        st.caption(f"Locked hidden sections: {len(hidden_sections)}")
+    elif admin_show_hidden:
+        st.caption("Admin reveal active: hidden sections are visible only in this session.")
+
+    # Keep the secret/admin controls BELOW the normal navigation list.
     with st.expander("🔒 Secret Navigation Space", expanded=False):
         st.caption(
             "Locked hidden sections are hidden for all normal users. "
@@ -9504,10 +9669,11 @@ def render_navigation_sidebar():
             "in the code or set NAV_HIDDEN_SECTIONS in Streamlit secrets."
         )
         password = st.text_input("Secret space password", type="password", key="nav_secret_password")
-        expected = _safe_secret_value("NAV_ADMIN_PASSWORD", "tetr-admin")
-        allow_admin_reveal = _secret_bool("NAV_ALLOW_ADMIN_REVEAL", True)
 
         if password and password == expected:
+            if not st.session_state.get("nav_secret_unlocked", False):
+                st.session_state["nav_secret_unlocked"] = True
+                safe_rerun()
             st.success("Admin access unlocked.")
             if hidden_sections:
                 st.caption("Currently locked hidden sections: " + ", ".join(hidden_sections))
@@ -9515,7 +9681,7 @@ def render_navigation_sidebar():
                 st.caption("No sections are currently locked as hidden.")
 
             if allow_admin_reveal:
-                admin_show_hidden = st.checkbox(
+                st.checkbox(
                     "Admin only: show hidden sections for me",
                     value=bool(st.session_state.get("admin_show_hidden_nav", False)),
                     key="admin_show_hidden_nav",
@@ -9538,25 +9704,6 @@ def render_navigation_sidebar():
             st.error("Incorrect secret password.")
         else:
             st.info("Enter the secret password to view/admin-reveal locked sections.")
-
-    if admin_show_hidden:
-        visible_pages = list(ALL_NAV_PAGES)
-    else:
-        visible_pages = [p for p in ALL_NAV_PAGES if p not in set(hidden_sections)]
-    if not visible_pages:
-        visible_pages = ["Overview"]
-
-    current_page = st.session_state.get("nav_page", "Overview")
-    if current_page not in visible_pages:
-        current_page = "Overview" if "Overview" in visible_pages else visible_pages[0]
-    default_index = visible_pages.index(current_page) if current_page in visible_pages else 0
-    if st.session_state.get("nav") not in visible_pages:
-        st.session_state["nav"] = current_page
-    page = st.radio("Go to", visible_pages, index=default_index, label_visibility="collapsed", key="nav")
-    st.session_state["nav_page"] = page
-
-    if hidden_sections and not admin_show_hidden:
-        st.caption(f"Locked hidden sections: {len(hidden_sections)}")
 
     return page
 
