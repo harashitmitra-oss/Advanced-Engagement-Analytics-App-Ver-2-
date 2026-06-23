@@ -4,8 +4,6 @@ import re
 from datetime import datetime
 from io import BytesIO
 from pathlib import Path
-from urllib.parse import quote
-
 import numpy as np
 import pandas as pd
 import plotly.express as px
@@ -39,24 +37,6 @@ ALL_NAV_PAGES = [
     "Activities", "Hritabh",
 ]
 
-NAV_PAGE_ICONS = {
-    "Overview": "📊",
-    "Recent Activity": "⚡",
-    "Success Metrics": "✅",
-    "Student Profile": "👤",
-    "UG": "🎓",
-    "PG": "🎯",
-    "Courses": "📚",
-    "UG vs PG": "⚖️",
-    "Tetr-X": "🚀",
-    "T-7 & T+7 Analysis": "⏱️",
-    "Conversion": "📈",
-    "Retention": "🔁",
-    "Refund Analytics": "💰",
-    "Community Impact": "🌐",
-    "Activities": "🎲",
-    "Hritabh": "🧩",
-}
 # ---------------- Global Navigation Lock ----------------
 # Put sections here when you want them hidden for EVERY normal user.
 # These sections will not appear in navigation unless the admin opens the
@@ -175,10 +155,9 @@ def inject_css():
             margin-top: 6px;
             margin-bottom: 10px;
         }}
-        .nav-section-link {{
+        .nav-section-item {{
             display: flex;
             align-items: center;
-            gap: 10px;
             width: 100%;
             box-sizing: border-box;
             padding: 10px 12px 10px 13px;
@@ -191,28 +170,14 @@ def inject_css():
             font-weight: 750;
             line-height: 1.15;
             box-shadow: 0 2px 8px rgba(11, 61, 46, 0.035);
-            transition: background 0.12s ease, border-color 0.12s ease, transform 0.12s ease;
+            min-height: 42px;
         }}
-        .nav-section-link:hover {{
-            background: #eef8f2;
-            border-color: #b7dec7;
-            color: #0b3d2e !important;
-            transform: translateX(2px);
-        }}
-        .nav-section-link.active {{
+        .nav-section-item.active {{
             background: #dff3e7;
             border-color: #8fcaab;
             border-left-color: #1f7a56;
             color: #0b3d2e !important;
             box-shadow: 0 4px 12px rgba(31, 122, 86, 0.11);
-        }}
-        .nav-section-icon {{
-            display: inline-flex;
-            width: 22px;
-            min-width: 22px;
-            justify-content: center;
-            align-items: center;
-            font-size: 15px;
         }}
         .nav-section-title {{
             display: inline-block;
@@ -224,6 +189,35 @@ def inject_css():
             color: #557166;
             font-size: 12px;
             margin: 4px 0 8px 2px;
+        }}
+        section[data-testid="stSidebar"] div.stButton > button {{
+            justify-content: flex-start;
+            width: 100%;
+            box-sizing: border-box;
+            padding: 10px 12px 10px 13px;
+            border-radius: 13px;
+            border: 1px solid #cfe8d9;
+            border-left: 5px solid transparent;
+            background: #ffffff;
+            color: #12372a !important;
+            text-decoration: none !important;
+            font-weight: 750;
+            line-height: 1.15;
+            box-shadow: 0 2px 8px rgba(11, 61, 46, 0.035);
+            min-height: 42px;
+            transition: background 0.12s ease, border-color 0.12s ease, transform 0.12s ease;
+        }}
+        section[data-testid="stSidebar"] div.stButton > button:hover {{
+            background: #eef8f2;
+            border-color: #b7dec7;
+            border-left-color: #b7dec7;
+            color: #0b3d2e !important;
+            transform: translateX(2px);
+        }}
+        section[data-testid="stSidebar"] div.stButton > button p {{
+            text-align: left;
+            width: 100%;
+            font-weight: 750;
         }}
         </style>
         """,
@@ -9588,24 +9582,42 @@ def _match_nav_page(raw_page: str, visible_pages) -> str:
     return ""
 
 
-def _nav_link_html(page: str, active: bool) -> str:
-    icon = NAV_PAGE_ICONS.get(page, "•")
-    section_param = quote(page, safe="")
-    css_class = "nav-section-link active" if active else "nav-section-link"
-    aria = ' aria-current="page"' if active else ""
-    return (
-        f'<a class="{css_class}" href="?section={section_param}"{aria}>'
-        f'<span class="nav-section-icon">{html.escape(icon)}</span>'
-        f'<span class="nav-section-title">{html.escape(page)}</span>'
-        f'</a>'
-    )
+def _safe_set_query_param(name: str, value: str):
+    """Set a query parameter in the current tab without using external links."""
+    try:
+        if hasattr(st, "query_params"):
+            st.query_params[name] = value
+        else:
+            st.experimental_set_query_params(**{name: value})
+    except Exception:
+        pass
+
+
+def _nav_button_key(page: str) -> str:
+    safe = re.sub(r"[^a-zA-Z0-9_]+", "_", clean_text(page)).strip("_").lower()
+    return f"nav_btn_{safe or 'page'}"
 
 
 def render_active_left_border_nav(visible_pages, current_page: str) -> str:
-    """Render the radio replacement: active-left-border navigation links."""
-    links = [_nav_link_html(page, page == current_page) for page in visible_pages]
-    st.markdown('<div class="nav-section-menu">' + "".join(links) + '</div>', unsafe_allow_html=True)
-    return current_page
+    """Render same-page active-left-border navigation without icons or anchor links."""
+    selected_page = current_page
+    st.markdown('<div class="nav-section-menu">', unsafe_allow_html=True)
+    for page in visible_pages:
+        if page == current_page:
+            st.markdown(
+                f'<div class="nav-section-item active" aria-current="page">'
+                f'<span class="nav-section-title">{html.escape(page)}</span>'
+                f'</div>',
+                unsafe_allow_html=True,
+            )
+        else:
+            if st.button(page, key=_nav_button_key(page), use_container_width=True):
+                selected_page = page
+                st.session_state["nav_page"] = page
+                _safe_set_query_param("section", page)
+                safe_rerun()
+    st.markdown('</div>', unsafe_allow_html=True)
+    return selected_page
 
 
 def render_navigation_sidebar():
