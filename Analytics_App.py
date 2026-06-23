@@ -223,6 +223,46 @@ def normalize_event_type_for_profile_graph(event_type: str) -> str:
     """
     return map_profile_plot_event_type(event_type)
 
+
+def is_deferral_status_for_program(status_value, program_or_sheet: str = "") -> bool:
+    """Program-specific Deferral rule used by Overview and any copied overview logic.
+
+    UG: any non-refund status containing Deferral is counted as deferred/paid.
+    PG: only statuses written as Admitted: Deferral / Admitted Deferral are counted.
+    Refund rows are always excluded.
+    """
+    status = clean_text(status_value).lower().strip()
+    ctx = clean_text(program_or_sheet).lower().strip()
+    if not status or "refund" in status:
+        return False
+    is_pg = ctx == "pg" or "pg" in ctx
+    if is_pg:
+        return bool(re.search(r"\badmitted\s*:?\s*deferral\b", status))
+    return "deferral" in status
+
+
+def is_paid_status_for_program(status_value, program_or_sheet: str = "") -> bool:
+    """Paid/admitted rule shared by helper logic.
+
+    Counts exact Admitted and valid program-specific Deferral statuses, excluding refunds.
+    """
+    status = clean_text(status_value).lower().strip()
+    if not status or "refund" in status:
+        return False
+    return status == "admitted" or is_deferral_status_for_program(status, program_or_sheet)
+
+
+def paid_status_mask_for_program(status_series: pd.Series, program_or_sheet: str = "") -> pd.Series:
+    if status_series is None:
+        return pd.Series(dtype=bool)
+    return status_series.astype(str).map(lambda x: is_paid_status_for_program(x, program_or_sheet)).astype(bool)
+
+
+def deferral_status_mask_for_program(status_series: pd.Series, program_or_sheet: str = "") -> pd.Series:
+    if status_series is None:
+        return pd.Series(dtype=bool)
+    return status_series.astype(str).map(lambda x: is_deferral_status_for_program(x, program_or_sheet)).astype(bool)
+
 def normalize_community_status(x):
     s = clean_text(x).strip().lower()
     if s in {"tetr x", "tetrx", "added to term 0"}:
@@ -1451,7 +1491,7 @@ def load_dashboard_data(source_mode: str, spreadsheet_id=None, file_bytes=None):
         combined_profiles.append(df.assign(profile_source=s))
     profile_df = pd.concat(combined_profiles, ignore_index=True) if combined_profiles else pd.DataFrame()
 
-    data = {
+    return {
         "sheet_names": sheet_names,
         "missing": missing,
         "masters": masters,
@@ -1464,16 +1504,6 @@ def load_dashboard_data(source_mode: str, spreadsheet_id=None, file_bytes=None):
         "dates_df": dates_df,
         "winner_df": winner_df,
     }
-    # Cached reusable indexes keep the new Overview fast and prevent repeated event-sheet scans on reruns.
-    try:
-        data["all_time_student_activity_index"] = build_all_time_student_activity_index(data)
-    except Exception:
-        data["all_time_student_activity_index"] = pd.DataFrame()
-    try:
-        data["winner_count_index"] = build_winner_count_index(data)
-    except Exception:
-        data["winner_count_index"] = {}
-    return data
 
 
 # ---------------- Rendering ----------------
@@ -1680,888 +1710,138 @@ def payment_percentage_by_country(overview_df, country_col):
     return grp.sort_values(["Paid Student %", "Paid Students"], ascending=[False, False])
 
 
-def build_all_time_student_activity_index(data: dict) -> pd.DataFrame:
-    """Build one reusable all-time attendance index across batch + Tetr-X sheets.
-
-    One pass over all activity/event columns replaces the previous Overview logic
-    that scanned every activity sheet separately for every offered student.
-    """
-    rows = []
-    activities = data.get("activities", {}) if isinstance(data, dict) else {}
-    activity_ctx = data.get("activity_ctx", {}) if isinstance(data, dict) else {}
-
-    for sheet, ctx in activity_ctx.items():
-        sdf = activities.get(sheet, pd.DataFrame())
-        event_info = ctx.get("event_info", pd.DataFrame()) if isinstance(ctx, dict) else pd.DataFrame()
-        if sdf is None or sdf.empty or event_info is None or event_info.empty:
-            continue
-
-        id_cols = [c for c in ["email_key", "student_key", "student_name"] if c in sdf.columns]
-        if not id_cols:
-            continue
-
-        base_ids = sdf[id_cols].copy()
-        if "email_key" not in base_ids.columns:
-            base_ids["email_key"] = ""
-        if "student_key" not in base_ids.columns:
-            base_ids["student_key"] = ""
-        if "student_name" not in base_ids.columns:
-            base_ids["student_name"] = ""
-        base_ids["student_id"] = base_ids.apply(
-            lambda r: clean_text(r.get("email_key", "")) or clean_text(r.get("student_key", "")) or normalize_name(r.get("student_name", "")),
-            axis=1,
-        )
-        base_ids = base_ids[base_ids["student_id"].astype(str).str.len() > 0]
-        if base_ids.empty:
-            continue
-
-        for _, ev in event_info.iterrows():
-            col = ev.get("column_name")
-            if not col or col not in sdf.columns:
-                continue
-            attended_mask = pd.to_numeric(sdf[col], errors="coerce").fillna(0).gt(0)
-            if not attended_mask.any():
-                continue
-            ev_name = clean_text(ev.get("event_name", "")) or clean_text(col)
-            ev_type = clean_text(ev.get("event_type", "Other")) or "Other"
-            ev_date = pd.to_datetime(ev.get("event_date", pd.NaT), errors="coerce")
-            ev_date_norm = ev_date.normalize() if pd.notna(ev_date) else pd.NaT
-            date_key = ev_date_norm.strftime("%Y-%m-%d") if pd.notna(ev_date_norm) else "undated"
-            part = base_ids.loc[attended_mask.reindex(base_ids.index, fill_value=False), ["student_id", "email_key", "student_key", "student_name"]].copy()
-            if part.empty:
-                continue
-            part["event_name"] = ev_name
-            part["event_type"] = ev_type
-            part["event_date"] = ev_date_norm
-            part["source_sheets"] = sheet
-            part["dedupe_key"] = (
-                part["student_id"].astype(str)
-                + "|" + normalize_name(ev_name)
-                + "|" + normalize_name(ev_type)
-                + "|" + date_key
-            )
-            rows.append(part)
-
-    if not rows:
-        return pd.DataFrame(columns=["student_id", "event_name", "event_type", "event_date", "source_sheets", "dedupe_key"])
-
-    out = pd.concat(rows, ignore_index=True)
-    out = (
-        out.sort_values(["event_date", "event_name", "source_sheets"], na_position="last")
-        .groupby("dedupe_key", as_index=False)
-        .agg({
-            "student_id": "first",
-            "email_key": "first",
-            "student_key": "first",
-            "student_name": "first",
-            "event_name": "first",
-            "event_type": "first",
-            "event_date": "first",
-            "source_sheets": lambda s: ", ".join(sorted(dict.fromkeys([clean_text(x) for x in s if clean_text(x)]))),
-        })
-    )
-    out["event_bucket"] = out["event_type"].map(_community_impact_event_bucket)
-    return out
-
-
-def build_winner_count_index(data: dict) -> dict:
-    """Reusable all-time Winner/Spotlight count by email/name student id."""
-    winner_df = data.get("winner_df", pd.DataFrame()) if isinstance(data, dict) else pd.DataFrame()
-    if winner_df is None or winner_df.empty:
-        return {}
-    w = winner_df.copy()
-    kind_mask = pd.Series(False, index=w.index)
-    if "is_winner" in w.columns:
-        kind_mask = kind_mask | w["is_winner"].fillna(False).astype(bool)
-    if "is_spotlight" in w.columns:
-        kind_mask = kind_mask | w["is_spotlight"].fillna(False).astype(bool)
-    if kind_mask.any():
-        w = w.loc[kind_mask].copy()
-    if w.empty:
-        return {}
-    dedupe_cols = [c for c in ["challenge_name", "announcement_date", "entry_type", "email_key", "student_key"] if c in w.columns]
-    if dedupe_cols:
-        w = w.drop_duplicates(subset=dedupe_cols).copy()
-    counts = {}
-    if "email_key" in w.columns:
-        for sid, cnt in w[w["email_key"].astype(str).str.len().gt(0)].groupby(w["email_key"].astype(str).map(clean_text)).size().items():
-            if sid:
-                counts[sid] = counts.get(sid, 0) + int(cnt)
-    if "student_key" in w.columns:
-        for sid, cnt in w[w["student_key"].astype(str).str.len().gt(0)].groupby(w["student_key"].astype(str).map(clean_text)).size().items():
-            if sid:
-                counts[sid] = max(counts.get(sid, 0), int(cnt))
-    return counts
-
-def _impact_score_from_activity_mix(total_touchpoints, online_masterclass_count, competition_count, general_fun_count, winner_count):
-    """Overview engagement-quality scoring.
-
-    Participation counts passed into this function should already be scoped by the
-    caller. For the Overview page they are first-30-days touchpoints from the
-    offer date. Winner/Spotlight counts are all-time.
-    """
-    def _int0(v):
-        v = pd.to_numeric(v, errors="coerce")
-        return 0 if pd.isna(v) else int(v)
-
-    n = _int0(total_touchpoints)
-    om = _int0(online_masterclass_count)
-    comp = _int0(competition_count)
-    gen = _int0(general_fun_count)
-    winner_count = _int0(winner_count)
-
-    if n <= 0:
-        return 0.0, "No Impact"
-    if n <= 3:
-        score, impact = 0.33, "Low Impact"
-    elif n <= 7:
-        score, impact = 0.66, "Medium Impact"
-    else:
-        score, impact = 1.0, "High Impact"
-
-    non_general_count = max(0, n - gen)
-    three_all_non_general = n == 3 and gen == 0
-    has_non_general = non_general_count >= 1
-
-    # Downgrade rules requested for Overview engagement quality.
-    # These apply only when the student has no Winner/Spotlight record.
-    if winner_count <= 0:
-        if gen >= 4 and gen == n:
-            return 0.33, "Low Impact"
-        if (om + comp) <= 2:
-            return 0.33, "Low Impact"
-
-    # Same Community Impact upgrades, but the caller decides the date/payment scope.
-    if n > 0 and (om >= 5 or comp >= 5):
-        return 1.0, "High Impact"
-    if winner_count >= 1 and non_general_count >= 3:
-        return 1.0, "High Impact"
-    if winner_count >= 2 and non_general_count >= 1:
-        return 1.0, "High Impact"
-    if impact == "Medium Impact" and winner_count > 2:
-        return 1.0, "High Impact"
-    if impact == "Medium Impact" and n in {6, 7} and winner_count >= 1:
-        return 1.0, "High Impact"
-
-    if impact == "Low Impact" and three_all_non_general:
-        return 0.66, "Medium Impact"
-    if impact == "Low Impact" and winner_count >= 1 and has_non_general:
-        return 0.66, "Medium Impact"
-    return score, impact
-
-
-def _overview_engagement_quality_reason(n, om, comp, gen, winner_count):
-    """Human-readable reason for the Overview engagement tier audit table."""
-    def _int0(v):
-        v = pd.to_numeric(v, errors="coerce")
-        return 0 if pd.isna(v) else int(v)
-    n = _int0(n); om = _int0(om); comp = _int0(comp); gen = _int0(gen); winner_count = _int0(winner_count)
-    non_general_count = max(0, n - gen)
-    if n <= 0:
-        return "No first-30-days dated participation"
-    if winner_count <= 0 and gen >= 4 and gen == n:
-        return "Downgraded to Low: 4+ General/Fun only and no Winner/Spotlight"
-    if winner_count <= 0 and (om + comp) <= 2:
-        return "Downgraded to Low: Online/Masterclass + Competition/Hackathon touchpoints <= 2 and no Winner/Spotlight"
-    if n > 0 and (om >= 5 or comp >= 5):
-        return "High: 5+ Online/Masterclass or 5+ Competition/Hackathon touchpoints"
-    if winner_count >= 1 and non_general_count >= 3:
-        return "High: Winner/Spotlight + 3+ non-General/Fun touchpoints"
-    if winner_count >= 2 and non_general_count >= 1:
-        return "High: 2+ Winner/Spotlight + at least 1 non-General/Fun touchpoint"
-    if 4 <= n <= 7 and winner_count > 2:
-        return "High: Medium base + more than 2 Winner/Spotlight records"
-    if 6 <= n <= 7 and winner_count >= 1:
-        return "High: 6-7 touchpoints + Winner/Spotlight"
-    if n == 3 and gen == 0:
-        return "Medium: Low base upgraded because all 3 touchpoints are non-General/Fun"
-    if n <= 3 and winner_count >= 1 and non_general_count >= 1:
-        return "Medium: Low base upgraded by Winner/Spotlight + non-General/Fun touchpoint"
-    if n <= 3:
-        return "Low: 1-3 first-30-days touchpoints"
-    if n <= 7:
-        return "Medium: 4-7 first-30-days touchpoints"
-    return "High: 8+ first-30-days touchpoints"
-
-
-def _all_time_winner_count_for_student(data: dict, row: pd.Series) -> int:
-    """Count all-time Winner/Spotlight records for a student; no payment-date cutoff."""
-    winner_df = data.get("winner_df", pd.DataFrame()) if isinstance(data, dict) else pd.DataFrame()
-    if winner_df is None or winner_df.empty:
-        return 0
-    w = winner_df.copy()
-
-    kind_mask = pd.Series(False, index=w.index)
-    if "is_winner" in w.columns:
-        kind_mask = kind_mask | w["is_winner"].fillna(False).astype(bool)
-    if "is_spotlight" in w.columns:
-        kind_mask = kind_mask | w["is_spotlight"].fillna(False).astype(bool)
-    if kind_mask.any():
-        w = w.loc[kind_mask].copy()
-    if w.empty:
-        return 0
-
-    email = clean_text(row.get("email_key", "")) or clean_text(row.get("Email", ""))
-    student_key = clean_text(row.get("student_key", "")) or normalize_name(row.get("student_name", row.get("Name", "")))
-    mask = pd.Series(False, index=w.index)
-    if email and "email_key" in w.columns:
-        mask = mask | w["email_key"].astype(str).map(clean_text).eq(email)
-    if student_key and "student_key" in w.columns:
-        mask = mask | w["student_key"].astype(str).map(clean_text).eq(student_key)
-    w = w.loc[mask].copy()
-    if w.empty:
-        return 0
-
-    dedupe_cols = [c for c in ["challenge_name", "announcement_date", "entry_type", "email_key", "student_key"] if c in w.columns]
-    if dedupe_cols:
-        return int(w.drop_duplicates(subset=dedupe_cols).shape[0])
-    return int(len(w))
-
-
-def build_overview_first30_engagement_quality(data: dict) -> pd.DataFrame:
-    """Offered-student engagement quality for Overview using the first 30 days.
-
-    Scope:
-    - Students: all offered students from Master UG / Master PG.
-    - Participation: unique dated activity touchpoints in the first 30 days from
-      Offered Date using the Dates sheet. If Deadline is present, it is used as
-      the end of the first-30-days window; otherwise Offered Date + 30 days is used.
-    - Winners/Spotlight: counted all-time.
-    """
-    overview_df = data.get("overview_df", pd.DataFrame()) if isinstance(data, dict) else pd.DataFrame()
-    empty_cols = [
-        "student_id", "Name", "Email", "UG/PG", "Batch", "Status",
-        "Offered Date", "First 30 Days End", "First 30d Window",
-        "Total Touchpoints (n)", "Event Breakdown", "All-Time Winner",
-        "_OnlineMasterclass Count", "_Competition Count", "_General/Fun Count",
-        "Impact score", "Impact", "Engagement Rule Applied"
-    ]
-    if overview_df is None or overview_df.empty:
-        return pd.DataFrame(columns=empty_cols)
-
-    base = overview_df.copy()
-    base["_overview_student_id"] = base.apply(
-        lambda r: clean_text(r.get("email_key", "")) or clean_text(r.get("student_key", "")) or normalize_name(r.get("student_name", "")),
-        axis=1,
-    )
-    base = base[base["_overview_student_id"].astype(str).str.len() > 0].copy()
-    base = base.drop_duplicates(subset=["_overview_student_id"], keep="first")
-
-    activity_index = data.get("all_time_student_activity_index", pd.DataFrame()) if isinstance(data, dict) else pd.DataFrame()
-    winner_counts = data.get("winner_count_index", {}) if isinstance(data, dict) else {}
-    # Lazy fallback keeps Overview accurate even when older cached data lacks the fast indexes.
-    if (activity_index is None or activity_index.empty) and isinstance(data, dict):
-        try:
-            activity_index = build_all_time_student_activity_index(data)
-        except Exception:
-            activity_index = pd.DataFrame()
-    if (not winner_counts) and isinstance(data, dict):
-        try:
-            winner_counts = build_winner_count_index(data)
-        except Exception:
-            winner_counts = {}
-
-    if activity_index is not None and not activity_index.empty:
-        aidx = activity_index.copy()
-        aidx["event_date"] = pd.to_datetime(aidx.get("event_date", pd.NaT), errors="coerce").dt.normalize()
-        aidx["event_identity_key"] = (
-            aidx.get("event_name", pd.Series("", index=aidx.index)).astype(str).map(normalize_name)
-            + "|" + aidx.get("event_type", pd.Series("", index=aidx.index)).astype(str).map(normalize_name)
-            + "|" + aidx["event_date"].dt.strftime("%Y-%m-%d").fillna("undated")
-        )
-        if "event_bucket" not in aidx.columns:
-            aidx["event_bucket"] = aidx.get("event_type", pd.Series("", index=aidx.index)).map(_community_impact_event_bucket)
-
-        # Pre-index by every stable student identifier so email/name mismatches do not lose activity.
-        key_to_indices = {}
-        for idx, ar in aidx.iterrows():
-            keys = {
-                clean_text(ar.get("student_id", "")),
-                clean_text(ar.get("email_key", "")),
-                clean_text(ar.get("student_key", "")),
-                normalize_name(ar.get("student_name", "")),
-            }
-            for key in [k for k in keys if k]:
-                key_to_indices.setdefault(key, []).append(idx)
-    else:
-        aidx = pd.DataFrame()
-        key_to_indices = {}
-
-    rows = []
-    for _, r in base.iterrows():
-        sid = clean_text(r.get("_overview_student_id", ""))
-        email = clean_text(r.get("email_key", ""))
-        student_key = clean_text(r.get("student_key", "")) or normalize_name(r.get("student_name", ""))
-        name_key = normalize_name(r.get("student_name", ""))
-
-        offered_dt = pd.to_datetime(r.get("offered_date_parsed", pd.NaT), errors="coerce")
-        deadline_dt = pd.to_datetime(r.get("deadline_parsed", pd.NaT), errors="coerce")
-        first30_end = pd.NaT
-        window_label = "Missing Offered Date"
-        if pd.notna(offered_dt):
-            offered_dt = offered_dt.normalize()
-            first30_end = deadline_dt.normalize() if pd.notna(deadline_dt) else offered_dt + pd.Timedelta(days=30)
-            window_label = f"{offered_dt.strftime('%d-%b-%Y')} to {first30_end.strftime('%d-%b-%Y')}"
-
-        counts = {}
-        n = 0
-        if not aidx.empty and pd.notna(offered_dt):
-            match_indices = set()
-            for key in [sid, email, student_key, name_key]:
-                if key and key in key_to_indices:
-                    match_indices.update(key_to_indices[key])
-            if match_indices:
-                ev = aidx.loc[list(match_indices)].copy()
-                ev = ev[ev["event_date"].notna() & ev["event_date"].between(offered_dt, first30_end, inclusive="both")].copy()
-                if not ev.empty:
-                    ev = ev.drop_duplicates(subset=["event_identity_key"]).copy()
-                    counts = ev["event_bucket"].value_counts().astype(int).to_dict()
-                    n = int(len(ev))
-
-        winner_count = int(max(winner_counts.get(email, 0), winner_counts.get(student_key, 0), winner_counts.get(sid, 0), winner_counts.get(name_key, 0)))
-        om = int(counts.get("Online Events & Masterclasses", 0))
-        comp = int(counts.get("Competition", 0))
-        gen = int(counts.get("General/Fun", 0))
-        score, impact = _impact_score_from_activity_mix(n, om, comp, gen, winner_count)
-        reason = _overview_engagement_quality_reason(n, om, comp, gen, winner_count)
-
-        rows.append({
-            "student_id": sid,
-            "Name": clean_text(r.get("student_name", "")),
-            "Email": email,
-            "UG/PG": clean_text(r.get("Program", "")),
-            "Batch": clean_text(r.get("Batch", "")),
-            "Status": clean_text(r.get("resolved_status", r.get("master_status_value", ""))),
-            "Offered Date": offered_dt,
-            "First 30 Days End": first30_end,
-            "First 30d Window": window_label,
-            "Total Touchpoints (n)": n,
-            "Event Breakdown": _community_impact_event_breakdown_text(counts),
-            "All-Time Winner": winner_count,
-            "_OnlineMasterclass Count": om,
-            "_Competition Count": comp,
-            "_General/Fun Count": gen,
-            "Impact score": score,
-            "Impact": impact,
-            "Engagement Rule Applied": reason,
-        })
-
-    return pd.DataFrame(rows)
-
-
-def build_overview_all_time_engagement_quality(data: dict) -> pd.DataFrame:
-    """Compatibility wrapper: Overview now uses first-30-days engagement quality."""
-    return build_overview_first30_engagement_quality(data)
-
-
-
-def build_overview_activation_mask(data: dict, overview_df: pd.DataFrame) -> pd.Series:
-    """Overview activation source of truth.
-
-    A student is Active if they have activity in any of these places:
-    - Master UG / Master PG parsed activity columns or Engagement % (Batch Data)
-    - Any UG/PG batch sheet attendance
-    - Any Tetr-X UG/PG sheet attendance
-
-    Matching is by email first, then normalized student name. This keeps Overview
-    totals tied to the offered-student Master list while detecting activation
-    wherever the student appeared later in Batch or Tetr-X sheets.
-    """
-    if overview_df is None or overview_df.empty:
-        return pd.Series(dtype=bool)
-
-    active_by_email = set()
-    active_by_student_key = set()
-    active_by_student_id = set()
-
-    def _add_active_ids(frame: pd.DataFrame, mask: pd.Series):
-        if frame is None or frame.empty or mask is None:
-            return
-        mask = mask.reindex(frame.index, fill_value=False).fillna(False).astype(bool)
-        if not mask.any():
-            return
-        sub = frame.loc[mask]
-        for _, r in sub.iterrows():
-            email = clean_text(r.get("email_key", ""))
-            skey = clean_text(r.get("student_key", "")) or normalize_name(r.get("student_name", ""))
-            sid = email or skey
-            if email:
-                active_by_email.add(email)
-            if skey:
-                active_by_student_key.add(skey)
-            if sid:
-                active_by_student_id.add(sid)
-
-    # Master rows: keep existing parsed master activity sources.
-    master_mask = pd.Series(False, index=overview_df.index)
-    if "is_active" in overview_df.columns:
-        master_mask = master_mask | overview_df["is_active"].fillna(False).astype(bool)
-    if "active_master" in overview_df.columns:
-        master_mask = master_mask | overview_df["active_master"].fillna(False).astype(bool)
-    if "participation_count_master" in overview_df.columns:
-        master_mask = master_mask | pd.to_numeric(overview_df["participation_count_master"], errors="coerce").fillna(0).gt(0)
-    if "engagement_batch_data_pct" in overview_df.columns:
-        master_mask = master_mask | pd.to_numeric(overview_df["engagement_batch_data_pct"], errors="coerce").fillna(0).gt(0)
-    _add_active_ids(overview_df, master_mask)
-
-    # Batch + Tetr-X sheets: use already parsed activity frames so this does not
-    # rescan Google Sheets or raw workbooks.
-    activities = data.get("activities", {}) if isinstance(data, dict) else {}
-    for _, frame in activities.items():
-        if frame is None or frame.empty:
-            continue
-        sheet_mask = pd.Series(False, index=frame.index)
-        if "is_active" in frame.columns:
-            sheet_mask = sheet_mask | frame["is_active"].fillna(False).astype(bool)
-        if "participation_count" in frame.columns:
-            sheet_mask = sheet_mask | pd.to_numeric(frame["participation_count"], errors="coerce").fillna(0).gt(0)
-        if "engagement_score" in frame.columns:
-            sheet_mask = sheet_mask | pd.to_numeric(frame["engagement_score"], errors="coerce").fillna(0).gt(0)
-        _add_active_ids(frame, sheet_mask)
-
-    # Fast all-time attendance index is another safety net for Batch + Tetr-X.
-    activity_index = data.get("all_time_student_activity_index", pd.DataFrame()) if isinstance(data, dict) else pd.DataFrame()
-    if activity_index is not None and not activity_index.empty:
-        for _, r in activity_index.iterrows():
-            email = clean_text(r.get("email_key", ""))
-            skey = clean_text(r.get("student_key", "")) or normalize_name(r.get("student_name", ""))
-            sid = clean_text(r.get("student_id", "")) or email or skey
-            if email:
-                active_by_email.add(email)
-            if skey:
-                active_by_student_key.add(skey)
-            if sid:
-                active_by_student_id.add(sid)
-
-    result = []
-    for idx, r in overview_df.iterrows():
-        email = clean_text(r.get("email_key", ""))
-        skey = clean_text(r.get("student_key", "")) or normalize_name(r.get("student_name", ""))
-        sid = email or skey
-        result.append(bool(master_mask.loc[idx]) or (email and email in active_by_email) or (skey and skey in active_by_student_key) or (sid and sid in active_by_student_id))
-    return pd.Series(result, index=overview_df.index).astype(bool)
-
 def render_overview(data):
-    """Clean Overview v2.
-
-    Overview definitions:
-    - Total Offered Students: all valid rows from Master UG + Master PG.
-    - Community Acquisition: WA/community joined using the existing master-sheet logic
-      from `Admitted Group (Batch onwards)` / community status. Counts In, TetrX,
-      Tetr X, Added to Term 0, and Left as acquired.
-    - Activation: Active Students across Master, Batch, and Tetr-X sheets.
-      Shows count, % of all offered, and % of acquired/in-community students.
-    - Paid Students: Status = Admitted OR status contains Deferral, excluding Refund.
-    - Engagement tiers: Community Impact categorisation logic applied to all offered
-      students using first-30-days participation from Offered Date + all-time Winner/Spotlight records.
-    """
     st.subheader("Overview")
-
-    overview_df = data.get("overview_df", pd.DataFrame()) if isinstance(data, dict) else pd.DataFrame()
-    if overview_df is None or overview_df.empty:
+    overview_df = data["overview_df"]
+    if overview_df.empty:
         st.warning("Master UG / Master PG could not be loaded.")
         return
 
-    overview_df = overview_df.copy()
-    total_students = int(len(overview_df))
-
-    # Keep existing Overview distribution charts that depend on master-sheet country/income columns.
     name_col = "student_name"
-    master_ug_ctx = data.get("master_ctx", {}).get("Master UG", {}) if isinstance(data, dict) else {}
-    master_pg_ctx = data.get("master_ctx", {}).get("Master PG", {}) if isinstance(data, dict) else {}
+    master_ug_ctx = data["master_ctx"].get("Master UG", {})
+    master_pg_ctx = data["master_ctx"].get("Master PG", {})
     country_col = master_ug_ctx.get("country_col") or master_pg_ctx.get("country_col")
     income_col = master_ug_ctx.get("income_col") or master_pg_ctx.get("income_col")
 
-    # ---------------- Paid / refund rule ----------------
-    # Deferral is treated as paid/admitted everywhere in Overview analysis.
-    status_source = overview_df.get(
-        "resolved_status",
-        overview_df.get("master_status_value", pd.Series("", index=overview_df.index)),
-    ).astype(str).map(clean_text)
-    status_l = status_source.str.lower().str.strip()
-    refund_mask = (
-        overview_df.get("is_refunded", pd.Series(False, index=overview_df.index)).fillna(False).astype(bool)
-        | status_l.str.contains("refund", na=False)
-    )
-    program_series = overview_df.get("Program", pd.Series("", index=overview_df.index)).astype(str)
-    deferred_mask = pd.Series(
-        [is_deferral_status_for_program(status, program) for status, program in zip(status_source, program_series)],
-        index=overview_df.index,
-    )
-    admitted_mask = status_l.eq("admitted")
-    paid_mask = (admitted_mask | deferred_mask) & (~refund_mask)
-
-    overview_df["is_refunded"] = refund_mask
-    overview_df["is_deferred"] = deferred_mask & (~refund_mask)
-    overview_df["is_paid"] = paid_mask
+    # Overview-only paid rule, based on the source master sheet:
+    # - Master UG: Admitted OR any status containing Deferral
+    # - Master PG: Admitted OR status containing Admitted:Deferral / Admitted: Deferral
+    # Refund rows are excluded from Paid / Admitted.
+    overview_df = overview_df.copy()
+    _status_for_overview = overview_df.get("resolved_status", overview_df.get("master_status_value", pd.Series("", index=overview_df.index))).astype(str).str.lower()
+    _program_for_overview = overview_df.get("Program", pd.Series("", index=overview_df.index)).astype(str).str.upper().str.strip()
+    _refund_for_overview = overview_df.get("is_refunded", pd.Series(False, index=overview_df.index)).fillna(False).astype(bool) | _status_for_overview.str.contains("refund", na=False)
+    _is_admitted_exact = _status_for_overview.str.strip().eq("admitted")
+    _is_ug_deferral = _program_for_overview.eq("UG") & _status_for_overview.str.contains("deferral", na=False)
+    _is_pg_admitted_deferral = _program_for_overview.eq("PG") & _status_for_overview.str.contains(r"admitted\s*:\s*deferral", na=False, regex=True)
+    overview_df["is_refunded"] = _refund_for_overview
+    overview_df["is_paid"] = (_is_admitted_exact | _is_ug_deferral | _is_pg_admitted_deferral) & (~_refund_for_overview)
     overview_df["status_bucket"] = np.select(
-        [overview_df["is_refunded"], overview_df["is_deferred"], overview_df["is_paid"]],
-        ["Refunded", "Deferred", "Paid / Admitted"],
+        [overview_df["is_refunded"], overview_df["is_paid"]],
+        ["Refunded", "Paid / Admitted"],
         default="Not Paid",
     )
 
-    # ---------------- Community acquisition ----------------
-    # Keep previous Joined WA / Community Joined logic exactly for Overview.
-    comm_series = overview_df.get(
+    total_students, total_active, total_paid, total_refunded, ug_students, pg_students, ug_paid, pg_paid, ug_refunded, pg_refunded = overview_metrics(overview_df)
+    # Overview-only Joined WA rule: use Master UG / Master PG `Admitted Group (Batch onwards)`.
+    # Count In, TetrX, Tetr X, Added to Term 0, and Left irrespective of uppercase/lowercase.
+    _overview_comm_series = overview_df.get(
         "admitted_group_batch_onwards_raw",
-        overview_df.get("community_status_value", pd.Series("", index=overview_df.index)),
+        overview_df.get("community_status_value", pd.Series("", index=overview_df.index))
     ).astype(str)
-
-    def _overview_is_joined_community(x):
+    def _overview_is_joined_wa_value(x):
         s = clean_text(x).strip().lower().replace("-", " ")
         s = " ".join(s.split())
         return s in {"in", "tetrx", "tetr x", "added to term 0", "left"}
+    _overview_joined_mask = _overview_comm_series.map(_overview_is_joined_wa_value).fillna(False).astype(bool)
+    joined_wa = int(_overview_joined_mask.sum()) if not overview_df.empty else 0
+    active_joined = int((overview_df.get("is_active", pd.Series(False, index=overview_df.index)).fillna(False).astype(bool) & _overview_joined_mask).sum()) if not overview_df.empty else 0
+    joined_rate = round((joined_wa / total_students * 100), 1) if total_students else 0
+    active_rate = round((total_active / total_students * 100), 1) if total_students else 0
+    active_joined_rate = round((active_joined / joined_wa * 100), 1) if joined_wa else 0
+    paid_rate = round((total_paid / total_students * 100), 1) if total_students else 0
+    refunded_rate = round((total_refunded / total_students * 100), 1) if total_students else 0
 
-    community_mask = comm_series.map(_overview_is_joined_community).fillna(False).astype(bool)
+    m1, m2, m3, m4, m5, m6 = st.columns(6)
+    m1.metric("Total Offered Students", f"{total_students:,}")
+    m2.metric("Joined WA", f"{joined_wa:,}", delta=f"{joined_rate}% of Total Offered")
+    m3.metric("Active Students", f"{total_active:,}", delta=f"{active_rate}% of Total | {active_joined_rate}% of Joined WA")
+    m4.metric("Paid / Admitted", f"{total_paid:,}", delta=f"{paid_rate}% paid")
+    m5.metric("Refunded", f"{total_refunded:,}", delta=f"{refunded_rate}% refunded")
+    m6.metric("UG vs PG", f"{ug_students:,} / {pg_students:,}")
 
-    # ---------------- Activation ----------------
-    # Count a student as active if they are active anywhere across Master, Batch, or Tetr-X.
-    active_mask = build_overview_activation_mask(data, overview_df)
-    overview_df["is_active"] = active_mask
+    g1, g2, g3 = st.columns([1.2, 1, 1])
+    with g1:
+        st.plotly_chart(gauge_chart(total_students, "Total Offered Students", maximum=max(total_students, 1)), use_container_width=True, key="overview_gauge")
+    with g2:
+        st.plotly_chart(donut_chart(["UG", "PG"], [ug_students, pg_students], "UG / PG Distribution"), use_container_width=True, key="overview_program_donut")
+    with g3:
+        st.plotly_chart(donut_chart(["Paid / Admitted", "Refunded", "Not Paid"], [total_paid, total_refunded, max(total_students - total_paid - total_refunded, 0)], "Overall Status Distribution"), use_container_width=True, key="overview_paid_donut")
 
-    ug_mask = overview_df.get("Program", pd.Series("", index=overview_df.index)).astype(str).str.upper().eq("UG")
-    pg_mask = overview_df.get("Program", pd.Series("", index=overview_df.index)).astype(str).str.upper().eq("PG")
+    a1, a2 = st.columns(2)
+    with a1:
+        batch_plot = overview_df.groupby(["Program", "Batch"], dropna=False)[name_col].count().reset_index(name="Students")
+        batch_plot["Batch"] = batch_plot["Batch"].replace("", "Unknown")
+        fig = px.bar(batch_plot, x="Batch", y="Students", color="Program", barmode="group", title="Students by Batch", color_discrete_map={"UG": GREEN, "PG": GREEN_3})
+        st.plotly_chart(nice_layout(fig, height=380, x_tickangle=-25), use_container_width=True, key="overview_batch_bar")
+    with a2:
+        status_plot = overview_df.groupby(["Program", "status_bucket"])[name_col].count().reset_index(name="Students")
+        fig = px.bar(status_plot, x="Program", y="Students", color="status_bucket", barmode="group", title="Status Distribution by Program",
+                     color_discrete_map={"Paid / Admitted": GREEN, "Refunded": RED, "Not Paid": GREEN_4})
+        st.plotly_chart(nice_layout(fig, height=380), use_container_width=True, key="overview_status_bar")
 
-    total_ug = int(ug_mask.sum())
-    total_pg = int(pg_mask.sum())
-    acquired_count = int(community_mask.sum())
-    active_count = int(active_mask.sum())
-    active_in_community_count = int((active_mask & community_mask).sum())
-    paid_count = int(paid_mask.sum())
-    deferred_count = int(overview_df["is_deferred"].sum())
-    refund_count = int(refund_mask.sum())
+    b1, b2 = st.columns(2)
+    with b1:
+        if country_col and country_col in overview_df.columns:
+            country_students = overview_df.groupby(country_col)[name_col].count().reset_index(name="Students").sort_values("Students", ascending=False).head(15)
+            country_students[country_col] = country_students[country_col].replace("", "Unknown")
+            fig = px.bar(country_students, x=country_col, y="Students", title="Country Distribution of Students")
+            fig.update_traces(marker_color=GREEN_3)
+            st.plotly_chart(nice_layout(fig, height=400, x_tickangle=-30), use_container_width=True, key="overview_country_students_bar")
+    with b2:
+        comm = overview_df["community_status_value"].replace("", np.nan).dropna()
+        if not comm.empty:
+            community_plot = comm.value_counts().reset_index()
+            community_plot.columns = ["Community Status", "Students"]
+            fig = px.pie(community_plot, names="Community Status", values="Students", hole=0.6, title="Community Status Overview",
+                         color="Community Status", color_discrete_map={"Tetr X": GREEN, "In": GREEN_3, "Out": GREEN_4})
+            st.plotly_chart(nice_layout(fig, height=400), use_container_width=True, key="overview_comm_donut")
 
-    def pct(num, den):
-        return (float(num) / float(den) * 100.0) if den else 0.0
-
-    acquired_pct = pct(acquired_count, total_students)
-    activation_pct_overall = pct(active_count, total_students)
-    activation_pct_in_community = pct(active_in_community_count, acquired_count)
-    paid_pct = pct(paid_count, total_students)
-    refund_pct = pct(refund_count, total_students)
-
-    # ---------------- Engagement Quality tiers ----------------
-    # Same Community Impact scoring logic, but for Overview it is applied to ALL offered students,
-    # using first-30-days participation from Offered Date and all-time winners/spotlights.
-    # No payment-date or pre-payment filter is applied.
-    try:
-        impact_cohort = build_overview_first30_engagement_quality(data)
-    except Exception as e:
-        impact_cohort = pd.DataFrame()
-        st.warning(f"Overview engagement-quality calculation could not be loaded: {e}")
-
-    impact_counts = impact_cohort.get("Impact", pd.Series(dtype=str)).value_counts().to_dict() if impact_cohort is not None and not impact_cohort.empty else {}
-    high_count = int(impact_counts.get("High Impact", 0))
-    medium_count = int(impact_counts.get("Medium Impact", 0))
-    low_count = int(impact_counts.get("Low Impact", 0))
-    no_impact_count = int(impact_counts.get("No Impact", 0))
-
-    # Paid/admitted + community split inside each Engagement Quality tier.
-    # This is Overview-only and does not change the engagement-quality scoring itself.
-    paid_by_student_id = {}
-    community_by_student_id = {}
-    for idx, r in overview_df.iterrows():
-        sid = clean_text(r.get("email_key", "")) or clean_text(r.get("student_key", "")) or normalize_name(r.get("student_name", ""))
-        if sid and sid not in paid_by_student_id:
-            paid_by_student_id[sid] = bool(paid_mask.loc[idx]) if idx in paid_mask.index else False
-        if sid and sid not in community_by_student_id:
-            community_by_student_id[sid] = bool(community_mask.loc[idx]) if idx in community_mask.index else False
-
-    tier_label_map = {
-        "High Impact": "High Engaged",
-        "Medium Impact": "Medium Engaged",
-        "Low Impact": "Low Engaged",
-        "No Impact": "No Engagement",
-    }
-    engagement_tier_order = ["High Engaged", "Medium Engaged", "Low Engaged", "No Engagement"]
-    out_community_tier_order = ["No Engagement", "Low Engaged", "Medium Engaged", "High Engaged"]
-    tier_paid_counts = {tier: 0 for tier in engagement_tier_order}
-    tier_out_community_counts = {tier: 0 for tier in engagement_tier_order}
-    tier_out_community_paid_counts = {tier: 0 for tier in engagement_tier_order}
-    tier_total_counts = {
-        "High Engaged": high_count,
-        "Medium Engaged": medium_count,
-        "Low Engaged": low_count,
-        "No Engagement": no_impact_count,
-    }
-
-    if impact_cohort is not None and not impact_cohort.empty:
-        impact_cohort = impact_cohort.copy()
-        impact_cohort["Engagement Tier"] = impact_cohort.get("Impact", pd.Series("", index=impact_cohort.index)).map(tier_label_map).fillna(impact_cohort.get("Impact", ""))
-        impact_cohort["Paid / Admitted"] = impact_cohort.get("student_id", pd.Series("", index=impact_cohort.index)).map(paid_by_student_id).fillna(False).astype(bool)
-        impact_cohort["In Community"] = impact_cohort.get("student_id", pd.Series("", index=impact_cohort.index)).map(community_by_student_id).fillna(False).astype(bool)
-        impact_cohort["Community Segment"] = np.where(impact_cohort["In Community"], "In Community", "Out Community")
-
-        tier_paid_counts.update(
-            impact_cohort[impact_cohort["Paid / Admitted"]]
-            .groupby("Engagement Tier")
-            .size()
-            .reindex(engagement_tier_order, fill_value=0)
-            .astype(int)
-            .to_dict()
-        )
-        tier_out_community_counts.update(
-            impact_cohort[~impact_cohort["In Community"]]
-            .groupby("Engagement Tier")
-            .size()
-            .reindex(engagement_tier_order, fill_value=0)
-            .astype(int)
-            .to_dict()
-        )
-        tier_out_community_paid_counts.update(
-            impact_cohort[(~impact_cohort["In Community"]) & impact_cohort["Paid / Admitted"]]
-            .groupby("Engagement Tier")
-            .size()
-            .reindex(engagement_tier_order, fill_value=0)
-            .astype(int)
-            .to_dict()
-        )
-
-    # ---------------- Hero KPI layout ----------------
-    st.markdown("### Offered Students")
-    c1, c2, c3 = st.columns(3)
-    c1.metric("Total Offered Students", f"{total_students:,}")
-    c2.metric("UG Offered", f"{total_ug:,}", delta=f"{pct(total_ug, total_students):.1f}% of total")
-    c3.metric("PG Offered", f"{total_pg:,}", delta=f"{pct(total_pg, total_students):.1f}% of total")
-
-    st.markdown("### Funnel Snapshot")
-    f1, f2, f3, f4 = st.columns(4)
-    f1.metric("Community Acquisition", f"{acquired_count:,}", delta=f"{acquired_pct:.1f}% of offered")
-    f2.metric(
-        "Activation",
-        f"{active_count:,}",
-        delta=f"{activation_pct_overall:.1f}% overall · {activation_pct_in_community:.1f}% in community",
-    )
-    f3.metric("Paid Students", f"{paid_count:,}", delta=f"{paid_pct:.1f}% of offered")
-    f4.metric("Refund", f"{refund_count:,}", delta=f"{refund_pct:.1f}% of offered")
-
-    st.caption(
-        f"Paid Students include exact Admitted + valid Deferral statuses and exclude Refund rows. For PG, only Admitted: Deferral is treated as paid/deferred. "
-        f"Deferred students included inside Paid Students: {deferred_count:,}."
-    )
-
-    st.markdown("### Engagement Quality — First 30 Days Participation Logic")
-    st.caption(
-        "Logic: count unique dated participation touchpoints within each student's first 30 days from Offered Date using the Dates sheet. "
-        "Deadline is used as the first-30-days end date when available; otherwise Offered Date + 30 days is used. "
-        "Winner/Spotlight records are counted all-time. No payment-date or pre-payment filter is applied."
-    )
-    with st.expander("View Engagement Quality division logic", expanded=False):
-        logic_df = pd.DataFrame([
-            {
-                "Tier": "No Engagement",
-                "Base rule": "0 first-30-days dated touchpoints",
-                "Upgrade rules": "No upgrades",
-                "Downgrade rules": "Not applicable",
-            },
-            {
-                "Tier": "Low Engaged",
-                "Base rule": "1–3 first-30-days dated touchpoints",
-                "Upgrade rules": "Can upgrade to Medium if all 3 are non-General/Fun, or if all-time Winner/Spotlight + at least 1 non-General/Fun",
-                "Downgrade rules": "Already Low",
-            },
-            {
-                "Tier": "Medium Engaged",
-                "Base rule": "4–7 first-30-days dated touchpoints",
-                "Upgrade rules": "Can upgrade to High if 6–7 touchpoints + all-time Winner/Spotlight, or more than 2 all-time Winner/Spotlight records",
-                "Downgrade rules": "Downgrade to Low if no all-time Winner/Spotlight and either 4+ General/Fun only, or Online/Masterclass + Competition/Hackathon touchpoints <= 2",
-            },
-            {
-                "Tier": "High Engaged",
-                "Base rule": "8+ first-30-days dated touchpoints",
-                "Upgrade rules": "Also High if Online Events/Masterclasses ≥5, Competitions/Hackathons ≥5, all-time Winner/Spotlight + 3+ non-General/Fun, or 2+ all-time Winner/Spotlight + 1+ non-General/Fun",
-                "Downgrade rules": "Downgrade to Low if no all-time Winner/Spotlight and either 4+ General/Fun only, or Online/Masterclass + Competition/Hackathon touchpoints <= 2",
-            },
-        ])
-        st.dataframe(logic_df, use_container_width=True, hide_index=True, key="overview_v2_engagement_logic_table")
-
-    def _paid_delta_for_tier(tier):
-        paid = int(tier_paid_counts.get(tier, 0))
-        total = int(tier_total_counts.get(tier, 0))
-        return f"{paid:,} paid/admitted · {pct(paid, total):.1f}% paid"
-
-    e1, e2, e3, e4 = st.columns(4)
-    e1.metric("High Engaged", f"{high_count:,}", delta=_paid_delta_for_tier("High Engaged"))
-    e2.metric("Medium Engaged", f"{medium_count:,}", delta=_paid_delta_for_tier("Medium Engaged"))
-    e3.metric("Low Engaged", f"{low_count:,}", delta=_paid_delta_for_tier("Low Engaged"))
-    e4.metric("No Engagement", f"{no_impact_count:,}", delta=_paid_delta_for_tier("No Engagement"))
-
-    st.markdown("#### Engagement Quality — Out Community Split")
-    def _out_community_delta_for_tier(tier):
-        paid = int(tier_out_community_paid_counts.get(tier, 0))
-        total = int(tier_out_community_counts.get(tier, 0))
-        return f"{paid:,} paid/admitted · {pct(paid, total):.1f}% of out-community"
-
-    oc1, oc2, oc3, oc4 = st.columns(4)
-    oc1.metric("No Engagement Out Community", f"{tier_out_community_counts.get('No Engagement', 0):,}", delta=_out_community_delta_for_tier("No Engagement"))
-    oc2.metric("Low Engagement Out Community", f"{tier_out_community_counts.get('Low Engaged', 0):,}", delta=_out_community_delta_for_tier("Low Engaged"))
-    oc3.metric("Medium Engagement Out Community", f"{tier_out_community_counts.get('Medium Engaged', 0):,}", delta=_out_community_delta_for_tier("Medium Engaged"))
-    oc4.metric("High Engagement Out Community", f"{tier_out_community_counts.get('High Engaged', 0):,}", delta=_out_community_delta_for_tier("High Engaged"))
-
-    engagement_summary_df = pd.DataFrame([
-        {
-            "Engagement Tier": tier,
-            "Total Students": int(tier_total_counts.get(tier, 0)),
-            "Paid / Admitted": int(tier_paid_counts.get(tier, 0)),
-            "Paid %": f"{pct(tier_paid_counts.get(tier, 0), tier_total_counts.get(tier, 0)):.1f}%",
-            "Out Community": int(tier_out_community_counts.get(tier, 0)),
-            "Out Community Paid": int(tier_out_community_paid_counts.get(tier, 0)),
-            "Out Community Paid % (of Out Community)": f"{pct(tier_out_community_paid_counts.get(tier, 0), tier_out_community_counts.get(tier, 0)):.1f}%",
-        }
-        for tier in engagement_tier_order
-    ])
-    st.dataframe(engagement_summary_df, use_container_width=True, hide_index=True, key="overview_v2_engagement_quality_summary")
-
-    # ---------------- Clean visuals ----------------
-    v1, v2, v3 = st.columns([1, 1, 1])
-    with v1:
-        fig = donut_chart(["UG", "PG"], [total_ug, total_pg], "UG / PG Offered Split")
-        st.plotly_chart(fig, use_container_width=True, key="overview_v2_program_split")
-    with v2:
-        fig = donut_chart(
-            ["Community Acquired", "Not Acquired"],
-            [acquired_count, max(total_students - acquired_count, 0)],
-            "Community Acquisition",
-        )
-        st.plotly_chart(fig, use_container_width=True, key="overview_v2_community_acquisition")
-    with v3:
-        fig = donut_chart(
-            ["Active", "Not Active"],
-            [active_count, max(total_students - active_count, 0)],
-            "Activation",
-        )
-        st.plotly_chart(fig, use_container_width=True, key="overview_v2_activation")
-
-    v4, v5 = st.columns([1, 1])
-    with v4:
-        status_df = pd.DataFrame({
-            "Status": ["Paid / Admitted", "Deferred", "Refunded", "Not Paid"],
-            "Students": [
-                int((paid_mask & ~overview_df["is_deferred"]).sum()),
-                deferred_count,
-                refund_count,
-                max(total_students - paid_count - refund_count, 0),
-            ],
-        })
-        fig = px.bar(status_df, x="Status", y="Students", text="Students", title="Payment Status Overview")
-        fig.update_traces(marker_color=GREEN_2, textposition="outside")
-        st.plotly_chart(nice_layout(fig, height=360), use_container_width=True, key="overview_v2_payment_status")
-    with v5:
-        if impact_cohort is not None and not impact_cohort.empty:
-            impact_df = (
-                impact_cohort.assign(
-                    **{
-                        "Paid Segment": np.where(impact_cohort["Paid / Admitted"], "Paid / Admitted", "Not Paid / Refund"),
-                        "Student Segment": np.where(
-                            impact_cohort["Paid / Admitted"],
-                            np.where(impact_cohort["In Community"], "Paid · In Community", "Paid · Out Community"),
-                            np.where(impact_cohort["In Community"], "Not Paid · In Community", "Not Paid · Out Community"),
-                        ),
-                    }
-                )
-                .groupby(["Engagement Tier", "Student Segment"], as_index=False)
-                .size()
-                .rename(columns={"size": "Students"})
-            )
-        else:
-            impact_df = pd.DataFrame(columns=["Engagement Tier", "Student Segment", "Students"])
-        segment_order = ["Paid · In Community", "Paid · Out Community", "Not Paid · In Community", "Not Paid · Out Community"]
-        fig = px.bar(
-            impact_df,
-            x="Engagement Tier",
-            y="Students",
-            color="Student Segment",
-            text="Students",
-            title="Engagement Quality — Paid and Community Split",
-            category_orders={"Engagement Tier": engagement_tier_order, "Student Segment": segment_order},
-        )
-        fig.update_traces(textposition="inside")
-        st.plotly_chart(nice_layout(fig, height=360), use_container_width=True, key="overview_v2_impact_tiers")
-
-    # ---------------- Existing distribution charts retained ----------------
-    st.markdown("### Income & Paid Country Distribution")
-    dist1, dist2 = st.columns(2)
-    with dist1:
+    c1, c2 = st.columns(2)
+    with c1:
         if income_col and income_col in overview_df.columns:
-            income_plot = overview_df.groupby(income_col, dropna=False)[name_col].count().reset_index(name="Students").sort_values("Students", ascending=False)
-            income_plot[income_col] = income_plot[income_col].replace("", "Unknown")
+            income_plot = overview_df.groupby(income_col)[name_col].count().reset_index(name="Students").sort_values("Students", ascending=False)
             fig = px.bar(income_plot, x=income_col, y="Students", title="Income Distribution")
             fig.update_traces(marker_color=GREEN)
-            st.plotly_chart(nice_layout(fig, height=400, x_tickangle=-25), use_container_width=True, key="overview_v2_income_bar")
-        else:
-            st.info("Income column not found in Master UG / Master PG.")
-    with dist2:
+            st.plotly_chart(nice_layout(fig, height=400, x_tickangle=-25), use_container_width=True, key="overview_income_bar")
+    with c2:
         country_pay = payment_percentage_by_country(overview_df, country_col)
-        if not country_pay.empty and country_col and country_col in country_pay.columns:
+        if not country_pay.empty:
             fig = px.bar(country_pay.head(15), x=country_col, y="Paid Student %", hover_data=["Paid Students"], title="Paid Students Country-wise % Distribution")
             fig.update_traces(marker_color=GREEN_2)
-            st.plotly_chart(nice_layout(fig, height=400, x_tickangle=-30), use_container_width=True, key="overview_v2_country_payment_bar")
-        else:
-            st.info("Country/payment distribution is not available.")
+            st.plotly_chart(nice_layout(fig, height=400, x_tickangle=-30), use_container_width=True, key="overview_country_payment_bar")
 
-    # ---------------- Program-level summary table ----------------
-    st.markdown("### UG / PG Summary")
-    summary_rows = []
-    for label, mask in [("UG", ug_mask), ("PG", pg_mask), ("Total", pd.Series(True, index=overview_df.index))]:
-        offered = int(mask.sum())
-        acquired = int((community_mask & mask).sum())
-        active = int((active_mask & mask).sum())
-        active_comm = int((active_mask & community_mask & mask).sum())
-        paid = int((paid_mask & mask).sum())
-        deferred = int((overview_df["is_deferred"] & mask).sum())
-        refunded = int((refund_mask & mask).sum())
-        summary_rows.append({
-            "Program": label,
-            "Offered": offered,
-            "Community Acquired": acquired,
-            "Community Acquired %": f"{pct(acquired, offered):.1f}%",
-            "Active": active,
-            "Active % Overall": f"{pct(active, offered):.1f}%",
-            "Active % In Community": f"{pct(active_comm, acquired):.1f}%",
-            "Paid Students": paid,
-            "Deferred inside Paid": deferred,
-            "Refund": refunded,
+    d1, d2 = st.columns(2)
+    with d1:
+        status_circle = pd.DataFrame({
+            "Metric": ["Active", "Paid", "Refunded"],
+            "Count": [total_active, total_paid, total_refunded]
         })
-    st.dataframe(pd.DataFrame(summary_rows), use_container_width=True, hide_index=True, key="overview_v2_program_summary")
+        fig = px.line_polar(status_circle, r="Count", theta="Metric", line_close=True, title="Overview Activity Circle")
+        fig.update_traces(fill='toself', line_color=GREEN, marker_color=GREEN)
+        st.plotly_chart(nice_layout(fig, height=400), use_container_width=True, key="overview_circle_bar")
+    with d2:
+        active_circle = pd.DataFrame({"Status": ["Active", "Non-Active"], "Students": [total_active, max(total_students - total_active, 0)]})
+        fig = px.pie(active_circle, names="Status", values="Students", hole=0.58, title="Active vs Non-Active",
+                     color="Status", color_discrete_map={"Active": GREEN, "Non-Active": GREEN_4})
+        st.plotly_chart(nice_layout(fig, height=400), use_container_width=True, key="overview_active_circle")
 
-    # Optional compact student-level tables for audit.
-    with st.expander("Audit table — Engagement Quality source rows", expanded=False):
-        if impact_cohort is not None and not impact_cohort.empty:
-            audit_df = impact_cohort.rename(columns={"Impact score": "Engagement score", "Impact": "Engagement Quality"}).copy()
-            audit_df["Engagement Quality"] = audit_df["Engagement Quality"].replace({"High Impact": "High Engaged", "Medium Impact": "Medium Engaged", "Low Impact": "Low Engaged", "No Impact": "No Engagement"})
-            if "Paid / Admitted" in audit_df.columns:
-                audit_df["Paid / Admitted"] = audit_df["Paid / Admitted"].map(lambda x: "Yes" if bool(x) else "No")
-            if "In Community" in audit_df.columns:
-                audit_df["In Community"] = audit_df["In Community"].map(lambda x: "Yes" if bool(x) else "No")
-            display_cols = [c for c in [
-                "Name", "Email", "UG/PG", "Batch", "Status", "Paid / Admitted", "In Community", "Community Segment", "Offered Date", "First 30 Days End", "First 30d Window", "Total Touchpoints (n)",
-                "Event Breakdown", "All-Time Winner", "Engagement Rule Applied", "Engagement score", "Engagement Quality"
-            ] if c in audit_df.columns]
-            st.dataframe(
-                audit_df[display_cols].sort_values(["Engagement score", "Total Touchpoints (n)", "Name"], ascending=[False, False, True]),
-                use_container_width=True,
-                height=420,
-                key="overview_v2_engagement_quality_audit_table",
-            )
-        else:
-            st.info("No engagement-quality rows available.")
+    display_cols = [c for c in ["student_name", "Program", "Batch", country_col, income_col, "community_status_value", "resolved_status", "resolved_payment_date", "status_bucket"] if c and c in overview_df.columns]
+    st.markdown("#### Overview Table")
+    st.dataframe(overview_df[display_cols].sort_values(["Program", "Batch", "student_name"]), use_container_width=True, height=420, key="overview_table")
 
-    with st.expander("Audit table — Overview source rows", expanded=False):
-        display_cols = [
-            c for c in [
-                "student_name", "Program", "Batch", "community_status_value",
-                "admitted_group_batch_onwards_raw", "resolved_status", "master_status_value",
-                "status_bucket", "is_active", "is_paid", "is_deferred", "is_refunded",
-            ]
-            if c in overview_df.columns
-        ]
-        if display_cols:
-            st.dataframe(
-                overview_df[display_cols].sort_values([c for c in ["Program", "Batch", "student_name"] if c in display_cols]),
-                use_container_width=True,
-                height=420,
-                key="overview_v2_audit_table",
-            )
+
+
 
 
 def build_tetrx_payment_lookup_for_paid_details(data):
