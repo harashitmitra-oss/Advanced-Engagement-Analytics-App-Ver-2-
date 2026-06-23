@@ -5421,12 +5421,12 @@ def build_retention_analytics_v2(data):
         frame["retention_is_refunded"] = broad_status_text.str.contains(r"\brefund", regex=True, na=False)
         # Paid/admitted follows the global UG/PG rule:
         # UG Deferral counts as paid; PG only Admitted: Deferral counts as paid.
-        frame["retention_is_admitted"] = exact_status_text.map(lambda x: is_paid_status_for_program(x, sheet)).astype(bool)
+        frame["retention_is_admitted"] = exact_status_text.map(lambda x: is_paid_status_for_program(x, tx_sheet)).astype(bool)
         if "sheet_is_paid" in frame.columns:
             frame["retention_is_admitted"] = frame["retention_is_admitted"] | frame["sheet_is_paid"].fillna(False).astype(bool)
         if "sheet_status_raw" in frame.columns:
             raw_status = frame["sheet_status_raw"].fillna("").astype(str).str.strip()
-            frame["retention_is_admitted"] = frame["retention_is_admitted"] | raw_status.map(lambda x: is_paid_status_for_program(x, sheet)).astype(bool)
+            frame["retention_is_admitted"] = frame["retention_is_admitted"] | raw_status.map(lambda x: is_paid_status_for_program(x, tx_sheet)).astype(bool)
             frame["retention_is_refunded"] = frame["retention_is_refunded"] | raw_status.str.lower().str.contains(r"\brefund", regex=True, na=False)
         # Use existing parser refund flags as fallback.
         if "sheet_is_refunded" in frame.columns:
@@ -5434,10 +5434,10 @@ def build_retention_analytics_v2(data):
 
         # Retention UG/PG requirement: include only valid paid-deferral students.
         # UG: Status contains Deferral. PG: only Admitted: Deferral / Admitted Deferral.
-        frame["retention_is_deferral"] = exact_status_text.map(lambda x: is_deferral_status_for_program(x, sheet)).astype(bool)
+        frame["retention_is_deferral"] = exact_status_text.map(lambda x: is_deferral_status_for_program(x, tx_sheet)).astype(bool)
         if "sheet_status_raw" in frame.columns:
             raw_status = frame["sheet_status_raw"].fillna("").astype(str).str.strip()
-            frame["retention_is_deferral"] = frame["retention_is_deferral"] | raw_status.map(lambda x: is_deferral_status_for_program(x, sheet)).astype(bool)
+            frame["retention_is_deferral"] = frame["retention_is_deferral"] | raw_status.map(lambda x: is_deferral_status_for_program(x, tx_sheet)).astype(bool)
 
         frame["retention_in_paid_cohort"] = (
             frame["retention_is_admitted"]
