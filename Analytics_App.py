@@ -267,7 +267,7 @@ def inject_css():
             box-sizing: border-box !important;
             min-height: 40px !important;
             margin: 0 !important;
-            padding: 0 12px 0 24px !important;
+            padding: 0 12px 0 52px !important;
             border-radius: 12px !important;
             border: 1px solid transparent !important;
             background: transparent !important;
@@ -9714,6 +9714,71 @@ def _nav_button_key(page: str) -> str:
     return f"nav_btn_{safe or 'page'}"
 
 
+def _svg_nav_icon_data_uri(icon_name: str, stroke_color: str = "#53625c", stroke_width: float = 1.8) -> str:
+    """Return a compact SVG data URI for sidebar navigation icons.
+
+    Icons are line-based so the visual weight stays consistent across all
+    sections. UG and PG intentionally share the same cap icon.
+    """
+    color = quote(str(stroke_color), safe="")
+    sw = stroke_width
+    common = f"fill='none' stroke='{color}' stroke-width='{sw}' stroke-linecap='round' stroke-linejoin='round'"
+    icons = {
+        "overview": f"<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 20 20'><rect x='2.5' y='2.5' width='5' height='5' rx='1.2' {common}/><rect x='12.5' y='2.5' width='5' height='5' rx='1.2' {common}/><rect x='2.5' y='12.5' width='5' height='5' rx='1.2' {common}/><rect x='12.5' y='12.5' width='5' height='5' rx='1.2' {common}/></svg>",
+        "recent activity": f"<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 20 20'><polyline points='2,13 6,13 8.5,6 11.5,15 14,9.5 18,9.5' {common}/></svg>",
+        "success metrics": f"<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 20 20'><circle cx='10' cy='10' r='7' {common}/><polyline points='6.5,10.5 9,13 14,7.5' {common}/></svg>",
+        "student profile": f"<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 20 20'><circle cx='10' cy='7' r='3' {common}/><path d='M4.5 16c1.3-2.6 3.2-4 5.5-4s4.2 1.4 5.5 4' {common}/></svg>",
+        "ug": f"<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 20 20'><path d='M2 8.2L10 4l8 4.2L10 12.4 2 8.2Z' {common}/><path d='M5.5 10.6V14c2.8 1.7 6.2 1.7 9 0v-3.4' {common}/></svg>",
+        "pg": f"<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 20 20'><path d='M2 8.2L10 4l8 4.2L10 12.4 2 8.2Z' {common}/><path d='M5.5 10.6V14c2.8 1.7 6.2 1.7 9 0v-3.4' {common}/></svg>",
+        "courses": f"<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 20 20'><path d='M4.5 3.5H14.5a2 2 0 0 1 2 2v11H6.5a2 2 0 0 0-2 2V5.5a2 2 0 0 1 2-2Z' {common}/><line x1='7' y1='7.5' x2='14' y2='7.5' {common}/><line x1='7' y1='10.5' x2='14' y2='10.5' {common}/><line x1='7' y1='13.5' x2='11.5' y2='13.5' {common}/></svg>",
+        "tetr-x": f"<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 20 20'><rect x='3' y='3' width='14' height='14' rx='3' {common}/><polyline points='6.2,10.2 8.7,12.7 13.8,7.4' {common}/></svg>",
+        "conversion": f"<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 20 20'><polyline points='3,13.5 7,9.5 10,11.5 16.5,5' {common}/><polyline points='12.2,5 16.5,5 16.5,9.3' {common}/></svg>",
+        "retention": f"<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 20 20'><path d='M15.3 7.2A6.8 6.8 0 1 0 16.8 11' {common}/><polyline points='13.1,4.6 15.8,7.2 18,4.5' {common}/></svg>",
+        "refund analytics": f"<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 20 20'><circle cx='10' cy='10' r='7' {common}/><path d='M11.7 6.8c-.5-.5-1.2-.8-2-.8-1.3 0-2.2.7-2.2 1.8 0 2.7 4.8 1.2 4.8 4 0 1.2-1 2.1-2.6 2.1-.9 0-1.7-.2-2.3-.8' {common}/><line x1='10' y1='4.6' x2='10' y2='15.4' {common}/></svg>",
+        "community impact": f"<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 20 20'><circle cx='7' cy='8' r='2.4' {common}/><circle cx='13.2' cy='8.2' r='2.2' {common}/><path d='M3.6 15.5c.9-2.2 2.5-3.4 4.6-3.4 2.1 0 3.6 1.2 4.5 3.4' {common}/><path d='M10.4 15.2c.7-1.6 1.9-2.5 3.4-2.5 1.4 0 2.5.8 3.2 2.5' {common}/></svg>",
+        "activities": f"<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 20 20'><rect x='3.2' y='3.2' width='13.6' height='13.6' rx='2.6' {common}/><polyline points='6.2,10.1 8.5,12.4 13.7,7.2' {common}/></svg>",
+    }
+    svg = icons.get(clean_text(icon_name).lower(), icons["overview"])
+    return f"data:image/svg+xml;utf8,{svg}"
+
+
+def inject_sidebar_nav_icon_css(visible_pages):
+    """Inject per-page CSS so native Streamlit radio items show vector icons.
+
+    This keeps the same radio-based navigation behavior while improving the
+    visual style. Icons are attached by current visible-page order, so hidden
+    sections continue to work correctly without changing page routing.
+    """
+    pages = list(visible_pages or [])
+    if not pages:
+        return
+    rules = []
+    inactive = "#53625c"
+    active = GREEN_2 if 'GREEN_2' in globals() else "#1f7a56"
+    for idx, page in enumerate(pages, start=1):
+        inact_uri = _svg_nav_icon_data_uri(page, inactive, 1.8)
+        act_uri = _svg_nav_icon_data_uri(page, active, 1.8)
+        rules.append(f"""
+        section[data-testid='stSidebar'] .stRadio [role='radiogroup'] > label:nth-of-type({idx})::after {{
+            content: '';
+            position: absolute;
+            left: 18px;
+            top: 50%;
+            transform: translateY(-50%);
+            width: 18px;
+            height: 18px;
+            background: url("{inact_uri}") center / 18px 18px no-repeat;
+            opacity: 0.95;
+            pointer-events: none;
+        }}
+        section[data-testid='stSidebar'] .stRadio [role='radiogroup'] > label:nth-of-type({idx}):has(input:checked)::after {{
+            background: url("{act_uri}") center / 18px 18px no-repeat;
+            opacity: 1;
+        }}
+        """)
+    st.markdown("<style>" + "\n".join(rules) + "</style>", unsafe_allow_html=True)
+
+
 def render_active_left_border_nav(visible_pages, current_page: str) -> str:
     """Render Option A navigation using native Streamlit radio behavior.
 
@@ -9728,6 +9793,8 @@ def render_active_left_border_nav(visible_pages, current_page: str) -> str:
 
     if current_page not in visible_pages:
         current_page = "Overview" if "Overview" in visible_pages else visible_pages[0]
+
+    inject_sidebar_nav_icon_css(visible_pages)
 
     radio_key = "nav_page_radio_selector"
     existing_radio_value = st.session_state.get(radio_key, "")
