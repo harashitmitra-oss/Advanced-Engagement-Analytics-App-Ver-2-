@@ -247,6 +247,63 @@ def inject_css():
             font-weight: 800 !important;
             display: block !important;
         }}
+
+        /* Smooth navigation selector: radio behavior without URL links.
+           Keeps Streamlit's native same-page rerun, but visually looks like
+           rounded left-aligned menu buttons. */
+        section[data-testid="stSidebar"] .stRadio [role="radiogroup"] {
+            display: flex !important;
+            flex-direction: column !important;
+            gap: 7px !important;
+            width: 100% !important;
+        }
+        section[data-testid="stSidebar"] .stRadio [role="radiogroup"] label {
+            display: flex !important;
+            align-items: center !important;
+            justify-content: flex-start !important;
+            width: 100% !important;
+            box-sizing: border-box !important;
+            min-height: 36px !important;
+            margin: 0 !important;
+            padding: 8px 12px 8px 16px !important;
+            border-radius: 11px !important;
+            border: 1px solid #cfe8d9 !important;
+            border-left: 5px solid transparent !important;
+            background: #ffffff !important;
+            box-shadow: 0 2px 8px rgba(11, 61, 46, 0.035) !important;
+            transition: background 0.12s ease, border-color 0.12s ease, transform 0.12s ease !important;
+        }
+        section[data-testid="stSidebar"] .stRadio [role="radiogroup"] label:hover {
+            background: #eef8f2 !important;
+            border-color: #b7dec7 !important;
+            border-left-color: #b7dec7 !important;
+            transform: translateX(2px);
+        }
+        section[data-testid="stSidebar"] .stRadio [role="radiogroup"] label:has(input:checked) {
+            background: #dff3e7 !important;
+            border-color: #8fcaab !important;
+            border-left-color: #1f7a56 !important;
+            box-shadow: 0 4px 12px rgba(31, 122, 86, 0.11) !important;
+        }
+        section[data-testid="stSidebar"] .stRadio [role="radiogroup"] label > div:first-child {
+            display: none !important;
+        }
+        section[data-testid="stSidebar"] .stRadio [role="radiogroup"] label p,
+        section[data-testid="stSidebar"] .stRadio [role="radiogroup"] label div[data-testid="stMarkdownContainer"] {
+            text-align: left !important;
+            width: 100% !important;
+            color: #12372a !important;
+            font-weight: 800 !important;
+            line-height: 1.15 !important;
+            white-space: nowrap !important;
+            overflow: hidden !important;
+            text-overflow: ellipsis !important;
+            margin: 0 !important;
+        }
+        section[data-testid="stSidebar"] .stRadio [role="radiogroup"] label:has(input:checked) p,
+        section[data-testid="stSidebar"] .stRadio [role="radiogroup"] label:has(input:checked) div[data-testid="stMarkdownContainer"] {
+            color: #0b3d2e !important;
+        }
         </style>
         """,
         unsafe_allow_html=True,
@@ -9627,31 +9684,33 @@ def _nav_button_key(page: str) -> str:
 
 
 def render_active_left_border_nav(visible_pages, current_page: str) -> str:
-    """Render Option A same-page rounded left-aligned navigation without icons.
+    """Render Option A navigation using native Streamlit radio behavior.
 
-    Non-active items are normal same-tab links that update the `section` query
-    parameter. This avoids Streamlit button centering issues while keeping page
-    changes inside the same browser tab.
+    This keeps section changes smooth inside the same Streamlit page. It does
+    not create `?section=` browser links, so there is no URL redirect blink.
+    The radio is styled through CSS to look like rounded left-aligned menu
+    buttons with an active green left border.
     """
-    st.markdown('<div class="nav-section-menu">', unsafe_allow_html=True)
-    for page in visible_pages:
-        page_label = html.escape(page)
-        if page == current_page:
-            item_html = (
-                '<div class="nav-section-item active" aria-current="page">'
-                f'<span class="nav-section-title">{page_label}</span>'
-                '</div>'
-            )
-        else:
-            href = f'?section={quote(page)}'
-            item_html = (
-                f'<a class="nav-section-item" href="{href}" target="_self">'
-                f'<span class="nav-section-title">{page_label}</span>'
-                '</a>'
-            )
-        st.markdown(item_html, unsafe_allow_html=True)
-    st.markdown('</div>', unsafe_allow_html=True)
-    return current_page
+    visible_pages = list(visible_pages or [])
+    if not visible_pages:
+        return current_page or "Overview"
+
+    if current_page not in visible_pages:
+        current_page = "Overview" if "Overview" in visible_pages else visible_pages[0]
+
+    radio_key = "nav_page_radio_selector"
+    existing_radio_value = st.session_state.get(radio_key, "")
+    if existing_radio_value not in visible_pages:
+        st.session_state[radio_key] = current_page
+
+    selected_page = st.radio(
+        "Navigation sections",
+        visible_pages,
+        index=visible_pages.index(st.session_state.get(radio_key, current_page)) if st.session_state.get(radio_key, current_page) in visible_pages else visible_pages.index(current_page),
+        key=radio_key,
+        label_visibility="collapsed",
+    )
+    return selected_page
 
 
 def render_navigation_sidebar():
@@ -9695,7 +9754,11 @@ def render_navigation_sidebar():
         # Backward compatible with any old URL that used ?nav=Page or ?nav_page=Page.
         query_page = _match_nav_page(_safe_get_query_param("nav"), visible_pages) or _match_nav_page(_safe_get_query_param("nav_page"), visible_pages)
 
-    current_page = query_page or st.session_state.get("nav_page", "Overview")
+    radio_page = _match_nav_page(st.session_state.get("nav_page_radio_selector", ""), visible_pages)
+    session_page = _match_nav_page(st.session_state.get("nav_page", ""), visible_pages)
+    # Prefer Streamlit widget/session state over old URL query params so the
+    # menu no longer depends on browser links and feels like the original radio.
+    current_page = radio_page or session_page or query_page or "Overview"
     if current_page not in visible_pages:
         current_page = "Overview" if "Overview" in visible_pages else visible_pages[0]
 
