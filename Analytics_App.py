@@ -1461,9 +1461,45 @@ def reconcile_master_with_tx(master_df, tx_df):
     return out
 
 
+def sheets_needed_for_page(page: str):
+    """Return the smallest safe sheet set for the selected navigation page.
+
+    Streamlit reruns the script on each click, so the speed gain comes from
+    reading/parsing only the tabs needed by the selected page and letting
+    st.cache_data reuse each page-specific result when users switch back.
+    Pages that compare across the whole funnel deliberately keep the full sheet
+    set to preserve accuracy.
+    """
+    full = MASTER_SHEETS + UG_BATCH_SHEETS + PG_BATCH_SHEETS + TX_SHEETS + [DATES_SHEET, WINNER_SHEET]
+    page = clean_text(page)
+
+    if page == "UG":
+        return UG_BATCH_SHEETS + TX_SHEETS + [DATES_SHEET, WINNER_SHEET]
+    if page == "PG":
+        return PG_BATCH_SHEETS + TX_SHEETS + [DATES_SHEET, WINNER_SHEET]
+    if page == "Courses":
+        return UG_BATCH_SHEETS + PG_BATCH_SHEETS + TX_SHEETS + [DATES_SHEET, WINNER_SHEET]
+    if page == "Tetr-X":
+        # Tetr-X summaries need batch sheets for pre-payment attendance logic.
+        return UG_BATCH_SHEETS + PG_BATCH_SHEETS + TX_SHEETS + [DATES_SHEET, WINNER_SHEET]
+
+    # Overview/Student Profile/Success/Conversion/Retention/Refund/Impact pages
+    # intentionally need cross-sheet data for correctness.
+    return full
+
+
+def should_build_heavy_indexes_for_page(page: str) -> bool:
+    """Only Overview needs the cached all-time activity/winner indexes.
+
+    Skipping these indexes on other pages avoids a full extra activity scan while
+    preserving all existing page-level features and calculations.
+    """
+    return clean_text(page) == "Overview"
+
+
 @st.cache_data(show_spinner=False, ttl=600)
-def load_dashboard_data(source_mode: str, spreadsheet_id=None, file_bytes=None):
-    required_sheets = MASTER_SHEETS + UG_BATCH_SHEETS + PG_BATCH_SHEETS + TX_SHEETS + [DATES_SHEET, WINNER_SHEET]
+def load_dashboard_data(source_mode: str, spreadsheet_id=None, file_bytes=None, required_sheets_tuple=None, build_heavy_indexes=True):
+    required_sheets = list(required_sheets_tuple or (MASTER_SHEETS + UG_BATCH_SHEETS + PG_BATCH_SHEETS + TX_SHEETS + [DATES_SHEET, WINNER_SHEET]))
 
     # Fast source loading:
     # - Google Sheets: one values.batchGet call for all needed tabs.
@@ -1592,10 +1628,15 @@ def load_dashboard_data(source_mode: str, spreadsheet_id=None, file_bytes=None):
         "winner_df": winner_df,
     }
 
-    # Prebuilt indexes make Overview engagement-quality calculations much faster
-    # and are cached with the loaded dataset.
-    data["all_time_student_activity_index"] = build_all_time_student_activity_index(data)
-    data["winner_count_index"] = build_winner_count_index(data)
+    # Prebuilt indexes make Overview engagement-quality calculations much faster.
+    # They are intentionally built only for Overview, because building them on
+    # every page causes unnecessary full activity scans.
+    if build_heavy_indexes:
+        data["all_time_student_activity_index"] = build_all_time_student_activity_index(data)
+        data["winner_count_index"] = build_winner_count_index(data)
+    else:
+        data["all_time_student_activity_index"] = pd.DataFrame()
+        data["winner_count_index"] = {}
     return data
 
 # ---------------- Rendering ----------------
@@ -9351,6 +9392,7 @@ def main():
         st.session_state["nav_page"] = page
         if cfg["source_mode"] == "excel" and cfg["file_bytes"] is None:
             st.info("Upload the workbook to use manual mode.")
+        st.caption("Speed mode: only the selected section's required tabs are loaded; cached sections reopen quickly.")
         if not cfg["connected_ok"] and cfg["source_mode"] == "gsheets":
             st.error(cfg["connection_note"])
 
@@ -9359,7 +9401,16 @@ def main():
         return
 
     try:
-        data = load_dashboard_data(cfg["source_mode"], spreadsheet_id=cfg["spreadsheet_id"], file_bytes=cfg["file_bytes"])
+        required_sheets = sheets_needed_for_page(page)
+        build_heavy_indexes = should_build_heavy_indexes_for_page(page)
+        with st.spinner(f"Loading {page} data..."):
+            data = load_dashboard_data(
+                cfg["source_mode"],
+                spreadsheet_id=cfg["spreadsheet_id"],
+                file_bytes=cfg["file_bytes"],
+                required_sheets_tuple=tuple(required_sheets),
+                build_heavy_indexes=build_heavy_indexes,
+            )
     except Exception as e:
         st.error(f"Dashboard load failed: {e}")
         return
