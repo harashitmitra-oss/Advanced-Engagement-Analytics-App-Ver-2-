@@ -251,13 +251,13 @@ def inject_css():
         /* Smooth navigation selector: radio behavior without URL links.
            Keeps Streamlit's native same-page rerun, but visually looks like
            rounded left-aligned menu buttons. */
-        section[data-testid="stSidebar"] .stRadio [role="radiogroup"] {
+        section[data-testid="stSidebar"] .stRadio [role="radiogroup"] {{
             display: flex !important;
             flex-direction: column !important;
             gap: 7px !important;
             width: 100% !important;
-        }
-        section[data-testid="stSidebar"] .stRadio [role="radiogroup"] label {
+        }}
+        section[data-testid="stSidebar"] .stRadio [role="radiogroup"] label {{
             display: flex !important;
             align-items: center !important;
             justify-content: flex-start !important;
@@ -272,24 +272,24 @@ def inject_css():
             background: #ffffff !important;
             box-shadow: 0 2px 8px rgba(11, 61, 46, 0.035) !important;
             transition: background 0.12s ease, border-color 0.12s ease, transform 0.12s ease !important;
-        }
-        section[data-testid="stSidebar"] .stRadio [role="radiogroup"] label:hover {
+        }}
+        section[data-testid="stSidebar"] .stRadio [role="radiogroup"] label:hover {{
             background: #eef8f2 !important;
             border-color: #b7dec7 !important;
             border-left-color: #b7dec7 !important;
             transform: translateX(2px);
-        }
-        section[data-testid="stSidebar"] .stRadio [role="radiogroup"] label:has(input:checked) {
+        }}
+        section[data-testid="stSidebar"] .stRadio [role="radiogroup"] label:has(input:checked) {{
             background: #dff3e7 !important;
             border-color: #8fcaab !important;
             border-left-color: #1f7a56 !important;
             box-shadow: 0 4px 12px rgba(31, 122, 86, 0.11) !important;
-        }
-        section[data-testid="stSidebar"] .stRadio [role="radiogroup"] label > div:first-child {
+        }}
+        section[data-testid="stSidebar"] .stRadio [role="radiogroup"] label > div:first-child {{
             display: none !important;
-        }
+        }}
         section[data-testid="stSidebar"] .stRadio [role="radiogroup"] label p,
-        section[data-testid="stSidebar"] .stRadio [role="radiogroup"] label div[data-testid="stMarkdownContainer"] {
+        section[data-testid="stSidebar"] .stRadio [role="radiogroup"] label div[data-testid="stMarkdownContainer"] {{
             text-align: left !important;
             width: 100% !important;
             color: #12372a !important;
@@ -299,11 +299,11 @@ def inject_css():
             overflow: hidden !important;
             text-overflow: ellipsis !important;
             margin: 0 !important;
-        }
+        }}
         section[data-testid="stSidebar"] .stRadio [role="radiogroup"] label:has(input:checked) p,
-        section[data-testid="stSidebar"] .stRadio [role="radiogroup"] label:has(input:checked) div[data-testid="stMarkdownContainer"] {
+        section[data-testid="stSidebar"] .stRadio [role="radiogroup"] label:has(input:checked) div[data-testid="stMarkdownContainer"] {{
             color: #0b3d2e !important;
-        }
+        }}
         </style>
         """,
         unsafe_allow_html=True,
