@@ -36,9 +36,18 @@ ALL_NAV_PAGES = [
     "Conversion", "Retention", "Refund Analytics", "Community Impact",
     "Activities", "Hritabh",
 ]
-# Add default hidden navigation pages here if you want them hidden on first app load.
-# Example: DEFAULT_HIDDEN_NAV_SECTIONS = ["Hritabh", "Activities"]
-DEFAULT_HIDDEN_NAV_SECTIONS = []
+# ---------------- Global Navigation Lock ----------------
+# Put sections here when you want them hidden for EVERY normal user.
+# These sections will not appear in navigation unless the admin opens the
+# Secret Navigation Space and enables admin-only reveal for their own session.
+# Example: GLOBAL_HIDDEN_NAV_SECTIONS = ["Hritabh", "Activities"]
+GLOBAL_HIDDEN_NAV_SECTIONS = []
+
+# Optional Streamlit secrets override for deployment:
+# NAV_HIDDEN_SECTIONS = "Hritabh,Activities"
+# or NAV_HIDDEN_SECTIONS = ["Hritabh", "Activities"]
+# NAV_ADMIN_PASSWORD = "your-password"
+# NAV_ALLOW_ADMIN_REVEAL = "true"
 
 GREEN = "#0b3d2e"
 GREEN_2 = "#1f7a56"
@@ -9412,9 +9421,48 @@ def _safe_secret_value(key: str, default: str = "") -> str:
         return default
 
 
+def _safe_secret_raw(key: str, default=None):
+    try:
+        return st.secrets.get(key, default)
+    except Exception:
+        return default
+
+
+def _secret_bool(key: str, default: bool = False) -> bool:
+    value = _safe_secret_raw(key, default)
+    if isinstance(value, bool):
+        return value
+    s = clean_text(value).lower()
+    return s in {"1", "true", "yes", "y", "on"}
+
+
+def _coerce_nav_list(value):
+    """Accept a Python list, TOML list, JSON list, or comma-separated string."""
+    if value is None:
+        return []
+    if isinstance(value, (list, tuple, set)):
+        return [clean_text(x) for x in value if clean_text(x)]
+    s = clean_text(value)
+    if not s:
+        return []
+    try:
+        parsed = json.loads(s)
+        if isinstance(parsed, list):
+            return [clean_text(x) for x in parsed if clean_text(x)]
+    except Exception:
+        pass
+    return [clean_text(x) for x in re.split(r"[,;|]", s) if clean_text(x)]
+
+
 def sanitize_hidden_nav_sections(hidden_sections):
     allowed = set(ALL_NAV_PAGES)
-    return [p for p in hidden_sections if p in allowed and p != "Overview"]
+    out = []
+    for page in hidden_sections or []:
+        page_clean = clean_text(page)
+        match = next((p for p in ALL_NAV_PAGES if p.lower() == page_clean.lower()), page_clean)
+        if match in allowed and match != "Overview" and match not in out:
+            out.append(match)
+    return out
 
 
 def safe_rerun():
@@ -9425,29 +9473,73 @@ def safe_rerun():
 
 
 def get_hidden_nav_sections():
-    if "hidden_nav_sections" not in st.session_state:
-        st.session_state["hidden_nav_sections"] = sanitize_hidden_nav_sections(DEFAULT_HIDDEN_NAV_SECTIONS)
-    return sanitize_hidden_nav_sections(st.session_state.get("hidden_nav_sections", []))
+    """Global locked hidden sections.
+
+    This is intentionally NOT stored in st.session_state because session_state is
+    per-user. Use GLOBAL_HIDDEN_NAV_SECTIONS in code, or NAV_HIDDEN_SECTIONS in
+    Streamlit secrets, to hide sections for every normal user.
+    """
+    secret_value = _safe_secret_raw("NAV_HIDDEN_SECTIONS", None)
+    if secret_value is not None:
+        return sanitize_hidden_nav_sections(_coerce_nav_list(secret_value))
+    return sanitize_hidden_nav_sections(GLOBAL_HIDDEN_NAV_SECTIONS)
 
 
 def render_navigation_sidebar():
-    """Render navigation with a protected hidden-section manager.
+    """Render navigation with global hidden-section locking.
 
-    Normal users see only visible pages. Admins can open the Secret Navigation
-    Space, enter the password, and add/remove pages from the hidden list without
-    changing any page calculation logic.
+    Normal users cannot reveal locked pages. Admin reveal is password-protected
+    and affects only the admin's current session; it does not change page logic
+    or paid/deferral calculations.
     """
     st.markdown("## 🧭 Navigation")
 
     hidden_sections = get_hidden_nav_sections()
-    show_hidden = st.checkbox(
-        "Show hidden sections",
-        value=bool(st.session_state.get("show_hidden_nav", False)),
-        key="show_hidden_nav",
-        help="When off, sections in the hidden list are removed from navigation."
-    )
+    admin_show_hidden = False
 
-    if show_hidden:
+    with st.expander("🔒 Secret Navigation Space", expanded=False):
+        st.caption(
+            "Locked hidden sections are hidden for all normal users. "
+            "To change the global hidden list permanently, edit GLOBAL_HIDDEN_NAV_SECTIONS "
+            "in the code or set NAV_HIDDEN_SECTIONS in Streamlit secrets."
+        )
+        password = st.text_input("Secret space password", type="password", key="nav_secret_password")
+        expected = _safe_secret_value("NAV_ADMIN_PASSWORD", "tetr-admin")
+        allow_admin_reveal = _secret_bool("NAV_ALLOW_ADMIN_REVEAL", True)
+
+        if password and password == expected:
+            st.success("Admin access unlocked.")
+            if hidden_sections:
+                st.caption("Currently locked hidden sections: " + ", ".join(hidden_sections))
+            else:
+                st.caption("No sections are currently locked as hidden.")
+
+            if allow_admin_reveal:
+                admin_show_hidden = st.checkbox(
+                    "Admin only: show hidden sections for me",
+                    value=bool(st.session_state.get("admin_show_hidden_nav", False)),
+                    key="admin_show_hidden_nav",
+                    help="This reveal is only for your current admin session. Normal users still cannot see locked sections."
+                )
+            else:
+                st.info("Admin reveal is disabled by NAV_ALLOW_ADMIN_REVEAL.")
+
+            selected_preview = st.multiselect(
+                "Build hidden-sections config",
+                [p for p in ALL_NAV_PAGES if p != "Overview"],
+                default=hidden_sections,
+                key="hidden_nav_config_builder",
+                help="This builds the config text to copy into code/secrets. It does not change global settings at runtime."
+            )
+            preview_list = sanitize_hidden_nav_sections(selected_preview)
+            st.code(f"GLOBAL_HIDDEN_NAV_SECTIONS = {preview_list!r}", language="python")
+            st.code('NAV_HIDDEN_SECTIONS = "' + ','.join(preview_list) + '"', language="toml")
+        elif password:
+            st.error("Incorrect secret password.")
+        else:
+            st.info("Enter the secret password to view/admin-reveal locked sections.")
+
+    if admin_show_hidden:
         visible_pages = list(ALL_NAV_PAGES)
     else:
         visible_pages = [p for p in ALL_NAV_PAGES if p not in set(hidden_sections)]
@@ -9463,33 +9555,8 @@ def render_navigation_sidebar():
     page = st.radio("Go to", visible_pages, index=default_index, label_visibility="collapsed", key="nav")
     st.session_state["nav_page"] = page
 
-    with st.expander("🔒 Secret Navigation Space", expanded=False):
-        st.caption("Use this space to add/remove hidden sections. For deployment, set NAV_ADMIN_PASSWORD in Streamlit secrets. Default local password is tetr-admin.")
-        password = st.text_input("Secret space password", type="password", key="nav_secret_password")
-        expected = _safe_secret_value("NAV_ADMIN_PASSWORD", "tetr-admin")
-        if password and password == expected:
-            selected_hidden = st.multiselect(
-                "Sections hidden from normal navigation",
-                [p for p in ALL_NAV_PAGES if p != "Overview"],
-                default=hidden_sections,
-                key="hidden_nav_multiselect",
-            )
-            c1, c2 = st.columns(2)
-            if c1.button("Apply", key="apply_hidden_nav"):
-                st.session_state["hidden_nav_sections"] = sanitize_hidden_nav_sections(selected_hidden)
-                st.success("Hidden navigation sections updated. Use Show hidden sections to reveal them.")
-                safe_rerun()
-            if c2.button("Clear", key="clear_hidden_nav"):
-                st.session_state["hidden_nav_sections"] = []
-                st.success("All sections are visible again.")
-                safe_rerun()
-        elif password:
-            st.error("Incorrect secret password.")
-        else:
-            st.info("Enter the secret password to manage hidden sections.")
-
-    if hidden_sections and not show_hidden:
-        st.caption(f"Hidden sections: {len(hidden_sections)}. Enable Show hidden sections to reveal them.")
+    if hidden_sections and not admin_show_hidden:
+        st.caption(f"Locked hidden sections: {len(hidden_sections)}")
 
     return page
 
