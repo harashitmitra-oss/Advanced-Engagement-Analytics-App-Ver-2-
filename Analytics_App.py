@@ -248,61 +248,92 @@ def inject_css():
             display: block !important;
         }}
 
-        /* Smooth navigation selector: radio behavior without URL links.
-           Keeps Streamlit's native same-page rerun, but visually looks like
-           rounded left-aligned menu buttons. */
+        /* Punjab-style compact navigation selector.
+           Uses native Streamlit radio behavior, so section switching stays
+           smooth in the same page with no URL links or redirect blink. */
         section[data-testid="stSidebar"] .stRadio [role="radiogroup"] {{
             display: flex !important;
             flex-direction: column !important;
-            gap: 7px !important;
+            gap: 6px !important;
             width: 100% !important;
+            margin-top: 4px !important;
         }}
         section[data-testid="stSidebar"] .stRadio [role="radiogroup"] label {{
+            position: relative !important;
             display: flex !important;
             align-items: center !important;
             justify-content: flex-start !important;
             width: 100% !important;
             box-sizing: border-box !important;
-            min-height: 36px !important;
+            min-height: 40px !important;
             margin: 0 !important;
-            padding: 8px 12px 8px 16px !important;
-            border-radius: 11px !important;
-            border: 1px solid #cfe8d9 !important;
-            border-left: 5px solid transparent !important;
-            background: #ffffff !important;
-            box-shadow: 0 2px 8px rgba(11, 61, 46, 0.035) !important;
-            transition: background 0.12s ease, border-color 0.12s ease, transform 0.12s ease !important;
+            padding: 0 12px 0 24px !important;
+            border-radius: 12px !important;
+            border: 1px solid transparent !important;
+            background: transparent !important;
+            box-shadow: none !important;
+            color: #12372a !important;
+            cursor: pointer !important;
+            transition: background 0.12s ease, border-color 0.12s ease, color 0.12s ease !important;
         }}
         section[data-testid="stSidebar"] .stRadio [role="radiogroup"] label:hover {{
             background: #eef8f2 !important;
-            border-color: #b7dec7 !important;
-            border-left-color: #b7dec7 !important;
-            transform: translateX(2px);
+            border-color: #d6eadc !important;
+            color: #0b3d2e !important;
+            transform: none !important;
         }}
         section[data-testid="stSidebar"] .stRadio [role="radiogroup"] label:has(input:checked) {{
             background: #dff3e7 !important;
             border-color: #8fcaab !important;
-            border-left-color: #1f7a56 !important;
-            box-shadow: 0 4px 12px rgba(31, 122, 86, 0.11) !important;
+            color: #0b3d2e !important;
+            box-shadow: none !important;
         }}
-        section[data-testid="stSidebar"] .stRadio [role="radiogroup"] label > div:first-child {{
+        section[data-testid="stSidebar"] .stRadio [role="radiogroup"] label:has(input:checked)::before {{
+            content: "";
+            position: absolute;
+            left: 0;
+            top: 6px;
+            bottom: 6px;
+            width: 6px;
+            border-radius: 999px;
+            background: #1f7a56;
+        }}
+        /* Hide the native radio dot while preserving native radio behavior. */
+        section[data-testid="stSidebar"] .stRadio [role="radiogroup"] label:has(input[type="radio"]) > div:first-child {{
             display: none !important;
+            width: 0 !important;
+            min-width: 0 !important;
+            margin: 0 !important;
+            padding: 0 !important;
         }}
-        section[data-testid="stSidebar"] .stRadio [role="radiogroup"] label p,
-        section[data-testid="stSidebar"] .stRadio [role="radiogroup"] label div[data-testid="stMarkdownContainer"] {{
-            text-align: left !important;
+        /* Force every radio text wrapper to align left, overriding Streamlit/BaseWeb centering. */
+        section[data-testid="stSidebar"] .stRadio [role="radiogroup"] label:has(input[type="radio"]) > div:not(:first-child),
+        section[data-testid="stSidebar"] .stRadio [role="radiogroup"] label div[data-testid="stMarkdownContainer"],
+        section[data-testid="stSidebar"] .stRadio [role="radiogroup"] label div[data-testid="stMarkdownContainer"] p,
+        section[data-testid="stSidebar"] .stRadio [role="radiogroup"] label p {{
             width: 100% !important;
+            flex: 1 1 auto !important;
+            display: block !important;
+            text-align: left !important;
+            justify-content: flex-start !important;
+            align-items: center !important;
+            margin: 0 !important;
+            margin-left: 0 !important;
+            margin-right: auto !important;
+            padding: 0 !important;
             color: #12372a !important;
-            font-weight: 800 !important;
+            font-weight: 650 !important;
+            font-size: 0.93rem !important;
             line-height: 1.15 !important;
             white-space: nowrap !important;
             overflow: hidden !important;
             text-overflow: ellipsis !important;
-            margin: 0 !important;
         }}
-        section[data-testid="stSidebar"] .stRadio [role="radiogroup"] label:has(input:checked) p,
-        section[data-testid="stSidebar"] .stRadio [role="radiogroup"] label:has(input:checked) div[data-testid="stMarkdownContainer"] {{
+        section[data-testid="stSidebar"] .stRadio [role="radiogroup"] label:has(input:checked) div[data-testid="stMarkdownContainer"],
+        section[data-testid="stSidebar"] .stRadio [role="radiogroup"] label:has(input:checked) div[data-testid="stMarkdownContainer"] p,
+        section[data-testid="stSidebar"] .stRadio [role="radiogroup"] label:has(input:checked) p {{
             color: #0b3d2e !important;
+            font-weight: 800 !important;
         }}
         </style>
         """,
