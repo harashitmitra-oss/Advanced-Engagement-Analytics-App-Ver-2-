@@ -30,6 +30,16 @@ DATES_SHEET = "Dates"
 WINNER_SHEET = "Winner"
 ALL_REQUIRED = MASTER_SHEETS + UG_BATCH_SHEETS + PG_BATCH_SHEETS + TX_SHEETS
 
+ALL_NAV_PAGES = [
+    "Overview", "Recent Activity", "Success Metrics", "Student Profile",
+    "UG", "PG", "Courses", "UG vs PG", "Tetr-X", "T-7 & T+7 Analysis",
+    "Conversion", "Retention", "Refund Analytics", "Community Impact",
+    "Activities", "Hritabh",
+]
+# Add default hidden navigation pages here if you want them hidden on first app load.
+# Example: DEFAULT_HIDDEN_NAV_SECTIONS = ["Hritabh", "Activities"]
+DEFAULT_HIDDEN_NAV_SECTIONS = []
+
 GREEN = "#0b3d2e"
 GREEN_2 = "#1f7a56"
 GREEN_3 = "#56a77b"
@@ -409,7 +419,8 @@ def build_recent_activity_data(data, start_date=None, end_date=None):
         if "sheet_is_paid" in frame.columns:
             frame = frame[frame["sheet_is_paid"]].copy()
         else:
-            frame = frame[frame.get("status_value", pd.Series("", index=frame.index)).astype(str).str.strip().str.lower().eq("admitted")].copy()
+            status_series = frame.get("status_value", pd.Series("", index=frame.index)).astype(str)
+            frame = frame[status_series.map(lambda x: is_paid_status_for_program(x, tx_sheet)).astype(bool)].copy()
         if frame.empty:
             continue
         frame["payment_date_recent"] = pd.to_datetime(frame.get("payment_date_parsed", pd.NaT), errors="coerce").dt.normalize()
@@ -1448,9 +1459,18 @@ def reconcile_master_with_tx(master_df, tx_df):
     out["resolved_payment_date"] = resolved_payment
     out["resolved_tx_source"] = resolved_source
 
-    status_lower = out["resolved_status"].astype(str).str.lower().str.strip()
+    status_source = out["resolved_status"].astype(str).map(clean_text)
+    status_lower = status_source.str.lower().str.strip()
+    program_source = out.get("Program", pd.Series("", index=out.index)).astype(str)
     out["is_refunded"] = status_lower.str.contains("refund", na=False)
-    out["is_paid"] = status_lower.eq("admitted")
+    out["is_deferred"] = pd.Series(
+        [is_deferral_status_for_program(status, program) for status, program in zip(status_source, program_source)],
+        index=out.index,
+    )
+    out["is_paid"] = pd.Series(
+        [is_paid_status_for_program(status, program) for status, program in zip(status_source, program_source)],
+        index=out.index,
+    ) & (~out["is_refunded"].fillna(False).astype(bool))
     out["status_bucket"] = np.select(
         [out["is_refunded"], out["is_paid"]],
         ["Refunded", "Paid / Admitted"],
@@ -2747,7 +2767,7 @@ def build_tetrx_payment_lookup_for_paid_details(data):
             "student_key": tx.get("student_key", ""),
             "student_name": tx.get("student_name", ""),
             "payment_date": pay,
-            "is_admitted": status.eq("admitted"),
+            "is_admitted": status.map(lambda x: is_paid_status_for_program(x, program)),
         })
         frame["email_key"] = frame["email_key"].astype(str).map(clean_text)
         frame["student_key"] = frame["student_key"].astype(str).map(clean_text)
@@ -3451,7 +3471,7 @@ def render_student_profile(data):
                         fig.add_annotation(x=x, y=1, yref="paper", text="Payment Date", showarrow=False, font=dict(color=RED), bgcolor="white")
                     st.plotly_chart(nice_layout(fig, height=360), use_container_width=True, key=f"profile_timeline_{i}")
 
-                if clean_text(master.get("resolved_status", "")).lower() == "admitted" and not stu_window.empty:
+                if is_paid_status_for_program(master.get("resolved_status", ""), master.get("Program", "")) and not stu_window.empty:
                     st.markdown("#### T-7 & T+7 Attendance")
                     detail_rows = []
                     for label in ["T-7 to T", "T+1 to T+7"]:
@@ -3485,9 +3505,9 @@ def render_student_profile(data):
             "metrics": {
                 "Total So Far": total_events,
                 "First 30 Days": first30_count,
-                "After Paid": after_paid_count if clean_text(master.get("resolved_status", "")).lower() == "admitted" else 0,
-                "T-7": t7_count if clean_text(master.get("resolved_status", "")).lower() == "admitted" else 0,
-                "T+7": tp7_count if clean_text(master.get("resolved_status", "")).lower() == "admitted" else 0,
+                "After Paid": after_paid_count if is_paid_status_for_program(master.get("resolved_status", ""), master.get("Program", "")) else 0,
+                "T-7": t7_count if is_paid_status_for_program(master.get("resolved_status", ""), master.get("Program", "")) else 0,
+                "T+7": tp7_count if is_paid_status_for_program(master.get("resolved_status", ""), master.get("Program", "")) else 0,
             },
             "info": master_display,
             "t7_info": {
@@ -4394,7 +4414,7 @@ def build_retention_data(data):
             frame = frame[frame["sheet_is_paid"]].copy()
         else:
             status_series = frame.get("status_value", pd.Series("", index=frame.index)).astype(str).str.strip().str.lower()
-            frame = frame[status_series.eq("admitted")].copy()
+            frame = frame[status_series.map(lambda x: is_paid_status_for_program(x, tx_sheet)).astype(bool)].copy()
         if frame.empty:
             continue
         frame["tx_sheet"] = tx_sheet
@@ -4815,10 +4835,11 @@ def _tx_payment_lookup_by_program(data, scope_label="Total"):
 
     Used only for Tetr X Analytics → "Total Paid Students at the Event Date".
     User rule for this metric:
-      - Total paid students at an event date = students in the Tetr-X sheet whose Status is exactly "Admitted"
-      - and whose payment date is on or before that event date.
+      - Total paid students at an event date = students in the Tetr-X sheet whose Status is paid/admitted by the global UG/PG rule.
+      - UG Deferral counts as paid; PG only Admitted: Deferral counts as paid.
+      - Payment date must be on or before that event date.
 
-    Refunded / non-admitted rows are intentionally excluded from this denominator.
+    Refunded / non-paid rows are intentionally excluded from this denominator.
     """
     rows = []
     for sheet in _tx_scope_sheets(scope_label):
@@ -4835,14 +4856,14 @@ def _tx_payment_lookup_by_program(data, scope_label="Total"):
             if not sid:
                 continue
 
-            # Strict paid rule: only exact Status == Admitted counts in the denominator.
+            # Global paid rule: exact Admitted + valid UG/PG Deferral counts in the denominator.
             if "sheet_is_paid" in df.columns:
                 is_admitted = bool(r.get("sheet_is_paid", False))
             else:
                 raw_status = clean_text(r.get("sheet_status_raw", ""))
                 if not raw_status and status_col:
                     raw_status = clean_text(r.get(status_col, ""))
-                is_admitted = raw_status.strip().lower() == "admitted"
+                is_admitted = is_paid_status_for_program(raw_status, program)
 
             if not is_admitted:
                 continue
@@ -5201,24 +5222,25 @@ def build_retention_analytics_v2(data):
 
         # Refund/churn is intentionally broad: any refund/refunded/refund confirmed keyword in status-like metadata.
         frame["retention_is_refunded"] = broad_status_text.str.contains(r"\brefund", regex=True, na=False)
-        # Paid is strict admitted from Status/payment-status. Refund rows are added to the cohort separately.
-        frame["retention_is_admitted"] = exact_status_text.str.strip().eq("admitted")
+        # Paid/admitted follows the global UG/PG rule:
+        # UG Deferral counts as paid; PG only Admitted: Deferral counts as paid.
+        frame["retention_is_admitted"] = exact_status_text.map(lambda x: is_paid_status_for_program(x, sheet)).astype(bool)
+        if "sheet_is_paid" in frame.columns:
+            frame["retention_is_admitted"] = frame["retention_is_admitted"] | frame["sheet_is_paid"].fillna(False).astype(bool)
         if "sheet_status_raw" in frame.columns:
-            raw_status = frame["sheet_status_raw"].fillna("").astype(str).str.strip().str.lower()
-            frame["retention_is_admitted"] = frame["retention_is_admitted"] | raw_status.eq("admitted")
-            frame["retention_is_refunded"] = frame["retention_is_refunded"] | raw_status.str.contains(r"\brefund", regex=True, na=False)
-        # Use existing parser flags as fallback only; exact Admitted rule remains strict.
+            raw_status = frame["sheet_status_raw"].fillna("").astype(str).str.strip()
+            frame["retention_is_admitted"] = frame["retention_is_admitted"] | raw_status.map(lambda x: is_paid_status_for_program(x, sheet)).astype(bool)
+            frame["retention_is_refunded"] = frame["retention_is_refunded"] | raw_status.str.lower().str.contains(r"\brefund", regex=True, na=False)
+        # Use existing parser refund flags as fallback.
         if "sheet_is_refunded" in frame.columns:
             frame["retention_is_refunded"] = frame["retention_is_refunded"] | frame["sheet_is_refunded"].fillna(False).astype(bool)
 
-        # Retention UG/PG requirement: include deferral students from Tetr-X sheets in the
-        # student-level Retention tables. The cohort builder must include them here first;
-        # otherwise they never reach _build_retention_student_postpayment_table(...).
-        # UG: Status contains "Deferral". PG: Status contains "Admitted:Deferral" or "Deferral".
-        frame["retention_is_deferral"] = broad_status_text.str.contains("deferral", case=False, na=False)
+        # Retention UG/PG requirement: include only valid paid-deferral students.
+        # UG: Status contains Deferral. PG: only Admitted: Deferral / Admitted Deferral.
+        frame["retention_is_deferral"] = exact_status_text.map(lambda x: is_deferral_status_for_program(x, sheet)).astype(bool)
         if "sheet_status_raw" in frame.columns:
-            raw_status = frame["sheet_status_raw"].fillna("").astype(str).str.strip().str.lower()
-            frame["retention_is_deferral"] = frame["retention_is_deferral"] | raw_status.str.contains("deferral", na=False)
+            raw_status = frame["sheet_status_raw"].fillna("").astype(str).str.strip()
+            frame["retention_is_deferral"] = frame["retention_is_deferral"] | raw_status.map(lambda x: is_deferral_status_for_program(x, sheet)).astype(bool)
 
         frame["retention_in_paid_cohort"] = (
             frame["retention_is_admitted"]
@@ -5560,8 +5582,8 @@ def _build_retention_student_postpayment_table(paid_df: pd.DataFrame, events_df:
     if "retention_is_admitted" in base.columns:
         admitted_mask = base["retention_is_admitted"].fillna(False).astype(bool)
     else:
-        admitted_mask = status_text.eq("admitted")
-    deferral_mask = status_text.str.contains("deferral", na=False)
+        admitted_mask = status_text.map(lambda x: is_paid_status_for_program(x, program)).astype(bool)
+    deferral_mask = status_text.map(lambda x: is_deferral_status_for_program(x, program)).astype(bool)
     base = base[(admitted_mask | deferral_mask)].copy()
     if base.empty:
         return pd.DataFrame(columns=columns)
@@ -5873,7 +5895,8 @@ def _paid_students_from_tetrx_for_success(data):
         if "sheet_is_paid" in frame.columns:
             frame = frame[frame["sheet_is_paid"].fillna(False).astype(bool)].copy()
         elif "sheet_status_raw" in frame.columns:
-            frame = frame[frame["sheet_status_raw"].astype(str).str.strip().str.lower().eq("admitted")].copy()
+            status_series = frame["sheet_status_raw"].astype(str)
+            frame = frame[status_series.map(lambda x: is_paid_status_for_program(x, tx_sheet)).astype(bool)].copy()
         else:
             continue
         for _, r in frame.iterrows():
@@ -6744,7 +6767,7 @@ def build_tetrx_student_base_for_refunds(data):
                 "Payment Date": pay_dt,
                 "Status": status_raw,
                 "is_refunded": "refund" in status_raw.lower(),
-                "is_admitted": status_raw.strip().lower() == "admitted",
+                "is_admitted": is_paid_status_for_program(status_raw, clean_text(r.get("Program", infer_program_from_sheet(sheet))) or infer_program_from_sheet(sheet)),
                 "source_sheet": sheet,
                 "email_key": clean_text(r.get("email_key", "")),
                 "student_key": clean_text(r.get("student_key", "")),
@@ -7816,8 +7839,9 @@ def _student_id_from_row_basic(row):
 def _paid_at_event_mask(df, event_date):
     if df is None or df.empty:
         return pd.Series(False, index=df.index if df is not None else [])
-    status = df.get("sheet_status_raw", pd.Series("", index=df.index)).astype(str).str.strip().str.lower()
-    paid = status.eq("admitted") | df.get("sheet_is_paid", pd.Series(False, index=df.index)).fillna(False).astype(bool)
+    status = df.get("sheet_status_raw", pd.Series("", index=df.index)).astype(str)
+    program = clean_text(df.get("Program", pd.Series("", index=df.index)).iloc[0]) if "Program" in df.columns and len(df) else ""
+    paid = status.map(lambda x: is_paid_status_for_program(x, program)).astype(bool) | df.get("sheet_is_paid", pd.Series(False, index=df.index)).fillna(False).astype(bool)
     if pd.isna(event_date):
         return paid
     pay = pd.to_datetime(df.get("payment_date_parsed", pd.NaT), errors="coerce").dt.normalize()
@@ -8277,7 +8301,7 @@ def _render_tetrx_activity_matrix(data, program, title, key_prefix):
         st.info(f"No {title} student data found.")
         return
     total_students = len(matrix)
-    paid_students = int(matrix["Status"].astype(str).str.lower().eq("admitted").sum())
+    paid_students = int(matrix.apply(lambda r: is_paid_status_for_program(r.get("Status", ""), program), axis=1).sum())
     winner_students = int(pd.to_numeric(matrix.get("Winner", pd.Series(0, index=matrix.index)), errors="coerce").fillna(0).gt(0).sum()) if "Winner" in matrix.columns else 0
     winner_pct = (winner_students / total_students * 100) if total_students else 0.0
     m1, m2, m3 = st.columns(3)
@@ -8357,8 +8381,8 @@ def _unpaid_student_frame(data, program="UG"):
     tx_students = _tetrx_student_frame(data, program)
     tx_paid_ids = set()
     if tx_students is not None and not tx_students.empty:
-        tx_status = tx_students.get("Status", pd.Series("", index=tx_students.index)).astype(str).str.strip().str.lower()
-        tx_paid_ids = set(tx_students.loc[tx_status.eq("admitted"), "student_id"].astype(str))
+        tx_status = tx_students.get("Status", pd.Series("", index=tx_students.index)).astype(str)
+        tx_paid_ids = set(tx_students.loc[tx_status.map(lambda x: is_paid_status_for_program(x, program)).astype(bool), "student_id"].astype(str))
 
     rows = []
     seen = set()
@@ -8371,7 +8395,7 @@ def _unpaid_student_frame(data, program="UG"):
             if not sid or sid in seen or sid in tx_paid_ids:
                 continue
             status = clean_text(r.get("sheet_status_raw", r.get("paid_label", "")))
-            if status.lower() == "admitted" or bool(r.get("sheet_is_paid", False)):
+            if is_paid_status_for_program(status, program) or bool(r.get("sheet_is_paid", False)):
                 continue
             rows.append({
                 "student_id": sid,
@@ -9122,7 +9146,7 @@ def _community_impact_paid_students(data: dict) -> pd.DataFrame:
             status_raw = clean_text(r.get("sheet_status_raw", ""))
             status_l = status_raw.lower()
             is_refund = "refund" in status_l
-            is_paid_or_deferral = status_l.strip() == "admitted" or "deferral" in status_l
+            is_paid_or_deferral = is_paid_status_for_program(status_raw, program)
             if is_refund or not is_paid_or_deferral:
                 continue
             pay_dt = pd.to_datetime(r.get("payment_date_parsed", pd.NaT), errors="coerce")
@@ -9380,16 +9404,101 @@ def render_community_impact_page(data):
     with tabs[2]:
         _render_community_impact_scope(cohort[cohort.get("UG/PG", pd.Series(dtype=str)).astype(str).str.upper().eq("PG")].copy() if not cohort.empty else cohort, "PG", "community_impact_pg")
 
+
+def _safe_secret_value(key: str, default: str = "") -> str:
+    try:
+        return clean_text(st.secrets.get(key, default))
+    except Exception:
+        return default
+
+
+def sanitize_hidden_nav_sections(hidden_sections):
+    allowed = set(ALL_NAV_PAGES)
+    return [p for p in hidden_sections if p in allowed and p != "Overview"]
+
+
+def safe_rerun():
+    if hasattr(st, "rerun"):
+        st.rerun()
+    elif hasattr(st, "experimental_rerun"):
+        st.experimental_rerun()
+
+
+def get_hidden_nav_sections():
+    if "hidden_nav_sections" not in st.session_state:
+        st.session_state["hidden_nav_sections"] = sanitize_hidden_nav_sections(DEFAULT_HIDDEN_NAV_SECTIONS)
+    return sanitize_hidden_nav_sections(st.session_state.get("hidden_nav_sections", []))
+
+
+def render_navigation_sidebar():
+    """Render navigation with a protected hidden-section manager.
+
+    Normal users see only visible pages. Admins can open the Secret Navigation
+    Space, enter the password, and add/remove pages from the hidden list without
+    changing any page calculation logic.
+    """
+    st.markdown("## 🧭 Navigation")
+
+    hidden_sections = get_hidden_nav_sections()
+    show_hidden = st.checkbox(
+        "Show hidden sections",
+        value=bool(st.session_state.get("show_hidden_nav", False)),
+        key="show_hidden_nav",
+        help="When off, sections in the hidden list are removed from navigation."
+    )
+
+    if show_hidden:
+        visible_pages = list(ALL_NAV_PAGES)
+    else:
+        visible_pages = [p for p in ALL_NAV_PAGES if p not in set(hidden_sections)]
+    if not visible_pages:
+        visible_pages = ["Overview"]
+
+    current_page = st.session_state.get("nav_page", "Overview")
+    if current_page not in visible_pages:
+        current_page = "Overview" if "Overview" in visible_pages else visible_pages[0]
+    default_index = visible_pages.index(current_page) if current_page in visible_pages else 0
+    if st.session_state.get("nav") not in visible_pages:
+        st.session_state["nav"] = current_page
+    page = st.radio("Go to", visible_pages, index=default_index, label_visibility="collapsed", key="nav")
+    st.session_state["nav_page"] = page
+
+    with st.expander("🔒 Secret Navigation Space", expanded=False):
+        st.caption("Use this space to add/remove hidden sections. For deployment, set NAV_ADMIN_PASSWORD in Streamlit secrets. Default local password is tetr-admin.")
+        password = st.text_input("Secret space password", type="password", key="nav_secret_password")
+        expected = _safe_secret_value("NAV_ADMIN_PASSWORD", "tetr-admin")
+        if password and password == expected:
+            selected_hidden = st.multiselect(
+                "Sections hidden from normal navigation",
+                [p for p in ALL_NAV_PAGES if p != "Overview"],
+                default=hidden_sections,
+                key="hidden_nav_multiselect",
+            )
+            c1, c2 = st.columns(2)
+            if c1.button("Apply", key="apply_hidden_nav"):
+                st.session_state["hidden_nav_sections"] = sanitize_hidden_nav_sections(selected_hidden)
+                st.success("Hidden navigation sections updated. Use Show hidden sections to reveal them.")
+                safe_rerun()
+            if c2.button("Clear", key="clear_hidden_nav"):
+                st.session_state["hidden_nav_sections"] = []
+                st.success("All sections are visible again.")
+                safe_rerun()
+        elif password:
+            st.error("Incorrect secret password.")
+        else:
+            st.info("Enter the secret password to manage hidden sections.")
+
+    if hidden_sections and not show_hidden:
+        st.caption(f"Hidden sections: {len(hidden_sections)}. Enable Show hidden sections to reveal them.")
+
+    return page
+
 def main():
     cfg = resolve_source()
     render_header(cfg)
 
     with st.sidebar:
-        st.markdown("## 🧭 Navigation")
-        default_pages = ["Overview", "Recent Activity", "Success Metrics", "Student Profile", "UG", "PG", "Courses", "UG vs PG", "Tetr-X", "T-7 & T+7 Analysis", "Conversion", "Retention", "Refund Analytics", "Community Impact", "Activities", "Hritabh"]
-        default_index = default_pages.index(st.session_state.get("nav_page", "Overview")) if st.session_state.get("nav_page", "Overview") in default_pages else 0
-        page = st.radio("Go to", default_pages, index=default_index, label_visibility="collapsed", key="nav")
-        st.session_state["nav_page"] = page
+        page = render_navigation_sidebar()
         if cfg["source_mode"] == "excel" and cfg["file_bytes"] is None:
             st.info("Upload the workbook to use manual mode.")
         st.caption("Speed mode: only the selected section's required tabs are loaded; cached sections reopen quickly.")
