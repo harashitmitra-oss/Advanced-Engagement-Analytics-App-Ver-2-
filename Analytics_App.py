@@ -148,29 +148,32 @@ def inject_css():
             padding: 10px 14px;
         }}
         .stTabs [aria-selected="true"] {{ background: #dff3e7; border-color: #8fcaab; }}
+        /* Option A navigation: rounded, left-aligned, same-page buttons */
         .nav-section-menu {{
             display: flex;
             flex-direction: column;
-            gap: 8px;
-            margin-top: 6px;
-            margin-bottom: 10px;
+            gap: 0;
+            margin-top: 8px;
+            margin-bottom: 12px;
         }}
         .nav-section-item {{
             display: flex;
             align-items: center;
+            justify-content: flex-start;
             width: 100%;
             box-sizing: border-box;
-            padding: 10px 12px 10px 13px;
-            border-radius: 13px;
+            padding: 9px 12px 9px 16px;
+            border-radius: 11px;
             border: 1px solid #cfe8d9;
             border-left: 5px solid transparent;
             background: #ffffff;
             color: #12372a !important;
             text-decoration: none !important;
-            font-weight: 750;
+            font-weight: 800;
             line-height: 1.15;
             box-shadow: 0 2px 8px rgba(11, 61, 46, 0.035);
-            min-height: 42px;
+            min-height: 38px;
+            margin: 0 0 7px 0;
         }}
         .nav-section-item.active {{
             background: #dff3e7;
@@ -180,44 +183,58 @@ def inject_css():
             box-shadow: 0 4px 12px rgba(31, 122, 86, 0.11);
         }}
         .nav-section-title {{
-            display: inline-block;
+            display: block;
+            width: 100%;
             overflow: hidden;
             text-overflow: ellipsis;
             white-space: nowrap;
+            text-align: left;
         }}
         .nav-section-caption {{
             color: #557166;
             font-size: 12px;
             margin: 4px 0 8px 2px;
         }}
-        section[data-testid="stSidebar"] div.stButton > button {{
-            justify-content: flex-start;
-            width: 100%;
-            box-sizing: border-box;
-            padding: 10px 12px 10px 13px;
-            border-radius: 13px;
-            border: 1px solid #cfe8d9;
-            border-left: 5px solid transparent;
-            background: #ffffff;
+        section[data-testid="stSidebar"] div.stButton {{
+            margin: 0 0 7px 0 !important;
+        }}
+        section[data-testid="stSidebar"] div.stButton > button,
+        section[data-testid="stSidebar"] div[data-testid="stButton"] > button {{
+            display: flex !important;
+            align-items: center !important;
+            justify-content: flex-start !important;
+            text-align: left !important;
+            width: 100% !important;
+            box-sizing: border-box !important;
+            padding: 9px 12px 9px 16px !important;
+            border-radius: 11px !important;
+            border: 1px solid #cfe8d9 !important;
+            border-left: 5px solid transparent !important;
+            background: #ffffff !important;
             color: #12372a !important;
             text-decoration: none !important;
-            font-weight: 750;
-            line-height: 1.15;
-            box-shadow: 0 2px 8px rgba(11, 61, 46, 0.035);
-            min-height: 42px;
-            transition: background 0.12s ease, border-color 0.12s ease, transform 0.12s ease;
+            font-weight: 800 !important;
+            line-height: 1.15 !important;
+            box-shadow: 0 2px 8px rgba(11, 61, 46, 0.035) !important;
+            min-height: 38px !important;
+            transition: background 0.12s ease, border-color 0.12s ease, transform 0.12s ease !important;
         }}
-        section[data-testid="stSidebar"] div.stButton > button:hover {{
-            background: #eef8f2;
-            border-color: #b7dec7;
-            border-left-color: #b7dec7;
+        section[data-testid="stSidebar"] div.stButton > button:hover,
+        section[data-testid="stSidebar"] div[data-testid="stButton"] > button:hover {{
+            background: #eef8f2 !important;
+            border-color: #b7dec7 !important;
+            border-left-color: #b7dec7 !important;
             color: #0b3d2e !important;
             transform: translateX(2px);
         }}
-        section[data-testid="stSidebar"] div.stButton > button p {{
-            text-align: left;
-            width: 100%;
-            font-weight: 750;
+        section[data-testid="stSidebar"] div.stButton > button p,
+        section[data-testid="stSidebar"] div[data-testid="stButton"] > button p,
+        section[data-testid="stSidebar"] div.stButton > button div[data-testid="stMarkdownContainer"],
+        section[data-testid="stSidebar"] div[data-testid="stButton"] > button div[data-testid="stMarkdownContainer"] {{
+            text-align: left !important;
+            width: 100% !important;
+            font-weight: 800 !important;
+            display: block !important;
         }}
         </style>
         """,
@@ -9599,7 +9616,7 @@ def _nav_button_key(page: str) -> str:
 
 
 def render_active_left_border_nav(visible_pages, current_page: str) -> str:
-    """Render same-page active-left-border navigation without icons or anchor links."""
+    """Render Option A same-page rounded left-aligned navigation without icons or anchor links."""
     selected_page = current_page
     st.markdown('<div class="nav-section-menu">', unsafe_allow_html=True)
     for page in visible_pages:
@@ -9629,7 +9646,7 @@ def render_navigation_sidebar():
 
     UI order: normal navigation first, Secret Navigation Space below it.
     """
-    st.markdown("## 🧭 Navigation")
+    st.markdown("## Navigation")
 
     hidden_sections = get_hidden_nav_sections()
     expected = _safe_secret_value("NAV_ADMIN_PASSWORD", "tetr-admin")
