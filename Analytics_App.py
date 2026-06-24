@@ -2630,12 +2630,18 @@ def render_overview(data):
 
     # Paid/admitted + community split inside each Engagement Quality tier.
     # This is Overview-only and does not change the engagement-quality scoring itself.
+    # Optional checkbox below lets the user count refunds as paid ONLY for this
+    # First 30 Days Participation Logic section. Global Overview paid/refund KPIs
+    # and all other dashboard sections continue to use the normal paid/refund rules.
+    include_refunded_as_paid_first30 = bool(st.session_state.get("overview_include_refunded_as_paid_first30", False))
+    first30_section_paid_mask = (paid_mask | refund_mask) if include_refunded_as_paid_first30 else paid_mask
+
     paid_by_student_id = {}
     community_by_student_id = {}
     for idx, r in overview_df.iterrows():
         sid = clean_text(r.get("email_key", "")) or clean_text(r.get("student_key", "")) or normalize_name(r.get("student_name", ""))
         if sid and sid not in paid_by_student_id:
-            paid_by_student_id[sid] = bool(paid_mask.loc[idx]) if idx in paid_mask.index else False
+            paid_by_student_id[sid] = bool(first30_section_paid_mask.loc[idx]) if idx in first30_section_paid_mask.index else False
         if sid and sid not in community_by_student_id:
             community_by_student_id[sid] = bool(community_mask.loc[idx]) if idx in community_mask.index else False
 
@@ -2648,6 +2654,8 @@ def render_overview(data):
     engagement_tier_order = ["High Engaged", "Medium Engaged", "Low Engaged", "No Engagement"]
     out_community_tier_order = ["No Engagement", "Low Engaged", "Medium Engaged", "High Engaged"]
     tier_paid_counts = {tier: 0 for tier in engagement_tier_order}
+    tier_in_community_counts = {tier: 0 for tier in engagement_tier_order}
+    tier_in_community_paid_counts = {tier: 0 for tier in engagement_tier_order}
     tier_out_community_counts = {tier: 0 for tier in engagement_tier_order}
     tier_out_community_paid_counts = {tier: 0 for tier in engagement_tier_order}
     tier_total_counts = {
@@ -2666,6 +2674,22 @@ def render_overview(data):
 
         tier_paid_counts.update(
             impact_cohort[impact_cohort["Paid / Admitted"]]
+            .groupby("Engagement Tier")
+            .size()
+            .reindex(engagement_tier_order, fill_value=0)
+            .astype(int)
+            .to_dict()
+        )
+        tier_in_community_counts.update(
+            impact_cohort[impact_cohort["In Community"]]
+            .groupby("Engagement Tier")
+            .size()
+            .reindex(engagement_tier_order, fill_value=0)
+            .astype(int)
+            .to_dict()
+        )
+        tier_in_community_paid_counts.update(
+            impact_cohort[impact_cohort["In Community"] & impact_cohort["Paid / Admitted"]]
             .groupby("Engagement Tier")
             .size()
             .reindex(engagement_tier_order, fill_value=0)
@@ -2718,6 +2742,14 @@ def render_overview(data):
         "Deadline is used as the first-30-days end date when available; otherwise Offered Date + 30 days is used. "
         "Winner/Spotlight records are counted all-time. No payment-date or pre-payment filter is applied."
     )
+    st.checkbox(
+        "Count refunded students as paid/admitted for this section only",
+        value=include_refunded_as_paid_first30,
+        key="overview_include_refunded_as_paid_first30",
+        help="Only updates the paid/admitted counts shown inside this First 30 Days Participation Logic section. It does not change Overview Paid Students, Refund, or any other section.",
+    )
+    if include_refunded_as_paid_first30:
+        st.caption("Temporary view active for this section: refunded students are counted as paid/admitted in the Engagement Quality metrics below.")
     with st.expander("View Engagement Quality division logic", expanded=False):
         logic_df = pd.DataFrame([
             {
@@ -2758,6 +2790,18 @@ def render_overview(data):
     e3.metric("Low Engaged", f"{low_count:,}", delta=_paid_delta_for_tier("Low Engaged"))
     e4.metric("No Engagement", f"{no_impact_count:,}", delta=_paid_delta_for_tier("No Engagement"))
 
+    st.markdown("#### Engagement Quality — In Community Split")
+    def _in_community_delta_for_tier(tier):
+        paid = int(tier_in_community_paid_counts.get(tier, 0))
+        total = int(tier_in_community_counts.get(tier, 0))
+        return f"{paid:,} paid/admitted · {pct(paid, total):.1f}% of in-community"
+
+    ic1, ic2, ic3, ic4 = st.columns(4)
+    ic1.metric("No Engagement In Community", f"{tier_in_community_counts.get('No Engagement', 0):,}", delta=_in_community_delta_for_tier("No Engagement"))
+    ic2.metric("Low Engagement In Community", f"{tier_in_community_counts.get('Low Engaged', 0):,}", delta=_in_community_delta_for_tier("Low Engaged"))
+    ic3.metric("Medium Engagement In Community", f"{tier_in_community_counts.get('Medium Engaged', 0):,}", delta=_in_community_delta_for_tier("Medium Engaged"))
+    ic4.metric("High Engagement In Community", f"{tier_in_community_counts.get('High Engaged', 0):,}", delta=_in_community_delta_for_tier("High Engaged"))
+
     st.markdown("#### Engagement Quality — Out Community Split")
     def _out_community_delta_for_tier(tier):
         paid = int(tier_out_community_paid_counts.get(tier, 0))
@@ -2776,6 +2820,9 @@ def render_overview(data):
             "Total Students": int(tier_total_counts.get(tier, 0)),
             "Paid / Admitted": int(tier_paid_counts.get(tier, 0)),
             "Paid %": f"{pct(tier_paid_counts.get(tier, 0), tier_total_counts.get(tier, 0)):.1f}%",
+            "In Community": int(tier_in_community_counts.get(tier, 0)),
+            "In Community Paid": int(tier_in_community_paid_counts.get(tier, 0)),
+            "In Community Paid % (of In Community)": f"{pct(tier_in_community_paid_counts.get(tier, 0), tier_in_community_counts.get(tier, 0)):.1f}%",
             "Out Community": int(tier_out_community_counts.get(tier, 0)),
             "Out Community Paid": int(tier_out_community_paid_counts.get(tier, 0)),
             "Out Community Paid % (of Out Community)": f"{pct(tier_out_community_paid_counts.get(tier, 0), tier_out_community_counts.get(tier, 0)):.1f}%",
