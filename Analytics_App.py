@@ -5342,7 +5342,7 @@ def build_retention_analytics_v2(data):
       Refund rows are included because they were paid/Tetr-X students who later churned.
     - Churn = any Tetr-X status/refund text contains "refund".
     - Retained = not churned AND completed 60 days from payment date.
-    - Post-payment opportunities = Tetr-X activities/events that happened on/after each student's payment date.
+    - Post-payment opportunities = Tetr-X plus matching batch-sheet activities/events that happened on/after each student's payment date.
     - Same event name + type + date is deduped across sheets/program within its program.
     """
     activities = data.get("activities", {})
@@ -5482,61 +5482,78 @@ def build_retention_analytics_v2(data):
         pay_dt = pay_dt.normalize()
         program = clean_text(stu.get("program", ""))
         tx_sheet = "Tetr-X-UG" if program == "UG" else "Tetr-X-PG"
-        sdf = activities.get(tx_sheet, pd.DataFrame())
-        ctx = activity_ctx.get(tx_sheet, {})
-        ev_info = ctx.get("event_info", pd.DataFrame()) if ctx else pd.DataFrame()
-        if sdf is None or sdf.empty or ev_info is None or ev_info.empty:
-            continue
+        batch_sheets = UG_BATCH_SHEETS if program == "UG" else PG_BATCH_SHEETS
+        # Retention post-payment should include activity after payment from both:
+        # 1) the relevant Tetr-X sheet, and 2) any matching UG/PG batch sheet row.
+        # Dedupe key remains student + program + event type + event name + date, so the
+        # same event is counted once even if it appears in both Batch and Tetr-X.
+        source_sheets = [tx_sheet] + [s for s in batch_sheets if s in activities]
+        seen_source_sheets = []
+        for source_sheet in source_sheets:
+            if source_sheet not in seen_source_sheets:
+                seen_source_sheets.append(source_sheet)
 
-        mask = pd.Series(False, index=sdf.index)
-        if clean_text(stu.get("email_key", "")) and "email_key" in sdf.columns:
-            mask = mask | sdf["email_key"].astype(str).eq(clean_text(stu.get("email_key", "")))
-        if clean_text(stu.get("student_key", "")) and "student_key" in sdf.columns:
-            mask = mask | sdf["student_key"].astype(str).eq(clean_text(stu.get("student_key", "")))
-        part = sdf.loc[mask].copy()
-        if part.empty:
-            continue
+        for source_sheet in seen_source_sheets:
+            sdf = activities.get(source_sheet, pd.DataFrame())
+            ctx = activity_ctx.get(source_sheet, {})
+            ev_info = ctx.get("event_info", pd.DataFrame()) if ctx else pd.DataFrame()
+            if sdf is None or sdf.empty or ev_info is None or ev_info.empty:
+                continue
 
-        for _, ev in ev_info.iterrows():
-            col = ev.get("column_name")
-            ev_date = pd.to_datetime(ev.get("event_date", pd.NaT), errors="coerce")
-            if not col or col not in part.columns or pd.isna(ev_date):
+            mask = pd.Series(False, index=sdf.index)
+            if clean_text(stu.get("email_key", "")) and "email_key" in sdf.columns:
+                mask = mask | sdf["email_key"].astype(str).eq(clean_text(stu.get("email_key", "")))
+            if clean_text(stu.get("student_key", "")) and "student_key" in sdf.columns:
+                mask = mask | sdf["student_key"].astype(str).eq(clean_text(stu.get("student_key", "")))
+            # Last-resort normalized name match only if email/student_key are unavailable.
+            if not mask.any() and not clean_text(stu.get("email_key", "")) and not clean_text(stu.get("student_key", "")) and "student_key" in sdf.columns:
+                name_key = normalize_name(stu.get("student_name", ""))
+                if name_key:
+                    mask = mask | sdf["student_key"].astype(str).eq(name_key)
+            part = sdf.loc[mask].copy()
+            if part.empty:
                 continue
-            ev_date = ev_date.normalize()
-            days_after = int((ev_date - pay_dt).days)
-            if days_after < 0:
-                continue
-            event_type_raw = clean_text(ev.get("event_type", "")) or "Other"
-            event_bucket = map_retention_bucket_event_type(event_type_raw)
-            event_name = clean_text(ev.get("event_name", "")) or clean_text(col)
-            occ_key = f"{program}|{event_bucket.lower()}|{normalize_name(event_name)}|{ev_date.date()}"
-            student_occ_key = f"{sid}|{occ_key}"
-            occurrence_rows.append({"program": program, "event_name": event_name, "event_type": event_bucket, "event_date": ev_date, "occurrence_key": occ_key})
-            available_rows.append({
-                "student_id": sid,
-                "program": program,
-                "event_name": event_name,
-                "event_type": event_bucket,
-                "event_date": ev_date,
-                "occurrence_key": occ_key,
-                "student_occurrence_key": student_occ_key,
-                "days_after_payment": days_after,
-            })
-            if not (pd.to_numeric(part[col], errors="coerce").fillna(0) > 0).any():
-                continue
-            event_rows.append({
-                "student_id": sid,
-                "student_name": clean_text(stu.get("student_name", "")),
-                "program": program,
-                "is_churned": sid in refunded_ids,
-                "is_retained_60d": bool(stu.get("is_retained_60d", False)),
-                "payment_date": pay_dt,
-                "event_name": event_name,
-                "event_type": event_bucket,
-                "event_date": ev_date,
-                "dedupe_key": student_occ_key,
-                "days_after_payment": days_after,
-            })
+
+            for _, ev in ev_info.iterrows():
+                col = ev.get("column_name")
+                ev_date = pd.to_datetime(ev.get("event_date", pd.NaT), errors="coerce")
+                if not col or col not in part.columns or pd.isna(ev_date):
+                    continue
+                ev_date = ev_date.normalize()
+                days_after = int((ev_date - pay_dt).days)
+                if days_after < 0:
+                    continue
+                event_type_raw = clean_text(ev.get("event_type", "")) or "Other"
+                event_bucket = map_retention_bucket_event_type(event_type_raw)
+                event_name = clean_text(ev.get("event_name", "")) or clean_text(col)
+                occ_key = f"{program}|{event_bucket.lower()}|{normalize_name(event_name)}|{ev_date.date()}"
+                student_occ_key = f"{sid}|{occ_key}"
+                occurrence_rows.append({"program": program, "event_name": event_name, "event_type": event_bucket, "event_date": ev_date, "occurrence_key": occ_key})
+                available_rows.append({
+                    "student_id": sid,
+                    "program": program,
+                    "event_name": event_name,
+                    "event_type": event_bucket,
+                    "event_date": ev_date,
+                    "occurrence_key": occ_key,
+                    "student_occurrence_key": student_occ_key,
+                    "days_after_payment": days_after,
+                })
+                if not (pd.to_numeric(part[col], errors="coerce").fillna(0) > 0).any():
+                    continue
+                event_rows.append({
+                    "student_id": sid,
+                    "student_name": clean_text(stu.get("student_name", "")),
+                    "program": program,
+                    "is_churned": sid in refunded_ids,
+                    "is_retained_60d": bool(stu.get("is_retained_60d", False)),
+                    "payment_date": pay_dt,
+                    "event_name": event_name,
+                    "event_type": event_bucket,
+                    "event_date": ev_date,
+                    "dedupe_key": student_occ_key,
+                    "days_after_payment": days_after,
+                })
 
     events_df = pd.DataFrame(event_rows) if event_rows else empty_events.copy()
     if not events_df.empty:
@@ -5871,10 +5888,10 @@ def _build_retention_student_postpayment_table(paid_df: pd.DataFrame, events_df:
 
 def _render_retention_program_student_tab(paid_df: pd.DataFrame, events_df: pd.DataFrame, program: str, key_prefix: str, data: dict = None):
     st.markdown(f"### Retention {program}")
-    st.caption("Status = Admitted students only. All activity counts are deduped post-payment Tetr-X activities after each student's payment date.")
+    st.caption("Status = Admitted/valid Deferral students only. Post-payment counts include matching Batch-sheet and Tetr-X activities after each student's payment date, deduped by event name/type/date.")
     table = _build_retention_student_postpayment_table(paid_df, events_df, program, data=data)
     if table.empty:
-        st.info(f"No admitted Tetr-X {program} students with usable payment dates were found.")
+        st.info(f"No admitted/valid deferral Tetr-X {program} students with usable payment dates were found.")
         return
     m1, m2, m3 = st.columns(3)
     m1.metric(f"Admitted Tetr-X {program} Students", f"{len(table):,}")
