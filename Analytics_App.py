@@ -2652,7 +2652,7 @@ def render_overview(data):
         "No Impact": "No Engagement",
     }
     engagement_tier_order = ["High Engaged", "Medium Engaged", "Low Engaged", "No Engagement"]
-    out_community_tier_order = ["No Engagement", "Low Engaged", "Medium Engaged", "High Engaged"]
+    out_community_tier_order = ["High Engaged", "Medium Engaged", "Low Engaged", "No Engagement"]
     tier_paid_counts = {tier: 0 for tier in engagement_tier_order}
     tier_in_community_counts = {tier: 0 for tier in engagement_tier_order}
     tier_in_community_paid_counts = {tier: 0 for tier in engagement_tier_order}
@@ -2796,11 +2796,20 @@ def render_overview(data):
         total = int(tier_in_community_counts.get(tier, 0))
         return f"{paid:,} paid/admitted · {pct(paid, total):.1f}% of in-community"
 
-    ic1, ic2, ic3, ic4 = st.columns(4)
-    ic1.metric("No Engagement In Community", f"{tier_in_community_counts.get('No Engagement', 0):,}", delta=_in_community_delta_for_tier("No Engagement"))
-    ic2.metric("Low Engagement In Community", f"{tier_in_community_counts.get('Low Engaged', 0):,}", delta=_in_community_delta_for_tier("Low Engaged"))
-    ic3.metric("Medium Engagement In Community", f"{tier_in_community_counts.get('Medium Engaged', 0):,}", delta=_in_community_delta_for_tier("Medium Engaged"))
-    ic4.metric("High Engagement In Community", f"{tier_in_community_counts.get('High Engaged', 0):,}", delta=_in_community_delta_for_tier("High Engaged"))
+    in_community_display_order = ["High Engaged", "Medium Engaged", "Low Engaged", "No Engagement"]
+    in_community_metric_labels = {
+        "High Engaged": "High Engagement In Community",
+        "Medium Engaged": "Medium Engagement In Community",
+        "Low Engaged": "Low Engagement In Community",
+        "No Engagement": "No Engagement In Community",
+    }
+    ic_cols = st.columns(4)
+    for col, tier in zip(ic_cols, in_community_display_order):
+        col.metric(
+            in_community_metric_labels[tier],
+            f"{tier_in_community_counts.get(tier, 0):,}",
+            delta=_in_community_delta_for_tier(tier),
+        )
 
     st.markdown("#### Engagement Quality — Out Community Split")
     def _out_community_delta_for_tier(tier):
@@ -2808,11 +2817,70 @@ def render_overview(data):
         total = int(tier_out_community_counts.get(tier, 0))
         return f"{paid:,} paid/admitted · {pct(paid, total):.1f}% of out-community"
 
-    oc1, oc2, oc3, oc4 = st.columns(4)
-    oc1.metric("No Engagement Out Community", f"{tier_out_community_counts.get('No Engagement', 0):,}", delta=_out_community_delta_for_tier("No Engagement"))
-    oc2.metric("Low Engagement Out Community", f"{tier_out_community_counts.get('Low Engaged', 0):,}", delta=_out_community_delta_for_tier("Low Engaged"))
-    oc3.metric("Medium Engagement Out Community", f"{tier_out_community_counts.get('Medium Engaged', 0):,}", delta=_out_community_delta_for_tier("Medium Engaged"))
-    oc4.metric("High Engagement Out Community", f"{tier_out_community_counts.get('High Engaged', 0):,}", delta=_out_community_delta_for_tier("High Engaged"))
+    out_community_display_order = ["High Engaged", "Medium Engaged", "Low Engaged", "No Engagement"]
+    out_community_metric_labels = {
+        "High Engaged": "High Engagement Out Community",
+        "Medium Engaged": "Medium Engagement Out Community",
+        "Low Engaged": "Low Engagement Out Community",
+        "No Engagement": "No Engagement Out Community",
+    }
+    oc_cols = st.columns(4)
+    for col, tier in zip(oc_cols, out_community_display_order):
+        col.metric(
+            out_community_metric_labels[tier],
+            f"{tier_out_community_counts.get(tier, 0):,}",
+            delta=_out_community_delta_for_tier(tier),
+        )
+
+    combined_community_engagement_df = pd.DataFrame([
+        {
+            "Community Split": community_split,
+            "Engagement Tier": engagement_label,
+            "Students": int(count_value),
+        }
+        for community_split, counts_map in [
+            ("In Community", tier_in_community_counts),
+            ("Out Community", tier_out_community_counts),
+        ]
+        for tier_key, engagement_label in [
+            ("High Engaged", "High Engagement"),
+            ("Medium Engaged", "Medium Engagement"),
+            ("Low Engaged", "Low Engagement"),
+            ("No Engagement", "No Engagement"),
+        ]
+        for count_value in [counts_map.get(tier_key, 0)]
+    ])
+    combined_community_engagement_df = combined_community_engagement_df[
+        combined_community_engagement_df["Students"].fillna(0).astype(float).gt(0)
+    ].copy()
+
+    if combined_community_engagement_df.empty:
+        st.info("No community engagement split data available for the combined chart.")
+    else:
+        fig = px.sunburst(
+            combined_community_engagement_df,
+            path=["Community Split", "Engagement Tier"],
+            values="Students",
+            title="Engagement Quality — Community Split",
+            category_orders={
+                "Community Split": ["In Community", "Out Community"],
+                "Engagement Tier": ["High Engagement", "Medium Engagement", "Low Engagement", "No Engagement"],
+            },
+        )
+        fig.update_traces(
+            textinfo="label+value+percent parent",
+            insidetextorientation="radial",
+            hovertemplate="<b>%{label}</b><br>Students: %{value:,}<br>Share: %{percentParent:.1%}<extra></extra>",
+        )
+        fig.update_layout(
+            height=620,
+            paper_bgcolor="white",
+            plot_bgcolor="white",
+            font=dict(color=DARK),
+            title_font=dict(color=DARK),
+            margin=dict(l=10, r=10, t=70, b=10),
+        )
+        st.plotly_chart(fig, use_container_width=True, key="overview_v2_combined_community_engagement_round_chart")
 
     engagement_summary_df = pd.DataFrame([
         {
