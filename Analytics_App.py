@@ -2857,15 +2857,26 @@ def render_overview(data):
     if combined_community_engagement_df.empty:
         st.info("No community engagement split data available for the combined chart.")
     else:
+        community_order_map = {"In Community": 0, "Out Community": 1}
+        engagement_order_map = {
+            "High Engagement": 0,
+            "Medium Engagement": 1,
+            "Low Engagement": 2,
+            "No Engagement": 3,
+        }
+        combined_community_engagement_df["_community_order"] = combined_community_engagement_df["Community Split"].map(community_order_map).fillna(99)
+        combined_community_engagement_df["_engagement_order"] = combined_community_engagement_df["Engagement Tier"].map(engagement_order_map).fillna(99)
+        combined_community_engagement_df = combined_community_engagement_df.sort_values(
+            ["_community_order", "_engagement_order"]
+        ).drop(columns=["_community_order", "_engagement_order"])
+
+        # Avoid category_orders here for compatibility with older Plotly versions
+        # used by Streamlit Cloud deployments.
         fig = px.sunburst(
             combined_community_engagement_df,
             path=["Community Split", "Engagement Tier"],
             values="Students",
             title="Engagement Quality — Community Split",
-            category_orders={
-                "Community Split": ["In Community", "Out Community"],
-                "Engagement Tier": ["High Engagement", "Medium Engagement", "Low Engagement", "No Engagement"],
-            },
         )
         fig.update_traces(
             textinfo="label+value+percent parent",
