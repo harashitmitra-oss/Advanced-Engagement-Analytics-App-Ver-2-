@@ -2832,31 +2832,28 @@ def render_overview(data):
             delta=_out_community_delta_for_tier(tier),
         )
 
-    combined_community_engagement_df = pd.DataFrame([
-        {
-            "Community Split": community_split,
-            "Engagement Tier": engagement_label,
-            "Students": int(count_value),
-        }
-        for community_split, counts_map in [
-            ("In Community", tier_in_community_counts),
-            ("Out Community", tier_out_community_counts),
-        ]
-        for tier_key, engagement_label in [
-            ("High Engaged", "High Engagement"),
-            ("Medium Engaged", "Medium Engagement"),
-            ("Low Engaged", "Low Engagement"),
-            ("No Engagement", "No Engagement"),
-        ]
-        for count_value in [counts_map.get(tier_key, 0)]
-    ])
-    combined_community_engagement_df = combined_community_engagement_df[
-        combined_community_engagement_df["Students"].fillna(0).astype(float).gt(0)
-    ].copy()
-
-    if combined_community_engagement_df.empty:
-        st.info("No community engagement split data available for the combined chart.")
-    else:
+    def _build_community_engagement_chart_df(in_counts_map, out_counts_map, value_label="Students"):
+        chart_df = pd.DataFrame([
+            {
+                "Community Split": community_split,
+                "Engagement Tier": engagement_label,
+                value_label: int(count_value),
+            }
+            for community_split, counts_map in [
+                ("In Community", in_counts_map),
+                ("Out Community", out_counts_map),
+            ]
+            for tier_key, engagement_label in [
+                ("High Engaged", "High Engagement"),
+                ("Medium Engaged", "Medium Engagement"),
+                ("Low Engaged", "Low Engagement"),
+                ("No Engagement", "No Engagement"),
+            ]
+            for count_value in [counts_map.get(tier_key, 0)]
+        ])
+        chart_df = chart_df[chart_df[value_label].fillna(0).astype(float).gt(0)].copy()
+        if chart_df.empty:
+            return chart_df
         community_order_map = {"In Community": 0, "Out Community": 1}
         engagement_order_map = {
             "High Engagement": 0,
@@ -2864,24 +2861,26 @@ def render_overview(data):
             "Low Engagement": 2,
             "No Engagement": 3,
         }
-        combined_community_engagement_df["_community_order"] = combined_community_engagement_df["Community Split"].map(community_order_map).fillna(99)
-        combined_community_engagement_df["_engagement_order"] = combined_community_engagement_df["Engagement Tier"].map(engagement_order_map).fillna(99)
-        combined_community_engagement_df = combined_community_engagement_df.sort_values(
-            ["_community_order", "_engagement_order"]
-        ).drop(columns=["_community_order", "_engagement_order"])
+        chart_df["_community_order"] = chart_df["Community Split"].map(community_order_map).fillna(99)
+        chart_df["_engagement_order"] = chart_df["Engagement Tier"].map(engagement_order_map).fillna(99)
+        return chart_df.sort_values(["_community_order", "_engagement_order"]).drop(columns=["_community_order", "_engagement_order"])
 
+    def _render_community_engagement_round_chart(chart_df, title, value_col, key):
+        if chart_df is None or chart_df.empty:
+            st.info(f"No data available for {title.lower()}.")
+            return
         # Avoid category_orders here for compatibility with older Plotly versions
         # used by Streamlit Cloud deployments.
         fig = px.sunburst(
-            combined_community_engagement_df,
+            chart_df,
             path=["Community Split", "Engagement Tier"],
-            values="Students",
-            title="Engagement Quality — Community Split",
+            values=value_col,
+            title=title,
         )
         fig.update_traces(
             textinfo="label+value+percent parent",
             insidetextorientation="radial",
-            hovertemplate="<b>%{label}</b><br>Students: %{value:,}<br>Share: %{percentParent:.1%}<extra></extra>",
+            hovertemplate=f"<b>%{{label}}</b><br>{value_col}: %{{value:,}}<br>Share: %{{percentParent:.1%}}<extra></extra>",
         )
         fig.update_layout(
             height=620,
@@ -2891,7 +2890,37 @@ def render_overview(data):
             title_font=dict(color=DARK),
             margin=dict(l=10, r=10, t=70, b=10),
         )
-        st.plotly_chart(fig, use_container_width=True, key="overview_v2_combined_community_engagement_round_chart")
+        st.plotly_chart(fig, use_container_width=True, key=key)
+
+    combined_community_engagement_df = _build_community_engagement_chart_df(
+        tier_in_community_counts,
+        tier_out_community_counts,
+        value_label="Students",
+    )
+    paid_community_engagement_df = _build_community_engagement_chart_df(
+        tier_in_community_paid_counts,
+        tier_out_community_paid_counts,
+        value_label="Paid / Admitted Students",
+    )
+
+    chart_col_all, chart_col_paid = st.columns(2)
+    with chart_col_all:
+        _render_community_engagement_round_chart(
+            combined_community_engagement_df,
+            "Engagement Quality — Community Split",
+            "Students",
+            "overview_v2_combined_community_engagement_round_chart",
+        )
+    with chart_col_paid:
+        paid_title = "Engagement Quality — Paid/Admitted Community Split"
+        if include_refunded_as_paid_first30:
+            paid_title = "Engagement Quality — Paid/Admitted + Refunded Community Split"
+        _render_community_engagement_round_chart(
+            paid_community_engagement_df,
+            paid_title,
+            "Paid / Admitted Students",
+            "overview_v2_paid_community_engagement_round_chart",
+        )
 
     engagement_summary_df = pd.DataFrame([
         {
