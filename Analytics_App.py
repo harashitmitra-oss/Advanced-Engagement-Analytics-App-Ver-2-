@@ -6092,7 +6092,7 @@ def render_recent_activity_page(data):
     recent = build_recent_activity_data(data, start_date=start_date, end_date=end_date)
     st.caption(f"Showing activity from {start_date.strftime('%d %b %Y')} to {end_date.strftime('%d %b %Y')}")
 
-    tabs = st.tabs(["Recent Payments", "Recent Active Students", "Recent Student Activity", "Recent Inactive Students", "Recent Events"])
+    tabs = st.tabs(["Recent Payments", "Recent Active Students", "Recent Student Activity", "Recent Reactivations", "Recent Inactive Students", "Recent Events"])
 
     with tabs[0]:
         recent_payments = recent.get("recent_payments", [])
@@ -6128,7 +6128,7 @@ def render_recent_activity_page(data):
             st.info("No active students were found in recently done events for the selected range.")
 
     with tabs[2]:
-        def _render_recent_student_activity_program(program_label: str):
+        def _render_recent_student_activity_program(program_label: str, require_expired_deadline: bool = False, key_suffix: str = "activity"):
             frames = []
             for sheet in [s for s in (UG_BATCH_SHEETS + PG_BATCH_SHEETS) if s in recent["batch_student_recent"]]:
                 df = recent["batch_student_recent"].get(sheet, pd.DataFrame())
@@ -6144,9 +6144,13 @@ def render_recent_activity_page(data):
             if not frames:
                 st.info(f"No active {program_label} students were found for the selected range.")
                 return
+
             combined = pd.concat(frames, ignore_index=True)
             combined["_sid"] = combined.apply(lambda r: clean_text(r.get("email_key", "")) or normalize_name(r.get("student_name", "")), axis=1)
             rows = []
+            dates_df = data.get("dates_df", pd.DataFrame())
+            today_for_deadline = get_today_ist().normalize()
+
             for _, grp in combined.groupby("_sid", sort=False):
                 first = grp.iloc[0]
                 active_dates = []
@@ -6158,31 +6162,78 @@ def render_recent_activity_page(data):
                     date_txt = clean_text(r.get("recent_active_dates", ""))
                     if date_txt:
                         active_dates.extend([clean_text(x) for x in date_txt.split(";") if clean_text(x)])
+
                 unique_events = list(dict.fromkeys(events))
-                parsed_dates = sorted([pd.to_datetime(d, errors="coerce", dayfirst=True) for d in set(active_dates) if pd.notna(pd.to_datetime(d, errors="coerce", dayfirst=True))])
-                rows.append({
-                    "Name": clean_text(first.get("student_name", "")),
-                    "Email": clean_text(first.get("email_key", "")),
+                parsed_dates = sorted([
+                    pd.to_datetime(d, errors="coerce", dayfirst=True)
+                    for d in set(active_dates)
+                    if pd.notna(pd.to_datetime(d, errors="coerce", dayfirst=True))
+                ])
+
+                student_name = clean_text(first.get("student_name", ""))
+                email_key = clean_text(first.get("email_key", ""))
+                student_key = normalize_name(student_name)
+                batch_value = clean_text(first.get("Batch", ""))
+                dates_row = find_student_dates_row(
+                    dates_df,
+                    student_name,
+                    email_key=email_key,
+                    student_key=student_key,
+                    program=program_label,
+                    batch=batch_value,
+                )
+                deadline_dt = pd.NaT
+                if dates_row is not None:
+                    deadline_dt = pd.to_datetime(dates_row.get("deadline_parsed", pd.NaT), errors="coerce")
+                deadline_expired = bool(pd.notna(deadline_dt) and deadline_dt.normalize() < today_for_deadline)
+
+                if require_expired_deadline and not deadline_expired:
+                    continue
+
+                row = {
+                    "Name": student_name,
+                    "Email": email_key,
                     "Program": program_label,
-                    "Batch": clean_text(first.get("Batch", "")),
+                    "Batch": batch_value,
                     "Status": clean_text(first.get("status", "")),
                     "Recent activities participated count": len(unique_events),
                     "Recent activities they participated in (with event dates)": "; ".join(unique_events),
                     "Dates they were active on": "; ".join([d.strftime("%d-%b-%Y") for d in parsed_dates]),
                     "Date of reactivation": parsed_dates[0].strftime("%d-%b-%Y") if parsed_dates else clean_text(first.get("reactivation_date", "")),
-                })
+                }
+                if require_expired_deadline:
+                    row["Deadline"] = deadline_dt.strftime("%d-%b-%Y") if pd.notna(deadline_dt) else ""
+                    row["Deadline Status"] = "Expired" if deadline_expired else "Not expired"
+                rows.append(row)
+
             out = pd.DataFrame(rows)
             if out.empty:
-                st.info(f"No active {program_label} students were found for the selected range.")
+                if require_expired_deadline:
+                    st.info(f"No recently reactivated {program_label} students with expired deadlines were found for the selected range.")
+                else:
+                    st.info(f"No active {program_label} students were found for the selected range.")
                 return
-            out = out.sort_values(["Recent activities participated count", "Name"], ascending=[False, True]).reset_index(drop=True)
-            st.markdown(f"#### {program_label} Table")
-            st.dataframe(out, use_container_width=True, hide_index=True, height=min(520, 80 + 35 * len(out)), key=f"recent_student_activity_{program_label.lower()}")
 
-        _render_recent_student_activity_program("UG")
-        _render_recent_student_activity_program("PG")
+            out = out.sort_values(["Recent activities participated count", "Name"], ascending=[False, True]).reset_index(drop=True)
+            table_title = f"{program_label} Recent Reactivations" if require_expired_deadline else f"{program_label} Table"
+            st.markdown(f"#### {table_title}")
+            st.dataframe(
+                out,
+                use_container_width=True,
+                hide_index=True,
+                height=min(520, 80 + 35 * len(out)),
+                key=f"recent_student_{key_suffix}_{program_label.lower()}",
+            )
+
+        _render_recent_student_activity_program("UG", require_expired_deadline=False, key_suffix="activity")
+        _render_recent_student_activity_program("PG", require_expired_deadline=False, key_suffix="activity")
 
     with tabs[3]:
+        st.caption("Students shown here were active in the selected date range and have an expired deadline in the Dates sheet.")
+        _render_recent_student_activity_program("UG", require_expired_deadline=True, key_suffix="reactivations")
+        _render_recent_student_activity_program("PG", require_expired_deadline=True, key_suffix="reactivations")
+
+    with tabs[4]:
         any_inactive = False
         for sheet in [s for s in (UG_BATCH_SHEETS + PG_BATCH_SHEETS) if s in recent["batch_student_recent"]]:
             df = recent["batch_student_recent"][sheet]
@@ -6197,7 +6248,7 @@ def render_recent_activity_page(data):
         if not any_inactive:
             st.info("No inactive students were found for the selected range.")
 
-    with tabs[4]:
+    with tabs[5]:
         recent_events_df = recent.get("recent_events_df", pd.DataFrame())
         if recent_events_df.empty:
             st.info("No recent events were found in the selected range.")
