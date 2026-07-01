@@ -6187,7 +6187,10 @@ def render_recent_activity_page(data):
                     deadline_dt = pd.to_datetime(dates_row.get("deadline_parsed", pd.NaT), errors="coerce")
                 deadline_expired = bool(pd.notna(deadline_dt) and deadline_dt.normalize() < today_for_deadline)
 
-                if require_expired_deadline and not deadline_expired:
+                status_value = clean_text(first.get("status", ""))
+                is_paid_or_deferral = is_paid_status_for_program(status_value, program_label)
+
+                if require_expired_deadline and (not deadline_expired or is_paid_or_deferral):
                     continue
 
                 row = {
@@ -6204,12 +6207,13 @@ def render_recent_activity_page(data):
                 if require_expired_deadline:
                     row["Deadline"] = deadline_dt.strftime("%d-%b-%Y") if pd.notna(deadline_dt) else ""
                     row["Deadline Status"] = "Expired" if deadline_expired else "Not expired"
+                    row["Payment Filter"] = "Non-paid / not deferral"
                 rows.append(row)
 
             out = pd.DataFrame(rows)
             if out.empty:
                 if require_expired_deadline:
-                    st.info(f"No recently reactivated {program_label} students with expired deadlines were found for the selected range.")
+                    st.info(f"No recently reactivated {program_label} non-paid students with expired deadlines were found for the selected range.")
                 else:
                     st.info(f"No active {program_label} students were found for the selected range.")
                 return
@@ -6229,7 +6233,7 @@ def render_recent_activity_page(data):
         _render_recent_student_activity_program("PG", require_expired_deadline=False, key_suffix="activity")
 
     with tabs[3]:
-        st.caption("Students shown here were active in the selected date range and have an expired deadline in the Dates sheet.")
+        st.caption("Students shown here were active in the selected date range, have an expired deadline in the Dates sheet, and are non-paid students. Admitted, UG deferral, and PG Admitted: Deferral statuses are excluded.")
         _render_recent_student_activity_program("UG", require_expired_deadline=True, key_suffix="reactivations")
         _render_recent_student_activity_program("PG", require_expired_deadline=True, key_suffix="reactivations")
 
