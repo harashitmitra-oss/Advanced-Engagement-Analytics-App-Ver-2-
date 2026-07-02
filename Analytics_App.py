@@ -7030,12 +7030,344 @@ def render_success_metrics_report(data):
             """
         )
 
+
+def _success_late_reactivation_paid_base(data):
+    """Paid students whose payment date is after the deadline in Dates sheet.
+
+    This is used only by Success Metrics -> Late Reactivation - Paid Students.
+    It does not change global paid/admitted logic anywhere else.
+    """
+    rows = []
+    activities = data.get("activities", {})
+    dates_df = data.get("dates_df", pd.DataFrame())
+    for tx_sheet in TX_SHEETS:
+        df = activities.get(tx_sheet, pd.DataFrame())
+        if df is None or df.empty:
+            continue
+        program = "UG" if tx_sheet.endswith("UG") else "PG"
+        for _, r in df.iterrows():
+            sid = _student_id_from_values(r.get("email_key", ""), r.get("student_key", ""), r.get("student_name", ""))
+            if not sid:
+                continue
+            status_raw = clean_text(r.get("sheet_status_raw", r.get("Status", "")))
+            paid_flag = False
+            if "sheet_is_paid" in df.columns:
+                try:
+                    paid_flag = bool(r.get("sheet_is_paid", False))
+                except Exception:
+                    paid_flag = False
+            paid_flag = paid_flag or is_paid_status_for_program(status_raw, tx_sheet)
+            if not paid_flag:
+                continue
+
+            pay_dt = pd.to_datetime(r.get("payment_date_parsed", pd.NaT), errors="coerce")
+            if pd.isna(pay_dt):
+                continue
+            pay_dt = pay_dt.normalize()
+
+            student_name = clean_text(r.get("student_name", ""))
+            email_key = clean_text(r.get("email_key", ""))
+            student_key = clean_text(r.get("student_key", "")) or normalize_name(student_name)
+            batch = clean_text(r.get("Batch", ""))
+            drow = find_student_dates_row(
+                dates_df,
+                student_name,
+                email_key=email_key,
+                student_key=student_key,
+                program=program,
+                batch=batch,
+            )
+            deadline_dt = pd.NaT
+            offered_dt = pd.NaT
+            if drow is not None:
+                deadline_dt = pd.to_datetime(drow.get("deadline_parsed", pd.NaT), errors="coerce")
+                offered_dt = pd.to_datetime(drow.get("offered_date_parsed", pd.NaT), errors="coerce")
+                if not batch:
+                    batch = clean_text(drow.get("Batch", ""))
+            if pd.isna(deadline_dt):
+                continue
+            deadline_dt = deadline_dt.normalize()
+            if pay_dt <= deadline_dt:
+                continue
+
+            rows.append({
+                "student_id": sid,
+                "Student Name": student_name,
+                "Email": email_key,
+                "UG/PG": program,
+                "Batch": batch,
+                "Status": status_raw,
+                "Offered Date": offered_dt.normalize() if pd.notna(offered_dt) else pd.NaT,
+                "Deadline": deadline_dt,
+                "Payment Date": pay_dt,
+                "Days after deadline expired they paid": int((pay_dt - deadline_dt).days),
+                "source_sheet": tx_sheet,
+                "email_key": email_key,
+                "student_key": student_key,
+            })
+
+    base = pd.DataFrame(rows)
+    if base.empty:
+        return pd.DataFrame(columns=[
+            "student_id", "Student Name", "Email", "UG/PG", "Batch", "Status",
+            "Offered Date", "Deadline", "Payment Date", "Days after deadline expired they paid",
+            "source_sheet", "email_key", "student_key"
+        ])
+
+    # One row per paid student. Keep earliest payment date after deadline.
+    base = base.sort_values(["Payment Date", "Student Name"], ascending=[True, True], na_position="last")
+    grouped = []
+    for sid, g in base.groupby("student_id", dropna=False):
+        first = g.iloc[0].to_dict()
+        statuses = [clean_text(x) for x in g.get("Status", pd.Series(dtype=str)).tolist() if clean_text(x)]
+        if statuses:
+            first["Status"] = ", ".join(sorted(dict.fromkeys(statuses)))
+        sheets = [clean_text(x) for x in g.get("source_sheet", pd.Series(dtype=str)).tolist() if clean_text(x)]
+        if sheets:
+            first["source_sheet"] = ", ".join(sorted(dict.fromkeys(sheets)))
+        grouped.append(first)
+    out = pd.DataFrame(grouped)
+    if not out.empty:
+        out["Payment Date"] = pd.to_datetime(out["Payment Date"], errors="coerce").dt.normalize()
+        out["Deadline"] = pd.to_datetime(out["Deadline"], errors="coerce").dt.normalize()
+        out["Offered Date"] = pd.to_datetime(out["Offered Date"], errors="coerce").dt.normalize()
+        out["Days after deadline expired they paid"] = (out["Payment Date"] - out["Deadline"]).dt.days
+    return out.reset_index(drop=True)
+
+
+def _success_late_reactivation_events_for_student(data, student_row):
+    """Collect batch-sheet activities after deadline and on/before payment date."""
+    sid = clean_text(student_row.get("student_id", ""))
+    program = clean_text(student_row.get("UG/PG", "")).upper()
+    email_key = clean_text(student_row.get("email_key", "")) or normalize_email(student_row.get("Email", ""))
+    student_key = clean_text(student_row.get("student_key", "")) or normalize_name(student_row.get("Student Name", ""))
+    deadline_dt = pd.to_datetime(student_row.get("Deadline", pd.NaT), errors="coerce")
+    pay_dt = pd.to_datetime(student_row.get("Payment Date", pd.NaT), errors="coerce")
+
+    base_cols = ["student_id", "event_date", "event_name", "event_type", "source_sheet", "batch", "dedupe_key"]
+    if pd.isna(deadline_dt) or pd.isna(pay_dt):
+        return pd.DataFrame(columns=base_cols)
+    deadline_dt = deadline_dt.normalize()
+    pay_dt = pay_dt.normalize()
+
+    if program == "UG":
+        candidate_sheets = UG_BATCH_SHEETS
+    elif program == "PG":
+        candidate_sheets = PG_BATCH_SHEETS
+    else:
+        candidate_sheets = UG_BATCH_SHEETS + PG_BATCH_SHEETS
+
+    rows = []
+    activities = data.get("activities", {})
+    activity_ctx = data.get("activity_ctx", {})
+    for sheet in candidate_sheets:
+        if sheet not in activities or sheet not in activity_ctx:
+            continue
+        sdf = activities.get(sheet, pd.DataFrame())
+        ctx = activity_ctx.get(sheet, {})
+        event_info = ctx.get("event_info", pd.DataFrame()) if isinstance(ctx, dict) else pd.DataFrame()
+        if sdf is None or sdf.empty or event_info is None or event_info.empty:
+            continue
+        if program and infer_program_from_sheet(sheet) != program:
+            continue
+
+        mask = pd.Series(False, index=sdf.index)
+        if email_key and "email_key" in sdf.columns:
+            mask = mask | sdf["email_key"].astype(str).eq(email_key)
+        if student_key and "student_key" in sdf.columns:
+            mask = mask | sdf["student_key"].astype(str).eq(student_key)
+        part = sdf.loc[mask].copy()
+        if part.empty:
+            continue
+
+        for _, prow in part.iterrows():
+            for _, ev in event_info.iterrows():
+                col = ev.get("column_name")
+                if not col or col not in prow.index:
+                    continue
+                attended = pd.to_numeric(pd.Series([prow.get(col, 0)]), errors="coerce").fillna(0).iloc[0]
+                if attended <= 0:
+                    continue
+                ev_date = pd.to_datetime(ev.get("event_date", pd.NaT), errors="coerce")
+                if pd.isna(ev_date):
+                    continue
+                ev_date = ev_date.normalize()
+                # Reactivation must happen after the deadline expired and before/on payment.
+                if not (ev_date > deadline_dt and ev_date <= pay_dt):
+                    continue
+                ev_name = clean_text(ev.get("event_name", "")) or clean_text(col)
+                ev_type = clean_text(ev.get("event_type", "Other")) or "Other"
+                dedupe_key = "|".join([
+                    sid or email_key or student_key,
+                    normalize_name(ev_name),
+                    normalize_name(ev_type),
+                    ev_date.strftime("%Y-%m-%d"),
+                ])
+                rows.append({
+                    "student_id": sid,
+                    "event_date": ev_date,
+                    "event_name": ev_name,
+                    "event_type": ev_type,
+                    "source_sheet": sheet,
+                    "batch": clean_text(prow.get("Batch", "")) or infer_batch_group_from_sheet_name(sheet),
+                    "dedupe_key": dedupe_key,
+                })
+
+    out = pd.DataFrame(rows)
+    if out.empty:
+        return pd.DataFrame(columns=base_cols)
+    out = out.sort_values(["event_date", "event_name", "source_sheet"]).drop_duplicates("dedupe_key").reset_index(drop=True)
+    return out
+
+
+def build_success_late_reactivation_paid_students(data, payment_start=None, payment_end=None):
+    base = _success_late_reactivation_paid_base(data)
+    if base.empty:
+        return pd.DataFrame(), pd.DataFrame()
+
+    payment_start = pd.to_datetime(payment_start, errors="coerce") if payment_start is not None else pd.NaT
+    payment_end = pd.to_datetime(payment_end, errors="coerce") if payment_end is not None else pd.NaT
+    if pd.notna(payment_start):
+        base = base[base["Payment Date"].ge(payment_start.normalize())].copy()
+    if pd.notna(payment_end):
+        base = base[base["Payment Date"].le(payment_end.normalize())].copy()
+    if base.empty:
+        return pd.DataFrame(), pd.DataFrame()
+
+    summary_rows = []
+    all_event_rows = []
+    for _, stu in base.iterrows():
+        ev = _success_late_reactivation_events_for_student(data, stu)
+        if ev.empty:
+            continue
+        first_reactivation = pd.to_datetime(ev["event_date"], errors="coerce").min()
+        unique_events = ev.sort_values(["event_date", "event_name"]).copy()
+        activity_names = []
+        for _, er in unique_events.iterrows():
+            dt = pd.to_datetime(er.get("event_date", pd.NaT), errors="coerce")
+            dt_txt = dt.strftime("%d-%b-%Y") if pd.notna(dt) else ""
+            name_txt = clean_text(er.get("event_name", ""))
+            type_txt = clean_text(er.get("event_type", ""))
+            activity_names.append(f"{dt_txt} - {name_txt}" + (f" ({type_txt})" if type_txt else ""))
+
+        summary_rows.append({
+            "Student Name": clean_text(stu.get("Student Name", "")),
+            "Email": clean_text(stu.get("Email", "")),
+            "UG/PG": clean_text(stu.get("UG/PG", "")),
+            "Batch": clean_text(stu.get("Batch", "")),
+            "Status": clean_text(stu.get("Status", "")),
+            "Deadline": pd.to_datetime(stu.get("Deadline", pd.NaT), errors="coerce"),
+            "Date of activation/reactivation after deadline expired": first_reactivation,
+            "Payment Date": pd.to_datetime(stu.get("Payment Date", pd.NaT), errors="coerce"),
+            "After how many days of deadline expiry they paid": int(stu.get("Days after deadline expired they paid", 0)) if pd.notna(stu.get("Days after deadline expired they paid", pd.NA)) else pd.NA,
+            "Number of activities participated in after deadline": int(ev["dedupe_key"].nunique()),
+            "Activities participated in after deadline": "; ".join(activity_names),
+        })
+        ev2 = ev.copy()
+        ev2["Student Name"] = clean_text(stu.get("Student Name", ""))
+        ev2["UG/PG"] = clean_text(stu.get("UG/PG", ""))
+        ev2["Payment Date"] = pd.to_datetime(stu.get("Payment Date", pd.NaT), errors="coerce")
+        ev2["Deadline"] = pd.to_datetime(stu.get("Deadline", pd.NaT), errors="coerce")
+        all_event_rows.append(ev2)
+
+    summary = pd.DataFrame(summary_rows)
+    events = pd.concat(all_event_rows, ignore_index=True) if all_event_rows else pd.DataFrame()
+    if not summary.empty:
+        summary = summary.sort_values([
+            "UG/PG",
+            "After how many days of deadline expiry they paid",
+            "Payment Date",
+            "Student Name",
+        ], ascending=[True, False, True, True]).reset_index(drop=True)
+    return summary, events
+
+
+def render_success_late_reactivation_paid_students_tab(data):
+    st.markdown("### Late Reactivation - Paid Students")
+    st.caption(
+        "Shows paid/admitted students who participated in at least one batch-sheet activity after their deadline expired and before/on their payment date. "
+        "Payment-date filters below affect only this tab."
+    )
+
+    paid_base = _success_late_reactivation_paid_base(data)
+    if paid_base.empty:
+        st.info("No paid/admitted students were found with payment dates after their deadline expiry in the Dates sheet.")
+        return
+
+    valid_payments = pd.to_datetime(paid_base["Payment Date"], errors="coerce").dropna()
+    if valid_payments.empty:
+        st.info("No valid payment dates were found for late-reactivation paid students.")
+        return
+
+    min_pay = valid_payments.min().date()
+    max_pay = valid_payments.max().date()
+    f1, f2 = st.columns(2)
+    with f1:
+        start_input = st.date_input("Payment date from", value=min_pay, min_value=min_pay, max_value=max_pay, key="success_late_reactivation_payment_from")
+    with f2:
+        end_input = st.date_input("Payment date to", value=max_pay, min_value=min_pay, max_value=max_pay, key="success_late_reactivation_payment_to")
+    start_dt = pd.to_datetime(start_input, errors="coerce").normalize()
+    end_dt = pd.to_datetime(end_input, errors="coerce").normalize()
+    if pd.notna(start_dt) and pd.notna(end_dt) and start_dt > end_dt:
+        start_dt, end_dt = end_dt, start_dt
+
+    summary, events = build_success_late_reactivation_paid_students(data, payment_start=start_dt, payment_end=end_dt)
+    if summary.empty:
+        st.info("No late reactivation paid students found for the selected payment-date range.")
+        return
+
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Late-reactivated paid students", f"{summary['Student Name'].nunique():,}")
+    c2.metric("UG", f"{summary[summary['UG/PG'].eq('UG')]['Student Name'].nunique():,}")
+    c3.metric("PG", f"{summary[summary['UG/PG'].eq('PG')]['Student Name'].nunique():,}")
+
+    ug_tab, pg_tab = st.tabs(["UG", "PG"])
+    display_cols = [
+        "Student Name", "Email", "UG/PG", "Batch", "Status", "Deadline",
+        "Date of activation/reactivation after deadline expired", "Payment Date",
+        "After how many days of deadline expiry they paid",
+        "Number of activities participated in after deadline",
+        "Activities participated in after deadline",
+    ]
+
+    def _render_program(program_label: str):
+        sub = summary[summary["UG/PG"].eq(program_label)].copy()
+        if sub.empty:
+            st.info(f"No {program_label} late-reactivation paid students found for the selected payment-date range.")
+            return
+        for col in ["Deadline", "Date of activation/reactivation after deadline expired", "Payment Date"]:
+            sub[col] = pd.to_datetime(sub[col], errors="coerce").dt.strftime("%d-%b-%Y")
+        st.dataframe(
+            sub[[c for c in display_cols if c in sub.columns]],
+            use_container_width=True,
+            hide_index=True,
+            height=min(620, 100 + 35 * len(sub)),
+            key=f"success_late_reactivation_paid_{program_label.lower()}_table",
+        )
+        if events is not None and not events.empty:
+            ev_sub = events[events.get("UG/PG", pd.Series(dtype=str)).eq(program_label)].copy()
+            if not ev_sub.empty:
+                with st.expander(f"{program_label} activity-level audit"):
+                    ev_sub["event_date"] = pd.to_datetime(ev_sub["event_date"], errors="coerce").dt.strftime("%d-%b-%Y")
+                    ev_sub["Payment Date"] = pd.to_datetime(ev_sub["Payment Date"], errors="coerce").dt.strftime("%d-%b-%Y")
+                    ev_sub["Deadline"] = pd.to_datetime(ev_sub["Deadline"], errors="coerce").dt.strftime("%d-%b-%Y")
+                    audit_cols = ["Student Name", "UG/PG", "batch", "Deadline", "event_date", "event_name", "event_type", "source_sheet", "Payment Date"]
+                    st.dataframe(ev_sub[[c for c in audit_cols if c in ev_sub.columns]], use_container_width=True, hide_index=True, height=360, key=f"success_late_reactivation_paid_{program_label.lower()}_audit")
+
+    with ug_tab:
+        _render_program("UG")
+    with pg_tab:
+        _render_program("PG")
+
+
 def render_success_metrics_page(data):
     st.subheader("Success Metrics")
     st.caption("All event/activity attendance is deduped by same student + same event name + same event type + same date. Event occurrences are deduped by program + event name + event type + date, so duplicated events across batch sheets count once.")
-    success_summary_tab, success_report_tab = st.tabs(["Summary", "Report"])
+    success_summary_tab, success_report_tab, success_late_reactivation_tab = st.tabs(["Summary", "Report", "Late Reactivation - Paid Students"])
     with success_report_tab:
         render_success_metrics_report(data)
+    with success_late_reactivation_tab:
+        render_success_late_reactivation_paid_students_tab(data)
     with success_summary_tab:
         sm = build_success_metrics_data(data)
         attendees = sm["attendees"]
