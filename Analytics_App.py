@@ -2750,6 +2750,7 @@ def render_overview(data):
     )
     if include_refunded_as_paid_first30:
         st.caption("Temporary view active for this section: refunded students are counted as paid/admitted in the Engagement Quality metrics below.")
+
     with st.expander("View Engagement Quality division logic", expanded=False):
         logic_df = pd.DataFrame([
             {
@@ -2778,59 +2779,6 @@ def render_overview(data):
             },
         ])
         st.dataframe(logic_df, use_container_width=True, hide_index=True, key="overview_v2_engagement_logic_table")
-
-    def _paid_delta_for_tier(tier):
-        paid = int(tier_paid_counts.get(tier, 0))
-        total = int(tier_total_counts.get(tier, 0))
-        return f"{paid:,} paid/admitted · {pct(paid, total):.1f}% paid"
-
-    e1, e2, e3, e4 = st.columns(4)
-    e1.metric("High Engaged", f"{high_count:,}", delta=_paid_delta_for_tier("High Engaged"))
-    e2.metric("Medium Engaged", f"{medium_count:,}", delta=_paid_delta_for_tier("Medium Engaged"))
-    e3.metric("Low Engaged", f"{low_count:,}", delta=_paid_delta_for_tier("Low Engaged"))
-    e4.metric("No Engagement", f"{no_impact_count:,}", delta=_paid_delta_for_tier("No Engagement"))
-
-    st.markdown("#### Engagement Quality — In Community Split")
-    def _in_community_delta_for_tier(tier):
-        paid = int(tier_in_community_paid_counts.get(tier, 0))
-        total = int(tier_in_community_counts.get(tier, 0))
-        return f"{paid:,} paid/admitted · {pct(paid, total):.1f}% of in-community"
-
-    in_community_display_order = ["High Engaged", "Medium Engaged", "Low Engaged", "No Engagement"]
-    in_community_metric_labels = {
-        "High Engaged": "High Engagement In Community",
-        "Medium Engaged": "Medium Engagement In Community",
-        "Low Engaged": "Low Engagement In Community",
-        "No Engagement": "No Engagement In Community",
-    }
-    ic_cols = st.columns(4)
-    for col, tier in zip(ic_cols, in_community_display_order):
-        col.metric(
-            in_community_metric_labels[tier],
-            f"{tier_in_community_counts.get(tier, 0):,}",
-            delta=_in_community_delta_for_tier(tier),
-        )
-
-    st.markdown("#### Engagement Quality — Out Community Split")
-    def _out_community_delta_for_tier(tier):
-        paid = int(tier_out_community_paid_counts.get(tier, 0))
-        total = int(tier_out_community_counts.get(tier, 0))
-        return f"{paid:,} paid/admitted · {pct(paid, total):.1f}% of out-community"
-
-    out_community_display_order = ["High Engaged", "Medium Engaged", "Low Engaged", "No Engagement"]
-    out_community_metric_labels = {
-        "High Engaged": "High Engagement Out Community",
-        "Medium Engaged": "Medium Engagement Out Community",
-        "Low Engaged": "Low Engagement Out Community",
-        "No Engagement": "No Engagement Out Community",
-    }
-    oc_cols = st.columns(4)
-    for col, tier in zip(oc_cols, out_community_display_order):
-        col.metric(
-            out_community_metric_labels[tier],
-            f"{tier_out_community_counts.get(tier, 0):,}",
-            delta=_out_community_delta_for_tier(tier),
-        )
 
     def _build_community_engagement_chart_df(in_counts_map, out_counts_map, value_label="Students"):
         chart_df = pd.DataFrame([
@@ -2892,52 +2840,161 @@ def render_overview(data):
         )
         st.plotly_chart(fig, use_container_width=True, key=key)
 
-    combined_community_engagement_df = _build_community_engagement_chart_df(
-        tier_in_community_counts,
-        tier_out_community_counts,
-        value_label="Students",
-    )
-    paid_community_engagement_df = _build_community_engagement_chart_df(
-        tier_in_community_paid_counts,
-        tier_out_community_paid_counts,
-        value_label="Paid / Admitted Students",
-    )
+    def _overview_engagement_quality_subset(program_filter: str = ""):
+        if impact_cohort is None or impact_cohort.empty:
+            return pd.DataFrame(columns=["Engagement Tier", "Paid / Admitted", "In Community", "Community Segment", "UG/PG"])
+        sub = impact_cohort.copy()
+        if program_filter:
+            sub = sub[sub.get("UG/PG", pd.Series("", index=sub.index)).astype(str).str.upper().eq(program_filter.upper())].copy()
+        return sub
 
-    chart_col_all, chart_col_paid = st.columns(2)
-    with chart_col_all:
-        _render_community_engagement_round_chart(
-            combined_community_engagement_df,
-            "Engagement Quality — Community Split",
-            "Students",
-            "overview_v2_combined_community_engagement_round_chart",
-        )
-    with chart_col_paid:
-        paid_title = "Engagement Quality — Paid/Admitted Community Split"
-        if include_refunded_as_paid_first30:
-            paid_title = "Engagement Quality — Paid/Admitted + Refunded Community Split"
-        _render_community_engagement_round_chart(
-            paid_community_engagement_df,
-            paid_title,
-            "Paid / Admitted Students",
-            "overview_v2_paid_community_engagement_round_chart",
-        )
+    def _overview_tier_counts_for_subset(sub: pd.DataFrame):
+        tier_total_counts_view = {tier: 0 for tier in engagement_tier_order}
+        tier_paid_counts_view = {tier: 0 for tier in engagement_tier_order}
+        tier_in_counts_view = {tier: 0 for tier in engagement_tier_order}
+        tier_in_paid_counts_view = {tier: 0 for tier in engagement_tier_order}
+        tier_out_counts_view = {tier: 0 for tier in engagement_tier_order}
+        tier_out_paid_counts_view = {tier: 0 for tier in engagement_tier_order}
 
-    engagement_summary_df = pd.DataFrame([
-        {
-            "Engagement Tier": tier,
-            "Total Students": int(tier_total_counts.get(tier, 0)),
-            "Paid / Admitted": int(tier_paid_counts.get(tier, 0)),
-            "Paid %": f"{pct(tier_paid_counts.get(tier, 0), tier_total_counts.get(tier, 0)):.1f}%",
-            "In Community": int(tier_in_community_counts.get(tier, 0)),
-            "In Community Paid": int(tier_in_community_paid_counts.get(tier, 0)),
-            "In Community Paid % (of In Community)": f"{pct(tier_in_community_paid_counts.get(tier, 0), tier_in_community_counts.get(tier, 0)):.1f}%",
-            "Out Community": int(tier_out_community_counts.get(tier, 0)),
-            "Out Community Paid": int(tier_out_community_paid_counts.get(tier, 0)),
-            "Out Community Paid % (of Out Community)": f"{pct(tier_out_community_paid_counts.get(tier, 0), tier_out_community_counts.get(tier, 0)):.1f}%",
+        if sub is not None and not sub.empty and "Engagement Tier" in sub.columns:
+            tier_total_counts_view.update(sub.groupby("Engagement Tier").size().reindex(engagement_tier_order, fill_value=0).astype(int).to_dict())
+            paid_sub = sub[sub.get("Paid / Admitted", pd.Series(False, index=sub.index)).fillna(False).astype(bool)]
+            tier_paid_counts_view.update(paid_sub.groupby("Engagement Tier").size().reindex(engagement_tier_order, fill_value=0).astype(int).to_dict())
+            in_sub = sub[sub.get("In Community", pd.Series(False, index=sub.index)).fillna(False).astype(bool)]
+            out_sub = sub[~sub.get("In Community", pd.Series(False, index=sub.index)).fillna(False).astype(bool)]
+            tier_in_counts_view.update(in_sub.groupby("Engagement Tier").size().reindex(engagement_tier_order, fill_value=0).astype(int).to_dict())
+            tier_out_counts_view.update(out_sub.groupby("Engagement Tier").size().reindex(engagement_tier_order, fill_value=0).astype(int).to_dict())
+            if not paid_sub.empty:
+                paid_in_sub = paid_sub[paid_sub.get("In Community", pd.Series(False, index=paid_sub.index)).fillna(False).astype(bool)]
+                paid_out_sub = paid_sub[~paid_sub.get("In Community", pd.Series(False, index=paid_sub.index)).fillna(False).astype(bool)]
+                tier_in_paid_counts_view.update(paid_in_sub.groupby("Engagement Tier").size().reindex(engagement_tier_order, fill_value=0).astype(int).to_dict())
+                tier_out_paid_counts_view.update(paid_out_sub.groupby("Engagement Tier").size().reindex(engagement_tier_order, fill_value=0).astype(int).to_dict())
+
+        return {
+            "total": tier_total_counts_view,
+            "paid": tier_paid_counts_view,
+            "in": tier_in_counts_view,
+            "in_paid": tier_in_paid_counts_view,
+            "out": tier_out_counts_view,
+            "out_paid": tier_out_paid_counts_view,
         }
-        for tier in engagement_tier_order
-    ])
-    st.dataframe(engagement_summary_df, use_container_width=True, hide_index=True, key="overview_v2_engagement_quality_summary")
+
+    def _render_overview_engagement_quality_view(view_label: str, program_filter: str = ""):
+        sub = _overview_engagement_quality_subset(program_filter)
+        counts = _overview_tier_counts_for_subset(sub)
+        tier_total_counts_view = counts["total"]
+        tier_paid_counts_view = counts["paid"]
+        tier_in_counts_view = counts["in"]
+        tier_in_paid_counts_view = counts["in_paid"]
+        tier_out_counts_view = counts["out"]
+        tier_out_paid_counts_view = counts["out_paid"]
+
+        def _paid_delta_for_tier_view(tier):
+            paid = int(tier_paid_counts_view.get(tier, 0))
+            total = int(tier_total_counts_view.get(tier, 0))
+            return f"{paid:,} paid/admitted · {pct(paid, total):.1f}% paid"
+
+        e1, e2, e3, e4 = st.columns(4)
+        e1.metric("High Engaged", f"{tier_total_counts_view.get('High Engaged', 0):,}", delta=_paid_delta_for_tier_view("High Engaged"))
+        e2.metric("Medium Engaged", f"{tier_total_counts_view.get('Medium Engaged', 0):,}", delta=_paid_delta_for_tier_view("Medium Engaged"))
+        e3.metric("Low Engaged", f"{tier_total_counts_view.get('Low Engaged', 0):,}", delta=_paid_delta_for_tier_view("Low Engaged"))
+        e4.metric("No Engagement", f"{tier_total_counts_view.get('No Engagement', 0):,}", delta=_paid_delta_for_tier_view("No Engagement"))
+
+        st.markdown("#### Engagement Quality — In Community Split")
+        def _in_community_delta_for_tier_view(tier):
+            paid = int(tier_in_paid_counts_view.get(tier, 0))
+            total = int(tier_in_counts_view.get(tier, 0))
+            return f"{paid:,} paid/admitted · {pct(paid, total):.1f}% of in-community"
+
+        in_community_metric_labels = {
+            "High Engaged": "High Engagement In Community",
+            "Medium Engaged": "Medium Engagement In Community",
+            "Low Engaged": "Low Engagement In Community",
+            "No Engagement": "No Engagement In Community",
+        }
+        ic_cols = st.columns(4)
+        for col, tier in zip(ic_cols, engagement_tier_order):
+            col.metric(
+                in_community_metric_labels[tier],
+                f"{tier_in_counts_view.get(tier, 0):,}",
+                delta=_in_community_delta_for_tier_view(tier),
+            )
+
+        st.markdown("#### Engagement Quality — Out Community Split")
+        def _out_community_delta_for_tier_view(tier):
+            paid = int(tier_out_paid_counts_view.get(tier, 0))
+            total = int(tier_out_counts_view.get(tier, 0))
+            return f"{paid:,} paid/admitted · {pct(paid, total):.1f}% of out-community"
+
+        out_community_metric_labels = {
+            "High Engaged": "High Engagement Out Community",
+            "Medium Engaged": "Medium Engagement Out Community",
+            "Low Engaged": "Low Engagement Out Community",
+            "No Engagement": "No Engagement Out Community",
+        }
+        oc_cols = st.columns(4)
+        for col, tier in zip(oc_cols, engagement_tier_order):
+            col.metric(
+                out_community_metric_labels[tier],
+                f"{tier_out_counts_view.get(tier, 0):,}",
+                delta=_out_community_delta_for_tier_view(tier),
+            )
+
+        combined_community_engagement_df = _build_community_engagement_chart_df(
+            tier_in_counts_view,
+            tier_out_counts_view,
+            value_label="Students",
+        )
+        paid_community_engagement_df = _build_community_engagement_chart_df(
+            tier_in_paid_counts_view,
+            tier_out_paid_counts_view,
+            value_label="Paid / Admitted Students",
+        )
+
+        key_stub = normalize_name(view_label) or "total"
+        chart_col_all, chart_col_paid = st.columns(2)
+        with chart_col_all:
+            _render_community_engagement_round_chart(
+                combined_community_engagement_df,
+                f"{view_label} — Engagement Quality Community Split",
+                "Students",
+                f"overview_v2_{key_stub}_combined_community_engagement_round_chart",
+            )
+        with chart_col_paid:
+            paid_title = f"{view_label} — Engagement Quality Paid/Admitted Community Split"
+            if include_refunded_as_paid_first30:
+                paid_title = f"{view_label} — Engagement Quality Paid/Admitted + Refunded Community Split"
+            _render_community_engagement_round_chart(
+                paid_community_engagement_df,
+                paid_title,
+                "Paid / Admitted Students",
+                f"overview_v2_{key_stub}_paid_community_engagement_round_chart",
+            )
+
+        engagement_summary_df = pd.DataFrame([
+            {
+                "Engagement Tier": tier,
+                "Total Students": int(tier_total_counts_view.get(tier, 0)),
+                "Paid / Admitted": int(tier_paid_counts_view.get(tier, 0)),
+                "Paid %": f"{pct(tier_paid_counts_view.get(tier, 0), tier_total_counts_view.get(tier, 0)):.1f}%",
+                "In Community": int(tier_in_counts_view.get(tier, 0)),
+                "In Community Paid": int(tier_in_paid_counts_view.get(tier, 0)),
+                "In Community Paid % (of In Community)": f"{pct(tier_in_paid_counts_view.get(tier, 0), tier_in_counts_view.get(tier, 0)):.1f}%",
+                "Out Community": int(tier_out_counts_view.get(tier, 0)),
+                "Out Community Paid": int(tier_out_paid_counts_view.get(tier, 0)),
+                "Out Community Paid % (of Out Community)": f"{pct(tier_out_paid_counts_view.get(tier, 0), tier_out_counts_view.get(tier, 0)):.1f}%",
+            }
+            for tier in engagement_tier_order
+        ])
+        st.dataframe(engagement_summary_df, use_container_width=True, hide_index=True, key=f"overview_v2_{key_stub}_engagement_quality_summary")
+
+    engagement_quality_tabs = st.tabs(["Total", "UG", "PG"])
+    with engagement_quality_tabs[0]:
+        _render_overview_engagement_quality_view("Total", "")
+    with engagement_quality_tabs[1]:
+        _render_overview_engagement_quality_view("UG", "UG")
+    with engagement_quality_tabs[2]:
+        _render_overview_engagement_quality_view("PG", "PG")
 
     # ---------------- Clean visuals ----------------
     v1, v2, v3 = st.columns([1, 1, 1])
@@ -9871,10 +9928,11 @@ def _community_pre_payment_winner_count(data: dict, row: pd.Series, pay_dt) -> i
         return int(w.drop_duplicates(subset=dedupe_cols).shape[0])
     return int(len(w))
 
-def _community_impact_paid_students(data: dict) -> pd.DataFrame:
+def _community_impact_paid_students(data: dict, include_refunded_as_paid: bool = False) -> pd.DataFrame:
     """Paid cohort for Community Impact.
 
-    Source of truth: Tetr-X sheets. Include Admitted + Deferral students, exclude any refund rows.
+    Source of truth: Tetr-X sheets. Include Admitted + Deferral students; refund rows are excluded
+    by default and included only when the Community Impact checkbox asks to count refunds as paid.
     Payment date is the Tetr-X payment_date_parsed field. Touchpoints are pre-payment batch-sheet
     activities, deduped by student + event name + event type + date.
     """
@@ -9903,7 +9961,8 @@ def _community_impact_paid_students(data: dict) -> pd.DataFrame:
             status_l = status_raw.lower()
             is_refund = "refund" in status_l
             is_paid_or_deferral = is_paid_status_for_program(status_raw, program)
-            if is_refund or not is_paid_or_deferral:
+            is_paid_for_community_impact = is_paid_or_deferral or (include_refunded_as_paid and is_refund)
+            if not is_paid_for_community_impact:
                 continue
             pay_dt = pd.to_datetime(r.get("payment_date_parsed", pd.NaT), errors="coerce")
             batch = clean_text(r.get("Batch", ""))
@@ -10093,7 +10152,7 @@ def _format_community_impact_table(df: pd.DataFrame) -> pd.DataFrame:
 def _render_community_impact_scope(df: pd.DataFrame, scope_label: str, key_prefix: str):
     st.markdown(f"### {scope_label}")
     if df is None or df.empty:
-        st.info(f"No paid/admitted/deferral non-refund students found for {scope_label}.")
+        st.info(f"No paid/admitted/deferral students found for {scope_label} with the current Community Impact filter.")
         return
 
     total_students = int(df["student_id"].nunique()) if "student_id" in df.columns else int(len(df))
@@ -10150,8 +10209,16 @@ def _render_community_impact_scope(df: pd.DataFrame, scope_label: str, key_prefi
 
 def render_community_impact_page(data):
     st.subheader("Community Impact")
-    st.caption("Paid cohort = Tetr-X students with Status = Admitted or Status containing Deferral, excluding rows whose status contains Refund. Touchpoints count deduped batch-sheet activities attended on/before payment date; winner and event-type overrides are applied before final impact tier.")
-    cohort = _community_impact_paid_students(data)
+    include_refunded_as_paid_community = st.checkbox(
+        "Count refunded students as paid/admitted for Community Impact only",
+        value=bool(st.session_state.get("community_impact_include_refunded_as_paid", False)),
+        key="community_impact_include_refunded_as_paid",
+        help="Only updates the Community Impact cohort and metrics. It does not change Overview Paid Students, Retention, Success Metrics, or any other section.",
+    )
+    if include_refunded_as_paid_community:
+        st.caption("Temporary Community Impact view active: refunded students are included as paid/admitted only in this section.")
+    st.caption("Paid cohort = Tetr-X students with Status = Admitted or valid Deferral. Refund rows are excluded unless the checkbox above is ticked. Touchpoints count deduped batch-sheet activities attended on/before payment date; winner and event-type overrides are applied before final impact tier.")
+    cohort = _community_impact_paid_students(data, include_refunded_as_paid=include_refunded_as_paid_community)
     tabs = st.tabs(["Total", "UG", "PG"])
     with tabs[0]:
         _render_community_impact_scope(cohort, "Total", "community_impact_total")
