@@ -1240,15 +1240,37 @@ def parse_tetr_app_sheet(raw: pd.DataFrame, sheet_name: str) -> pd.DataFrame:
 
 
 def match_tetr_app_students(tetr_app_df: pd.DataFrame, profile_base_df: pd.DataFrame) -> pd.DataFrame:
-    """Match Tetr App records by email, name, then unique last-8 phone digits."""
+    """Match Tetr App records by email, full name, then unique last-8 phone digits.
+
+    The profile base may contain UG, PG and the separate Gap Year sheet. Rich
+    matched-profile fields are added only to the Tetr App activity table so no
+    existing analytics section is changed.
+    """
     if tetr_app_df is None or tetr_app_df.empty:
         return pd.DataFrame() if tetr_app_df is None else tetr_app_df.copy()
+
     out = tetr_app_df.copy()
-    for col, default in [
-        ("matched_student_name", ""), ("matched_program", ""), ("matched_batch", ""),
-        ("match_method", "Unmatched"), ("is_matched", False),
-    ]:
+    string_defaults = {
+        "matched_student_name": "",
+        "matched_student_email": "",
+        "matched_phone": "",
+        "matched_program": "",
+        "matched_batch": "",
+        "matched_status": "",
+        "matched_payment_category": "",
+        "matched_country": "",
+        "matched_community_status": "",
+        "matched_counsellor": "",
+        "matched_profile_source": "",
+        "match_method": "Unmatched",
+    }
+    for col, default in string_defaults.items():
         out[col] = default
+    out["matched_payment_date"] = pd.NaT
+    out["matched_is_paid"] = False
+    out["matched_is_refunded"] = False
+    out["is_matched"] = False
+
     if profile_base_df is None or profile_base_df.empty:
         return out
 
@@ -1262,22 +1284,97 @@ def match_tetr_app_students(tetr_app_df: pd.DataFrame, profile_base_df: pd.DataF
     base["mobile_key"] = base["mobile_key"].astype(str).map(normalize_phone)
     base["phone_last8"] = base["mobile_key"].map(lambda x: x[-8:] if len(x) >= 8 else "")
 
+    lower_col_map = {clean_text(c).lower(): c for c in base.columns}
+
+    def _text_series(candidates, default=""):
+        result = pd.Series(default, index=base.index, dtype="object")
+        for candidate in candidates:
+            col = candidate if candidate in base.columns else lower_col_map.get(clean_text(candidate).lower())
+            if not col or col not in base.columns:
+                continue
+            values = base[col].map(clean_text)
+            result = result.where(result.astype(str).str.len().gt(0), values)
+        return result
+
+    def _date_series(candidates):
+        result = pd.Series(pd.NaT, index=base.index, dtype="datetime64[ns]")
+        for candidate in candidates:
+            col = candidate if candidate in base.columns else lower_col_map.get(clean_text(candidate).lower())
+            if not col or col not in base.columns:
+                continue
+            values = pd.to_datetime(base[col], errors="coerce")
+            result = result.where(result.notna(), values)
+        return result
+
+    def _bool_series(candidates):
+        result = pd.Series(False, index=base.index)
+        for candidate in candidates:
+            col = candidate if candidate in base.columns else lower_col_map.get(clean_text(candidate).lower())
+            if not col or col not in base.columns:
+                continue
+            values = base[col].fillna(False)
+            if values.dtype == bool:
+                result = result | values.astype(bool)
+            else:
+                result = result | values.astype(str).str.strip().str.lower().isin({"true", "1", "yes", "paid", "admitted", "refunded"})
+        return result.astype(bool)
+
+    base["_match_status"] = _text_series(["resolved_status", "master_status_value", "sheet_status_raw", "status"])
+    base["_match_payment_date"] = _date_series(["resolved_payment_date", "master_payment_date_parsed", "payment_date_parsed", "payment date"])
+    base["_match_is_paid"] = _bool_series(["is_paid", "master_is_paid", "sheet_is_paid"])
+    base["_match_is_refunded"] = _bool_series(["is_refunded", "master_is_refunded", "sheet_is_refunded"])
+    base["_match_country"] = _text_series(["country", "Country", "country name"])
+    base["_match_community"] = _text_series(["community_status_value", "Tetr X/Term 0 Status", "community status"])
+    base["_match_counsellor"] = _text_series(["counsellor_name", "Counsellor", "Counsellor 1", "Counsellor 2"])
+    base["_match_source"] = _text_series(["source_sheet", "profile_source"])
+
+    def _first_nonblank(values):
+        for value in values:
+            cleaned = clean_text(value)
+            if cleaned:
+                return cleaned
+        return ""
+
     def _group_record(grp):
         names = [clean_text(x) for x in grp["student_name"].tolist() if clean_text(x)]
+        emails = [normalize_email(x) for x in grp["email_key"].tolist() if normalize_email(x)]
+        phones = [normalize_phone(x) for x in grp["mobile_key"].tolist() if normalize_phone(x)]
         programs = [clean_text(x) for x in grp["Program"].tolist() if clean_text(x)]
         batches = [clean_text(x) for x in grp["Batch"].tolist() if clean_text(x)]
+        status = _first_nonblank(grp["_match_status"].tolist())
+        payment_dates = pd.to_datetime(grp["_match_payment_date"], errors="coerce").dropna()
+        is_refunded = bool(grp["_match_is_refunded"].fillna(False).astype(bool).any())
+        is_paid = bool(grp["_match_is_paid"].fillna(False).astype(bool).any()) and not is_refunded
+        payment_category = "Refunded" if is_refunded else ("Paid / Admitted" if is_paid else "Not Paid")
         return {
             "name": names[0] if names else "",
+            "email": emails[0] if emails else "",
+            "phone": phones[0] if phones else "",
             "program": ", ".join(dict.fromkeys(programs)),
             "batch": ", ".join(dict.fromkeys(batches)),
+            "status": status,
+            "payment_category": payment_category,
+            "payment_date": payment_dates.min() if not payment_dates.empty else pd.NaT,
+            "is_paid": is_paid,
+            "is_refunded": is_refunded,
+            "country": _first_nonblank(grp["_match_country"].tolist()),
+            "community": _first_nonblank(grp["_match_community"].tolist()),
+            "counsellor": _first_nonblank(grp["_match_counsellor"].tolist()),
+            "source": ", ".join(dict.fromkeys([clean_text(x) for x in grp["_match_source"].tolist() if clean_text(x)])),
         }
 
-    email_map = {k: _group_record(g) for k, g in base[base["email_key"].str.contains("@", regex=False)].groupby("email_key", sort=False)}
-    name_map = {k: _group_record(g) for k, g in base[base["student_key"].astype(str).str.len().gt(0)].groupby("student_key", sort=False)}
+    email_map = {
+        k: _group_record(g)
+        for k, g in base[base["email_key"].str.contains("@", regex=False)].groupby("email_key", sort=False)
+    }
+    name_map = {
+        k: _group_record(g)
+        for k, g in base[base["student_key"].astype(str).str.len().gt(0)].groupby("student_key", sort=False)
+    }
 
-    # Phone matching is intentionally a fallback after email and full-name matching.
-    # Only unique last-8-digit phone suffixes are used; shared/ambiguous numbers are
-    # excluded to avoid assigning Tetr App engagement to the wrong student.
+    # Phone matching remains a strict fallback. Only unique last-8 suffixes are
+    # accepted, preventing one shared family/secondary number from being assigned
+    # to multiple profiles.
     phone_map = {}
     phone_base = base[base["phone_last8"].astype(str).str.len().eq(8)].copy()
     for phone_last8, grp in phone_base.groupby("phone_last8", sort=False):
@@ -1305,12 +1402,29 @@ def match_tetr_app_students(tetr_app_df: pd.DataFrame, profile_base_df: pd.DataF
         elif phone_last8 and phone_last8 in phone_map:
             rec = phone_map[phone_last8]
             method = "Phone (last 8 digits)"
+
         if rec:
             out.at[idx, "matched_student_name"] = rec["name"]
+            out.at[idx, "matched_student_email"] = rec["email"]
+            out.at[idx, "matched_phone"] = rec["phone"]
             out.at[idx, "matched_program"] = rec["program"]
             out.at[idx, "matched_batch"] = rec["batch"]
+            out.at[idx, "matched_status"] = rec["status"]
+            out.at[idx, "matched_payment_category"] = rec["payment_category"]
+            out.at[idx, "matched_payment_date"] = rec["payment_date"]
+            out.at[idx, "matched_is_paid"] = bool(rec["is_paid"])
+            out.at[idx, "matched_is_refunded"] = bool(rec["is_refunded"])
+            out.at[idx, "matched_country"] = rec["country"]
+            out.at[idx, "matched_community_status"] = rec["community"]
+            out.at[idx, "matched_counsellor"] = rec["counsellor"]
+            out.at[idx, "matched_profile_source"] = rec["source"]
             out.at[idx, "match_method"] = method
             out.at[idx, "is_matched"] = True
+
+    out["matched_payment_date"] = pd.to_datetime(out["matched_payment_date"], errors="coerce")
+    out["matched_is_paid"] = out["matched_is_paid"].fillna(False).astype(bool)
+    out["matched_is_refunded"] = out["matched_is_refunded"].fillna(False).astype(bool)
+    out["is_matched"] = out["is_matched"].fillna(False).astype(bool)
     return out
 
 def parse_dates_sheet(raw: pd.DataFrame):
@@ -1889,8 +2003,9 @@ def sheets_needed_for_page(page: str):
     if page == "Gap Year":
         return [GAP_YEAR_SHEET]
     if page == "Tetr App":
-        # Match Tetr App participants to the offered UG/PG master lists only.
-        return MASTER_SHEETS + TETR_APP_SHEETS
+        # Tetr App matching uses offered UG/PG profiles plus the separate Gap Year sheet.
+        # Gap Year remains isolated from every other existing analytics section.
+        return MASTER_SHEETS + [GAP_YEAR_SHEET] + TETR_APP_SHEETS
     if page == "UG":
         return UG_BATCH_SHEETS + TX_SHEETS + [DATES_SHEET, WINNER_SHEET]
     if page == "PG":
@@ -4676,6 +4791,196 @@ def _tetr_app_student_summary(df: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(rows).sort_values(["Total Tetr App Engagement", "Student Name"], ascending=[False, True]).reset_index(drop=True)
 
 
+
+def _tetr_app_program_tokens(value) -> list:
+    raw = clean_text(value)
+    if not raw:
+        return []
+    tokens = []
+    for part in re.split(r"[,;/|]+", raw):
+        p = clean_text(part)
+        low = p.lower()
+        if low in {"ug", "undergraduate"}:
+            label = "UG"
+        elif low in {"pg", "postgraduate", "masters", "master"}:
+            label = "PG"
+        elif "gap year" in low or low == "gapyear":
+            label = "Gap Year"
+        else:
+            label = p
+        if label and label not in tokens:
+            tokens.append(label)
+    return tokens
+
+
+def _tetr_app_program_mask(df: pd.DataFrame, program_label: str) -> pd.Series:
+    if df is None or df.empty:
+        return pd.Series(dtype=bool)
+    if program_label == "All Matched":
+        return df.get("is_matched", pd.Series(False, index=df.index)).fillna(False).astype(bool)
+    programs = df.get("matched_program", pd.Series("", index=df.index)).map(_tetr_app_program_tokens)
+    matched = df.get("is_matched", pd.Series(False, index=df.index)).fillna(False).astype(bool)
+    return matched & programs.map(lambda vals: program_label in vals)
+
+
+def _tetr_app_matched_identity_series(df: pd.DataFrame) -> pd.Series:
+    if df is None or df.empty:
+        return pd.Series(dtype=str)
+    matched_email = df.get("matched_student_email", pd.Series("", index=df.index)).astype(str).map(normalize_email)
+    matched_name = df.get("matched_student_name", pd.Series("", index=df.index)).astype(str).map(normalize_name)
+    matched_phone = df.get("matched_phone", pd.Series("", index=df.index)).astype(str).map(normalize_phone).map(lambda x: x[-8:] if len(x) >= 8 else "")
+    raw_id = df.get("student_id", pd.Series("", index=df.index)).astype(str).map(clean_text)
+    result = matched_email.where(matched_email.str.len().gt(0), matched_name)
+    result = result.where(result.str.len().gt(0), matched_phone)
+    result = result.where(result.str.len().gt(0), raw_id)
+    return result
+
+
+def _tetr_app_matched_student_summary(df: pd.DataFrame) -> pd.DataFrame:
+    cols = [
+        "Student Name", "Email", "Phone", "Program", "Batch", "Status",
+        "Payment Category", "Payment Date", "Community Status", "Country",
+        "Counsellor", "Profile Source", "Match Method", "Total Tetr App Engagement",
+        "Competition Participations", "Quiz Participations", "Unique Activities",
+        "Activities Participated In", "Submitted Activities", "Submission %",
+        "First Participation", "Latest Participation", "Average Score",
+    ]
+    if df is None or df.empty:
+        return pd.DataFrame(columns=cols)
+    work = df[df.get("is_matched", pd.Series(False, index=df.index)).fillna(False).astype(bool)].copy()
+    if work.empty:
+        return pd.DataFrame(columns=cols)
+    work["_matched_sid"] = _tetr_app_matched_identity_series(work)
+    work = work[work["_matched_sid"].astype(str).str.len().gt(0)].copy()
+    rows = []
+    for _, grp in work.groupby("_matched_sid", sort=False):
+        first = grp.iloc[0]
+        activity_names = [clean_text(x) for x in grp.get("event_name", pd.Series(dtype=str)).tolist() if clean_text(x)]
+        dates = pd.to_datetime(grp.get("event_date", pd.NaT), errors="coerce").dropna()
+        scores = pd.to_numeric(grp.get("submission_score", pd.Series(dtype=float)), errors="coerce").dropna()
+        app_types = grp.get("tetr_app_type", pd.Series("", index=grp.index)).astype(str)
+        submitted = int(grp.get("is_submitted", pd.Series(False, index=grp.index)).fillna(False).astype(bool).sum())
+        total = int(len(grp))
+        rows.append({
+            "Student Name": clean_text(first.get("matched_student_name", "")) or clean_text(first.get("student_name", "")),
+            "Email": clean_text(first.get("matched_student_email", "")) or clean_text(first.get("email_key", "")),
+            "Phone": clean_text(first.get("matched_phone", "")) or clean_text(first.get("mobile_key", "")),
+            "Program": clean_text(first.get("matched_program", "")),
+            "Batch": clean_text(first.get("matched_batch", "")),
+            "Status": clean_text(first.get("matched_status", "")),
+            "Payment Category": clean_text(first.get("matched_payment_category", "")),
+            "Payment Date": pd.to_datetime(first.get("matched_payment_date", pd.NaT), errors="coerce"),
+            "Community Status": clean_text(first.get("matched_community_status", "")),
+            "Country": clean_text(first.get("matched_country", "")),
+            "Counsellor": clean_text(first.get("matched_counsellor", "")),
+            "Profile Source": clean_text(first.get("matched_profile_source", "")),
+            "Match Method": clean_text(first.get("match_method", "")) or "Unmatched",
+            "Total Tetr App Engagement": total,
+            "Competition Participations": int(app_types.eq("Competitions").sum()),
+            "Quiz Participations": int(app_types.eq("Quizzes").sum()),
+            "Unique Activities": int(pd.Series(activity_names).nunique()) if activity_names else 0,
+            "Activities Participated In": "; ".join(dict.fromkeys(activity_names)),
+            "Submitted Activities": submitted,
+            "Submission %": round(submitted / total * 100, 1) if total else 0.0,
+            "First Participation": dates.min() if not dates.empty else pd.NaT,
+            "Latest Participation": dates.max() if not dates.empty else pd.NaT,
+            "Average Score": round(float(scores.mean()), 2) if not scores.empty else np.nan,
+        })
+    out = pd.DataFrame(rows, columns=cols)
+    if out.empty:
+        return out
+    return out.sort_values(["Total Tetr App Engagement", "Student Name"], ascending=[False, True]).reset_index(drop=True)
+
+
+def _render_tetr_app_matched_program_view(df: pd.DataFrame, program_label: str, key_prefix: str):
+    mask = _tetr_app_program_mask(df, program_label)
+    work = df.loc[mask].copy() if len(mask) else pd.DataFrame()
+    if work.empty:
+        st.info(f"No matched {program_label} Tetr App participants are available.")
+        return
+
+    work["_matched_sid"] = _tetr_app_matched_identity_series(work)
+    summary = _tetr_app_matched_student_summary(work)
+    unique_students = int(summary.shape[0])
+    activities_n = int(work.get("event_name", pd.Series("", index=work.index)).astype(str).replace("", np.nan).nunique())
+    submitted = int(work.get("is_submitted", pd.Series(False, index=work.index)).fillna(False).astype(bool).sum())
+    competitions = int(work.get("tetr_app_type", pd.Series("", index=work.index)).astype(str).eq("Competitions").sum())
+    quizzes = int(work.get("tetr_app_type", pd.Series("", index=work.index)).astype(str).eq("Quizzes").sum())
+
+    c1, c2, c3, c4, c5, c6 = st.columns(6)
+    c1.metric("Matched Students", f"{unique_students:,}")
+    c2.metric("Participations", f"{len(work):,}")
+    c3.metric("Activities", f"{activities_n:,}")
+    c4.metric("Competitions", f"{competitions:,}")
+    c5.metric("Quizzes", f"{quizzes:,}")
+    c6.metric("Submitted", f"{submitted:,}", delta=f"{(submitted/len(work)*100 if len(work) else 0):.1f}%")
+
+    ch1, ch2 = st.columns(2)
+    with ch1:
+        type_plot = work.get("tetr_app_type", pd.Series("", index=work.index)).replace("", "Other").value_counts().reset_index()
+        type_plot.columns = ["Tetr App Type", "Participations"]
+        fig = px.pie(type_plot, names="Tetr App Type", values="Participations", hole=0.54, title=f"{program_label} Participation by Type")
+        st.plotly_chart(nice_layout(fig, height=350), use_container_width=True, key=f"{key_prefix}_type_pie")
+    with ch2:
+        student_counts = work.groupby("_matched_sid", sort=False).size()
+        bands = pd.cut(student_counts, bins=[0, 1, 3, 6, np.inf], labels=["1", "2–3", "4–6", "7+"], include_lowest=True)
+        band_plot = bands.value_counts(sort=False).reset_index()
+        band_plot.columns = ["Engagement Frequency", "Students"]
+        fig = px.bar(band_plot, x="Engagement Frequency", y="Students", title=f"{program_label} Student Engagement Frequency")
+        fig.update_traces(marker_color=GREEN_2)
+        st.plotly_chart(nice_layout(fig, height=350), use_container_width=True, key=f"{key_prefix}_frequency_bar")
+
+    ch3, ch4 = st.columns(2)
+    with ch3:
+        top = work.groupby(["event_name", "tetr_app_type"], as_index=False).size().rename(columns={"size": "Participations"}).sort_values("Participations", ascending=False).head(12)
+        fig = px.bar(top, x="Participations", y="event_name", color="tetr_app_type", orientation="h", title=f"Top {program_label} Tetr App Activities")
+        st.plotly_chart(nice_layout(fig, height=430), use_container_width=True, key=f"{key_prefix}_top_activities")
+    with ch4:
+        dated = work[pd.to_datetime(work.get("event_date", pd.NaT), errors="coerce").notna()].copy()
+        if dated.empty:
+            st.info("No dated Tetr App participation records are available for the timeline.")
+        else:
+            dated["Date"] = pd.to_datetime(dated["event_date"], errors="coerce").dt.normalize()
+            timeline = dated.groupby(["Date", "tetr_app_type"], as_index=False).size().rename(columns={"size": "Participations"})
+            fig = px.line(timeline, x="Date", y="Participations", color="tetr_app_type", markers=True, title=f"{program_label} Participation Timeline")
+            st.plotly_chart(nice_layout(fig, height=430), use_container_width=True, key=f"{key_prefix}_timeline")
+
+    ch5, ch6 = st.columns(2)
+    with ch5:
+        batch_values = summary.get("Batch", pd.Series("", index=summary.index)).replace("", "Not Available")
+        batch_plot = batch_values.value_counts().head(15).reset_index()
+        batch_plot.columns = ["Batch", "Students"]
+        fig = px.bar(batch_plot, x="Students", y="Batch", orientation="h", title=f"{program_label} Matched Students by Batch")
+        fig.update_traces(marker_color=GREEN)
+        st.plotly_chart(nice_layout(fig, height=390), use_container_width=True, key=f"{key_prefix}_batch_bar")
+    with ch6:
+        method_plot = summary.get("Match Method", pd.Series("", index=summary.index)).replace("", "Unmatched").value_counts().reset_index()
+        method_plot.columns = ["Match Method", "Students"]
+        fig = px.pie(method_plot, names="Match Method", values="Students", hole=0.54, title=f"{program_label} Student Match Method")
+        st.plotly_chart(nice_layout(fig, height=390), use_container_width=True, key=f"{key_prefix}_match_method")
+
+    ch7, ch8 = st.columns(2)
+    with ch7:
+        country_values = summary.get("Country", pd.Series("", index=summary.index)).replace("", "Not Available")
+        country_plot = country_values.value_counts().head(12).reset_index()
+        country_plot.columns = ["Country", "Students"]
+        fig = px.bar(country_plot, x="Students", y="Country", orientation="h", title=f"{program_label} Matched Students by Country")
+        fig.update_traces(marker_color=GREEN_2)
+        st.plotly_chart(nice_layout(fig, height=390), use_container_width=True, key=f"{key_prefix}_country_bar")
+    with ch8:
+        payment_values = summary.get("Payment Category", pd.Series("", index=summary.index)).replace("", "Not Available")
+        payment_plot = payment_values.value_counts().reset_index()
+        payment_plot.columns = ["Payment Category", "Students"]
+        fig = px.pie(payment_plot, names="Payment Category", values="Students", hole=0.54, title=f"{program_label} Payment Status Split")
+        st.plotly_chart(nice_layout(fig, height=390), use_container_width=True, key=f"{key_prefix}_payment_pie")
+
+    st.markdown(f"#### {program_label} Matched Student Details")
+    display = summary.copy()
+    for col in ["Payment Date", "First Participation", "Latest Participation"]:
+        if col in display.columns:
+            display[col] = pd.to_datetime(display[col], errors="coerce").dt.strftime("%d-%b-%Y").fillna("")
+    st.dataframe(display, use_container_width=True, hide_index=True, height=620, key=f"{key_prefix}_student_details")
+
 def _render_tetr_app_records_panel(df: pd.DataFrame, key_prefix: str):
     if df is None or df.empty:
         st.info("No Tetr App participation records are available for this view.")
@@ -4700,19 +5005,29 @@ def _render_tetr_app_records_panel(df: pd.DataFrame, key_prefix: str):
         st.dataframe(disp, use_container_width=True, hide_index=True, height=min(520, 80 + 35 * len(disp)), key=f"{key_prefix}_activity_summary")
 
     detail_cols = [c for c in [
-        "event_name", "event_type", "student_name", "email_key", "event_date",
+        "event_name", "event_type", "student_name", "email_key", "mobile_key", "event_date",
         "is_submitted", "submission_score", "submission_rank", "matched_student_name",
-        "matched_program", "matched_batch", "match_method", "last_form_stage", "country",
+        "matched_student_email", "matched_phone", "matched_program", "matched_batch",
+        "matched_status", "matched_payment_category", "matched_payment_date",
+        "matched_country", "matched_community_status", "matched_counsellor",
+        "matched_profile_source", "match_method", "last_form_stage", "country",
     ] if c in df.columns]
     details = df[detail_cols].copy()
     if "event_date" in details.columns:
         details["event_date"] = pd.to_datetime(details["event_date"], errors="coerce").dt.strftime("%d-%b-%Y %I:%M %p").fillna("")
+    if "matched_payment_date" in details.columns:
+        details["matched_payment_date"] = pd.to_datetime(details["matched_payment_date"], errors="coerce").dt.strftime("%d-%b-%Y").fillna("")
     details = details.rename(columns={
         "event_name": "Activity", "event_type": "Type", "student_name": "Tetr App Name",
-        "email_key": "Email", "event_date": "Participation Date", "is_submitted": "Submitted",
-        "submission_score": "Score", "submission_rank": "Rank", "matched_student_name": "Matched Student",
-        "matched_program": "Program", "matched_batch": "Batch", "match_method": "Match Method",
-        "last_form_stage": "Last Form Stage", "country": "Country",
+        "email_key": "Tetr App Email", "mobile_key": "Tetr App Phone", "event_date": "Participation Date",
+        "is_submitted": "Submitted", "submission_score": "Score", "submission_rank": "Rank",
+        "matched_student_name": "Matched Student", "matched_student_email": "Matched Email",
+        "matched_phone": "Matched Phone", "matched_program": "Program", "matched_batch": "Batch",
+        "matched_status": "Student Status", "matched_payment_category": "Payment Category",
+        "matched_payment_date": "Payment Date", "matched_country": "Matched Country",
+        "matched_community_status": "Community Status", "matched_counsellor": "Counsellor",
+        "matched_profile_source": "Profile Source", "match_method": "Match Method",
+        "last_form_stage": "Last Form Stage", "country": "Tetr App Country",
     })
     st.markdown("#### Participation Records")
     st.dataframe(details, use_container_width=True, hide_index=True, height=460, key=f"{key_prefix}_records")
@@ -4720,13 +5035,17 @@ def _render_tetr_app_records_panel(df: pd.DataFrame, key_prefix: str):
 
 def render_tetr_app_page(data):
     st.subheader("Tetr App")
-    st.caption("Tetr App competitions and quizzes are matched to offered students by exact email first, normalized full name second, and unique last 8 phone digits as a fallback. Each valid registration is one Tetr App engagement.")
+    st.caption(
+        "Tetr App competitions and quizzes are matched to UG, PG and the separate Gap Year profiles "
+        "by exact email first, normalized full name second, and unique last 8 phone digits as a fallback. "
+        "Each valid registration is one Tetr App engagement."
+    )
     df = data.get("tetr_app_participations", pd.DataFrame())
     if df is None or df.empty:
         st.warning("TetrApp_Competitions and TetrApp_Quizzes could not be loaded or contain no valid participation rows.")
         return
 
-    tabs = st.tabs(["Overview", "Competitions", "Quizzes", "Student Participation"])
+    tabs = st.tabs(["Overview", "Competitions", "Quizzes", "Student Participation", "Matched UG / PG / Gap Year"])
     with tabs[0]:
         _render_tetr_app_records_panel(df, "tetr_app_all")
         type_summary = df.groupby("tetr_app_type", as_index=False).agg(
@@ -4752,9 +5071,45 @@ def render_tetr_app_page(data):
         program_series = df.get("matched_program", pd.Series("", index=df.index)).astype(str).replace("", "Unmatched")
         program_plot = program_series.value_counts().reset_index()
         program_plot.columns = ["Matched Program", "Participations"]
-        fig = px.bar(program_plot, x="Matched Program", y="Participations", title="Matched Program Split")
+        fig = px.bar(program_plot, x="Matched Program", y="Participations", title="Matched Program Split — Participations")
         fig.update_traces(marker_color=GREEN_2)
         st.plotly_chart(nice_layout(fig, height=340), use_container_width=True, key="tetr_app_program_split")
+
+        matched_summary = _tetr_app_matched_student_summary(df)
+        if not matched_summary.empty:
+            extra1, extra2 = st.columns(2)
+            with extra1:
+                program_unique = []
+                for label in ["UG", "PG", "Gap Year"]:
+                    mask = matched_summary.get("Program", pd.Series("", index=matched_summary.index)).map(_tetr_app_program_tokens).map(lambda vals: label in vals)
+                    program_unique.append({"Program": label, "Matched Students": int(mask.sum())})
+                program_unique_df = pd.DataFrame(program_unique)
+                fig = px.bar(program_unique_df, x="Program", y="Matched Students", title="Unique Matched Students by Program")
+                fig.update_traces(marker_color=GREEN)
+                st.plotly_chart(nice_layout(fig, height=350), use_container_width=True, key="tetr_app_unique_program_split")
+            with extra2:
+                method_plot = matched_summary["Match Method"].replace("", "Unmatched").value_counts().reset_index()
+                method_plot.columns = ["Match Method", "Students"]
+                fig = px.pie(method_plot, names="Match Method", values="Students", hole=0.54, title="Matched Student Method Distribution")
+                st.plotly_chart(nice_layout(fig, height=350), use_container_width=True, key="tetr_app_overview_match_method")
+
+            extra3, extra4 = st.columns(2)
+            with extra3:
+                submission_plot = df.assign(
+                    **{"Submission Status": np.where(df.get("is_submitted", pd.Series(False, index=df.index)).fillna(False).astype(bool), "Submitted", "Registered Only")}
+                ).groupby(["tetr_app_type", "Submission Status"], as_index=False).size().rename(columns={"size": "Participations"})
+                fig = px.bar(submission_plot, x="tetr_app_type", y="Participations", color="Submission Status", barmode="group", title="Submission Outcome by Tetr App Type")
+                st.plotly_chart(nice_layout(fig, height=360), use_container_width=True, key="tetr_app_submission_outcome")
+            with extra4:
+                matched_work = df[df.get("is_matched", pd.Series(False, index=df.index)).fillna(False).astype(bool)].copy()
+                matched_work["_matched_sid"] = _tetr_app_matched_identity_series(matched_work)
+                counts = matched_work.groupby("_matched_sid").size()
+                bands = pd.cut(counts, bins=[0, 1, 3, 6, np.inf], labels=["1", "2–3", "4–6", "7+"], include_lowest=True)
+                band_plot = bands.value_counts(sort=False).reset_index()
+                band_plot.columns = ["Engagement Frequency", "Matched Students"]
+                fig = px.bar(band_plot, x="Engagement Frequency", y="Matched Students", title="Tetr App Engagement Frequency — Matched Students")
+                fig.update_traces(marker_color=GREEN_2)
+                st.plotly_chart(nice_layout(fig, height=360), use_container_width=True, key="tetr_app_matched_frequency")
 
     with tabs[1]:
         _render_tetr_app_records_panel(df[df["tetr_app_type"].eq("Competitions")].copy(), "tetr_app_competitions")
@@ -4770,6 +5125,29 @@ def render_tetr_app_page(data):
                 disp[c] = pd.to_datetime(disp[c], errors="coerce").dt.strftime("%d-%b-%Y").fillna("")
             st.dataframe(disp, use_container_width=True, hide_index=True, height=620, key="tetr_app_student_summary")
 
+    with tabs[4]:
+        matched_mask = df.get("is_matched", pd.Series(False, index=df.index)).fillna(False).astype(bool)
+        matched_df = df.loc[matched_mask].copy()
+        if matched_df.empty:
+            st.info("No Tetr App participants matched to UG, PG or Gap Year profiles.")
+        else:
+            all_summary = _tetr_app_matched_student_summary(matched_df)
+            unmatched_unique = int(df.loc[~matched_mask, "student_id"].astype(str).replace("", np.nan).nunique()) if "student_id" in df.columns else 0
+            p1, p2, p3, p4, p5 = st.columns(5)
+            p1.metric("All Matched Students", f"{len(all_summary):,}")
+            for metric_col, label, program_label in [(p2, "UG", "UG"), (p3, "PG", "PG"), (p4, "Gap Year", "Gap Year")]:
+                count = int(all_summary.get("Program", pd.Series("", index=all_summary.index)).map(_tetr_app_program_tokens).map(lambda vals: program_label in vals).sum())
+                metric_col.metric(f"Matched {label}", f"{count:,}")
+            p5.metric("Unmatched Students", f"{unmatched_unique:,}")
+
+            program_tabs = st.tabs(["All Matched", "UG", "PG", "Gap Year"])
+            for tab, label, prefix in zip(
+                program_tabs,
+                ["All Matched", "UG", "PG", "Gap Year"],
+                ["tetr_app_matched_all", "tetr_app_matched_ug", "tetr_app_matched_pg", "tetr_app_matched_gap_year"],
+            ):
+                with tab:
+                    _render_tetr_app_matched_program_view(df, label, prefix)
 
 def render_gap_year_page(data):
     st.subheader("Gap Year")
