@@ -9800,6 +9800,150 @@ def build_activities_all_events(data, speaker_filter=None):
     return out.reset_index(drop=True)
 
 
+
+def build_activities_all_activities(data):
+    """Build a deduplicated occurrence table for every activity type.
+
+    This intentionally leaves the existing All Events logic unchanged. It uses
+    the same UG, PG and Tetr-X attendance/eligibility rules, but includes online
+    events, masterclasses, competitions, hackathons, general/fun/poll activities
+    and any other activity type available in the activity sheets.
+    """
+    rows = []
+    activities = data.get("activities", {})
+    activity_ctx = data.get("activity_ctx", {})
+
+    for sheet, df in activities.items():
+        if df is None or df.empty:
+            continue
+        ctx = activity_ctx.get(sheet, {})
+        event_info = ctx.get("event_info", pd.DataFrame())
+        if event_info is None or event_info.empty:
+            continue
+
+        audience = _event_audience_label(sheet)
+        if sheet == "Tetr-X-UG":
+            program_group = "TetrX-UG"
+        elif sheet == "Tetr-X-PG":
+            program_group = "TetrX-PG"
+        else:
+            program_group = infer_program_from_sheet(sheet)
+
+        for _, ev in event_info.iterrows():
+            col = ev.get("column_name")
+            if col not in df.columns:
+                continue
+
+            activity_name = clean_text(ev.get("event_name", "")) or clean_text(col)
+            activity_type = _activity_event_type_norm(ev.get("event_type", ""))
+            activity_date = pd.to_datetime(ev.get("event_date", pd.NaT), errors="coerce")
+            date_key = activity_date.normalize().strftime("%Y-%m-%d") if pd.notna(activity_date) else ""
+            activity_key = f"{_event_name_key(activity_name)}|{date_key}|{normalize_name(activity_type)}"
+
+            attended_mask = pd.to_numeric(df[col], errors="coerce").fillna(0).gt(0)
+            if sheet in TX_SHEETS:
+                eligible_mask = _paid_at_event_mask(df, activity_date)
+                attended_mask = attended_mask & eligible_mask
+            else:
+                eligible_mask = pd.Series(True, index=df.index)
+
+            eligible_ids = set(df.loc[eligible_mask].apply(_student_id_from_row_basic, axis=1).astype(str))
+            eligible_ids.discard("")
+            attended_ids = set(df.loc[attended_mask].apply(_student_id_from_row_basic, axis=1).astype(str))
+            attended_ids.discard("")
+
+            ug_dist = _batch_distribution_for_ids(df, attended_mask, sheet) if program_group == "UG" else {}
+            pg_dist = _batch_distribution_for_ids(df, attended_mask, sheet) if program_group == "PG" else {}
+
+            rows.append({
+                "activity_key": activity_key,
+                "Activity Name": activity_name,
+                "Date": activity_date.normalize() if pd.notna(activity_date) else pd.NaT,
+                "Activity Type": activity_type,
+                "Audience": audience,
+                "source_sheet": sheet,
+                "UG Attended IDs": attended_ids if program_group == "UG" else set(),
+                "PG Attended IDs": attended_ids if program_group == "PG" else set(),
+                "TetrX UG Attended IDs": attended_ids if program_group == "TetrX-UG" else set(),
+                "TetrX PG Attended IDs": attended_ids if program_group == "TetrX-PG" else set(),
+                "Eligible IDs": eligible_ids,
+                "UG Distribution Dict": ug_dist,
+                "PG Distribution Dict": pg_dist,
+            })
+
+    empty_cols = [
+        "Activity Name", "Date", "Activity Type", "Audience", "Source Sheets",
+        "Audience Size", "UG Attended", "PG Attended", "Tetr X UG Attended",
+        "Tetr X PG Attended", "Total Attendance", "Attend to Eligible Ratio",
+        "UG Attendance Distribution", "PG Attendance Distribution",
+    ]
+    if not rows:
+        return pd.DataFrame(columns=empty_cols)
+
+    raw = pd.DataFrame(rows)
+    out_rows = []
+    for _, group in raw.groupby("activity_key", dropna=False):
+        ug_ids, pg_ids, txug_ids, txpg_ids, eligible_ids = set(), set(), set(), set(), set()
+        audiences, sheets = [], []
+        ug_dist, pg_dist = {}, {}
+
+        for _, row in group.iterrows():
+            ug_ids |= set(row.get("UG Attended IDs", set()))
+            pg_ids |= set(row.get("PG Attended IDs", set()))
+            txug_ids |= set(row.get("TetrX UG Attended IDs", set()))
+            txpg_ids |= set(row.get("TetrX PG Attended IDs", set()))
+            eligible_ids |= set(row.get("Eligible IDs", set()))
+            ug_dist = _merge_dist_dicts(ug_dist, row.get("UG Distribution Dict", {}))
+            pg_dist = _merge_dist_dicts(pg_dist, row.get("PG Distribution Dict", {}))
+            if clean_text(row.get("Audience", "")):
+                audiences.append(clean_text(row.get("Audience", "")))
+            if clean_text(row.get("source_sheet", "")):
+                sheets.append(clean_text(row.get("source_sheet", "")))
+
+        first = group.iloc[0]
+        audience_size = len(eligible_ids)
+        total_attendance = len(ug_ids | pg_ids | txug_ids | txpg_ids)
+        out_rows.append({
+            "Activity Name": clean_text(first.get("Activity Name", "")),
+            "Date": first.get("Date", pd.NaT),
+            "Activity Type": clean_text(first.get("Activity Type", "")) or "Other",
+            "Audience": ", ".join(sorted(set(audiences))),
+            "Source Sheets": ", ".join(sorted(set(sheets))),
+            "Audience Size": audience_size,
+            "UG Attended": len(ug_ids),
+            "PG Attended": len(pg_ids),
+            "Tetr X UG Attended": len(txug_ids),
+            "Tetr X PG Attended": len(txpg_ids),
+            "Total Attendance": total_attendance,
+            "Attend to Eligible Ratio": (total_attendance / audience_size * 100) if audience_size else 0.0,
+            "UG Attendance Distribution": _format_dist_dict(ug_dist),
+            "PG Attendance Distribution": _format_dist_dict(pg_dist),
+        })
+
+    result = pd.DataFrame(out_rows)
+    return result.sort_values(["Date", "Activity Name"], ascending=[False, True], na_position="last").reset_index(drop=True)
+
+
+def _all_activities_metric_bucket(activity_type):
+    """Group activity types for the count cards shown at the top of All Activities."""
+    typ = _activity_event_type_norm(activity_type)
+    typ_l = clean_text(typ).lower()
+    raw_l = clean_text(activity_type).lower()
+    if typ == "Online Event":
+        return "Online Events"
+    if typ == "Masterclass":
+        return "Masterclasses"
+    if typ == "Competition":
+        return "Competitions"
+    if typ == "Hackathon":
+        return "Hackathons"
+    if typ in {"General", "Fun", "Poll", "Quiz", "Fun Task"} or any(
+        token in typ_l or token in raw_l for token in ["general", "fun", "poll", "quiz", "fun task"]
+    ):
+        return "General / Fun / Poll"
+    return "Other"
+
+
 def _student_id_from_activity_row(row):
     return _student_id_from_values(row.get("email_key", ""), row.get("student_key", ""), row.get("student_name", ""))
 
@@ -10583,7 +10727,7 @@ def render_winner_impact_activities(data):
 
 def render_activities_page(data):
     st.subheader("Activities")
-    all_tab, txug_tab, txpg_tab, unpaid_ug_tab, unpaid_pg_tab, winner_impact_tab = st.tabs(["All Events", "Tetr X UG", "Tetr X PG", "Unpaid UG", "Unpaid PG", "Winner Impact"])
+    all_tab, all_activities_tab, txug_tab, txpg_tab, unpaid_ug_tab, unpaid_pg_tab, winner_impact_tab = st.tabs(["All Events", "All Activities", "Tetr X UG", "Tetr X PG", "Unpaid UG", "Unpaid PG", "Winner Impact"])
 
     with all_tab:
         st.markdown("### All Events · Online Events + Masterclasses")
@@ -10623,6 +10767,87 @@ def render_activities_page(data):
                 tdisp = tdisp.drop(columns=["TetrX Attended"], errors="ignore")
                 st.dataframe(tdisp, use_container_width=True, hide_index=True, height=260, key="activities_tarun_table")
                 _render_attendance_distribution_toggle(tarun, "activities_tarun")
+
+
+    with all_activities_tab:
+        st.markdown("### All Activities")
+        st.caption("Includes online events, masterclasses, competitions, hackathons, general/fun/poll activities, and all other activity types found in the activity sheets.")
+        all_activities = build_activities_all_activities(data)
+
+        if all_activities.empty:
+            st.info("No activities were found.")
+        else:
+            activity_counts = all_activities["Activity Type"].map(_all_activities_metric_bucket).value_counts()
+            metric_order = [
+                "Online Events", "Masterclasses", "Competitions", "Hackathons",
+                "General / Fun / Poll", "Other",
+            ]
+
+            top_metrics = st.columns(4)
+            top_metrics[0].metric("All Activities Occurred", f"{len(all_activities):,}")
+            top_metrics[1].metric("Competitions", f"{int(activity_counts.get('Competitions', 0)):,}")
+            top_metrics[2].metric("Hackathons", f"{int(activity_counts.get('Hackathons', 0)):,}")
+            top_metrics[3].metric("General / Fun / Poll", f"{int(activity_counts.get('General / Fun / Poll', 0)):,}")
+
+            secondary_metrics = st.columns(3)
+            secondary_metrics[0].metric("Online Events", f"{int(activity_counts.get('Online Events', 0)):,}")
+            secondary_metrics[1].metric("Masterclasses", f"{int(activity_counts.get('Masterclasses', 0)):,}")
+            secondary_metrics[2].metric("Other Activities", f"{int(activity_counts.get('Other', 0)):,}")
+
+            count_chart_df = pd.DataFrame({
+                "Activity Type": metric_order,
+                "Activities Occurred": [int(activity_counts.get(label, 0)) for label in metric_order],
+            })
+            count_chart_df = count_chart_df[count_chart_df["Activities Occurred"].gt(0)].copy()
+            if not count_chart_df.empty:
+                fig = px.bar(
+                    count_chart_df,
+                    x="Activity Type",
+                    y="Activities Occurred",
+                    text="Activities Occurred",
+                    title="Number of Activities Occurred by Type",
+                )
+                fig.update_traces(marker_color=GREEN, textposition="outside")
+                st.plotly_chart(
+                    nice_layout(fig, height=340, x_tickangle=-20),
+                    use_container_width=True,
+                    key="activities_all_activities_count_chart",
+                )
+
+            display = all_activities.copy()
+            display["Date"] = pd.to_datetime(display["Date"], errors="coerce").dt.strftime("%d %b %Y").fillna("")
+            display["Attend to Eligible Ratio"] = pd.to_numeric(
+                display["Attend to Eligible Ratio"], errors="coerce"
+            ).fillna(0).map(lambda x: f"{x:.1f}%")
+            st.dataframe(
+                display,
+                use_container_width=True,
+                hide_index=True,
+                height=480,
+                key="activities_all_activities_table",
+            )
+
+            distribution_df = all_activities.rename(columns={"Activity Name": "Event Name"})
+            _render_attendance_distribution_toggle(distribution_df, "activities_all_activities")
+
+            attendance_chart = all_activities.sort_values(
+                ["Total Attendance", "Date"], ascending=[False, False]
+            ).head(30).copy()
+            if not attendance_chart.empty:
+                fig = px.bar(
+                    attendance_chart.sort_values("Total Attendance"),
+                    x="Total Attendance",
+                    y="Activity Name",
+                    color="Activity Type",
+                    orientation="h",
+                    hover_data=["Date", "Audience", "Audience Size", "Attend to Eligible Ratio"],
+                    title="Top Activities by Total Attendance",
+                )
+                st.plotly_chart(
+                    nice_layout(fig, height=620),
+                    use_container_width=True,
+                    key="activities_all_activities_attendance_chart",
+                )
 
     with winner_impact_tab:
         render_winner_impact_activities(data)
