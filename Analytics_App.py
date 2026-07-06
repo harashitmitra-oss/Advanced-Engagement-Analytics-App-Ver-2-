@@ -9380,10 +9380,361 @@ def _render_conversion_averages_for_scope(data: dict, scope_label: str, key_pref
     st.dataframe(extra, use_container_width=True, hide_index=True, key=f"{key_prefix}_extra_avg_table")
 
 
+
+def _conversion_student_detail_bucket(event_type: str) -> str:
+    """Map pre-payment activity types into the three requested Conversion buckets."""
+    raw = clean_text(event_type)
+    mapped = map_retention_bucket_event_type(raw)
+    if mapped in {"Online Events & Masterclasses", "Competitions & Hackathons", "General/Fun"}:
+        return mapped
+    low = raw.lower()
+    if any(token in low for token in ["online event", "online ama", "masterclass", "bootcamp", "webinar", "ama"]):
+        return "Online Events & Masterclasses"
+    if any(token in low for token in ["competition", "hackathon", "hackerthon"]):
+        return "Competitions & Hackathons"
+    if any(token in low for token in ["general", "fun", "poll", "quiz", "fun task"]):
+        return "General/Fun"
+    return ""
+
+
+def _conversion_paid_refunded_cohort(data: dict) -> pd.DataFrame:
+    """Build one row per UG/PG paid-status student for Conversion Student Details.
+
+    Included statuses are Admitted, valid UG/PG deferral statuses, and any
+    refunded status. Refunds are included only in this new detail table and do
+    not change the paid logic used anywhere else in the dashboard.
+    """
+    rows = []
+    activities = data.get("activities", {}) if isinstance(data, dict) else {}
+    for tx_sheet in TX_SHEETS:
+        frame = activities.get(tx_sheet, pd.DataFrame())
+        if frame is None or frame.empty:
+            continue
+        program = "UG" if tx_sheet.endswith("UG") else "PG"
+        work = frame.copy()
+        status_series = work.get("sheet_status_raw", work.get("status_value", pd.Series("", index=work.index))).map(clean_text)
+        refunded_mask = status_series.astype(str).str.lower().str.contains("refund", na=False)
+        if "sheet_is_refunded" in work.columns:
+            refunded_mask = refunded_mask | work["sheet_is_refunded"].fillna(False).astype(bool)
+        paid_mask = status_series.map(lambda value: is_paid_status_for_program(value, tx_sheet)).astype(bool)
+        work = work.loc[paid_mask | refunded_mask].copy()
+        if work.empty:
+            continue
+        work["_conversion_status"] = status_series.loc[work.index].map(clean_text)
+        work["_conversion_program"] = program
+        work["_conversion_tx_sheet"] = tx_sheet
+        pay_source = work.get("payment_date_parsed", pd.Series(pd.NaT, index=work.index))
+        work["_conversion_payment_date"] = pd.to_datetime(pay_source, errors="coerce").dt.normalize()
+        work["_conversion_student_id"] = work.apply(
+            lambda r: f"{program}|" + (
+                clean_text(r.get("email_key", ""))
+                or clean_text(r.get("student_key", ""))
+                or normalize_name(r.get("student_name", ""))
+            ),
+            axis=1,
+        )
+        work = work[work["_conversion_student_id"].str.len().gt(len(program) + 1)].copy()
+        rows.append(work)
+
+    if not rows:
+        return pd.DataFrame()
+
+    all_rows = pd.concat(rows, ignore_index=True)
+    cohort_rows = []
+    for student_id, grp in all_rows.groupby("_conversion_student_id", sort=False):
+        grp = grp.copy()
+        payment_dates = pd.to_datetime(grp["_conversion_payment_date"], errors="coerce").dropna().sort_values()
+        payment_date = payment_dates.iloc[0] if not payment_dates.empty else pd.NaT
+
+        statuses = [clean_text(x) for x in grp["_conversion_status"].tolist() if clean_text(x)]
+        refund_statuses = [x for x in statuses if "refund" in x.lower()]
+        if refund_statuses:
+            final_status = refund_statuses[0]
+        else:
+            final_status = statuses[0] if statuses else ""
+
+        def first_nonempty(col):
+            if col not in grp.columns:
+                return ""
+            vals = [clean_text(x) for x in grp[col].tolist() if clean_text(x)]
+            return vals[0] if vals else ""
+
+        first = grp.iloc[0]
+        student_name = first_nonempty("student_name")
+        email_key = first_nonempty("email_key")
+        student_key = first_nonempty("student_key") or normalize_name(student_name)
+        batch = first_nonempty("Batch")
+        program = clean_text(first.get("_conversion_program", ""))
+
+        if pd.isna(payment_date):
+            payment_date = resolve_student_profile_payment_date(
+                data,
+                email_key=email_key,
+                student_key=student_key,
+                student_name=student_name,
+                mobile_key=first_nonempty("mobile_key"),
+            )
+            payment_date = pd.to_datetime(payment_date, errors="coerce")
+            payment_date = payment_date.normalize() if pd.notna(payment_date) else pd.NaT
+
+        cohort_rows.append({
+            "student_id": student_id,
+            "Name": student_name,
+            "Email": email_key,
+            "Program (UG/PG)": program,
+            "Batch": batch,
+            "Status": final_status,
+            "Payment Date": payment_date,
+            "email_key": email_key,
+            "student_key": student_key,
+        })
+
+    return pd.DataFrame(cohort_rows)
+
+
+def _conversion_winner_before_payment(data: dict, email_key: str, student_key: str, batch: str, payment_date) -> tuple[int, float]:
+    winner_df = data.get("winner_df", pd.DataFrame()) if isinstance(data, dict) else pd.DataFrame()
+    pay_dt = pd.to_datetime(payment_date, errors="coerce")
+    if winner_df is None or winner_df.empty or pd.isna(pay_dt):
+        return 0, 0.0
+
+    w = winner_df.copy()
+    if "is_winner" in w.columns:
+        w = w[w["is_winner"].fillna(False).astype(bool)].copy()
+    if w.empty:
+        return 0, 0.0
+
+    email_matches = pd.Series(False, index=w.index)
+    name_matches = pd.Series(False, index=w.index)
+    if email_key and "email_key" in w.columns:
+        email_matches = w["email_key"].astype(str).eq(email_key)
+    if student_key and "student_key" in w.columns:
+        name_matches = w["student_key"].astype(str).eq(student_key)
+
+    if email_matches.any():
+        matched = w.loc[email_matches].copy()
+    else:
+        matched = w.loc[name_matches].copy()
+        batch_key = normalize_batch_token(batch)
+        if batch_key and not matched.empty and "batch_key" in matched.columns:
+            narrowed = matched[matched["batch_key"].astype(str).eq(batch_key)].copy()
+            if not narrowed.empty:
+                matched = narrowed
+
+    if matched.empty:
+        return 0, 0.0
+    matched["announcement_date"] = pd.to_datetime(matched.get("announcement_date", pd.NaT), errors="coerce").dt.normalize()
+    matched = matched[matched["announcement_date"].notna() & matched["announcement_date"].le(pay_dt.normalize())].copy()
+    if matched.empty:
+        return 0, 0.0
+
+    dedupe_cols = [c for c in ["challenge_name", "announcement_date", "entry_type"] if c in matched.columns]
+    if dedupe_cols:
+        matched = matched.drop_duplicates(subset=dedupe_cols)
+    amount = float(pd.to_numeric(matched.get("amount_usd", 0), errors="coerce").fillna(0).sum())
+    return int(len(matched)), amount
+
+
+def build_conversion_student_details(data: dict) -> pd.DataFrame:
+    """Student-level pre-payment activity table for paid/deferral/refunded students."""
+    cohort = _conversion_paid_refunded_cohort(data)
+    if cohort is None or cohort.empty:
+        return pd.DataFrame()
+
+    activities = data.get("activities", {})
+    contexts = data.get("activity_ctx", {})
+    output_rows = []
+
+    for _, student in cohort.iterrows():
+        program = clean_text(student.get("Program (UG/PG)", "")).upper()
+        payment_date = pd.to_datetime(student.get("Payment Date", pd.NaT), errors="coerce")
+        payment_date = payment_date.normalize() if pd.notna(payment_date) else pd.NaT
+        email_key = clean_text(student.get("email_key", ""))
+        student_key = clean_text(student.get("student_key", ""))
+        student_name = clean_text(student.get("Name", ""))
+
+        event_rows = []
+        batch_sheets = UG_BATCH_SHEETS if program == "UG" else PG_BATCH_SHEETS
+        for sheet in batch_sheets:
+            sdf = activities.get(sheet, pd.DataFrame())
+            event_info = contexts.get(sheet, {}).get("event_info", pd.DataFrame())
+            if sdf is None or sdf.empty or event_info is None or event_info.empty:
+                continue
+
+            match = pd.Series(False, index=sdf.index)
+            if email_key and "email_key" in sdf.columns:
+                match = match | sdf["email_key"].astype(str).eq(email_key)
+            if student_key and "student_key" in sdf.columns:
+                match = match | sdf["student_key"].astype(str).eq(student_key)
+            part = sdf.loc[match].copy()
+            if part.empty:
+                continue
+
+            for _, prow in part.iterrows():
+                for _, ev in event_info.iterrows():
+                    col = ev.get("column_name")
+                    if not col or col not in prow.index:
+                        continue
+                    attended = pd.to_numeric(pd.Series([prow.get(col, 0)]), errors="coerce").fillna(0).iloc[0]
+                    if attended <= 0:
+                        continue
+                    event_date = pd.to_datetime(ev.get("event_date", pd.NaT), errors="coerce")
+                    if pd.isna(event_date) or pd.isna(payment_date):
+                        continue
+                    event_date = event_date.normalize()
+                    # Date-granularity rule used by the existing Conversion T-7 logic:
+                    # an activity dated on the payment date is included.
+                    if event_date > payment_date:
+                        continue
+                    event_type = clean_text(ev.get("event_type", "Other")) or "Other"
+                    bucket = _conversion_student_detail_bucket(event_type)
+                    if not bucket:
+                        continue
+                    event_name = clean_text(ev.get("event_name", "")) or clean_text(col)
+                    dedupe_key = "|".join([
+                        student_key or email_key or normalize_name(student_name),
+                        normalize_name(event_name),
+                        normalize_name(event_type),
+                        event_date.strftime("%Y-%m-%d"),
+                    ])
+                    event_rows.append({
+                        "dedupe_key": dedupe_key,
+                        "bucket": bucket,
+                        "event_date": event_date,
+                    })
+
+        ev_df = pd.DataFrame(event_rows)
+        if not ev_df.empty:
+            ev_df = ev_df.sort_values(["event_date", "dedupe_key"]).drop_duplicates("dedupe_key")
+
+        general_count = int((ev_df["bucket"] == "General/Fun").sum()) if not ev_df.empty else 0
+        online_count = int((ev_df["bucket"] == "Online Events & Masterclasses").sum()) if not ev_df.empty else 0
+        competition_count = int((ev_df["bucket"] == "Competitions & Hackathons").sum()) if not ev_df.empty else 0
+        total_before = general_count + online_count + competition_count
+        t7_count = 0
+        if not ev_df.empty and pd.notna(payment_date):
+            delta = (pd.to_datetime(ev_df["event_date"]) - payment_date).dt.days
+            t7_count = int(delta.between(-7, 0, inclusive="both").sum())
+
+        winner_count, amount_won = _conversion_winner_before_payment(
+            data,
+            email_key=email_key,
+            student_key=student_key,
+            batch=clean_text(student.get("Batch", "")),
+            payment_date=payment_date,
+        )
+
+        amount_text = f"${amount_won:,.0f}" if float(amount_won).is_integer() else f"${amount_won:,.2f}"
+        output_rows.append({
+            "Name": student_name,
+            "Email": email_key,
+            "Program (UG/PG)": program,
+            "Batch": clean_text(student.get("Batch", "")),
+            "Status": clean_text(student.get("Status", "")),
+            "Payment Date": payment_date,
+            "Total activities before payment": total_before,
+            "General/Fun": general_count,
+            "Online Events and Masterclasses": online_count,
+            "Competitions/Hackathons": competition_count,
+            "Winners before payment": winner_count,
+            "Amount won before payment": amount_text,
+            "T-7 count": t7_count,
+        })
+
+    out = pd.DataFrame(output_rows)
+    if out.empty:
+        return out
+    return out.sort_values(
+        ["Program (UG/PG)", "Total activities before payment", "Name"],
+        ascending=[True, False, True],
+    ).reset_index(drop=True)
+
+
+def render_conversion_student_details(data: dict):
+    st.markdown("### Student Details")
+    st.caption(
+        "Includes Admitted, valid UG/PG deferral statuses, and Refunded students. "
+        "Pre-payment activities are deduped from the relevant UG/PG batch sheets and grouped into the three requested categories. "
+        "T-7 follows the existing Conversion rule of payment date minus 7 days through the payment date. "
+        "Winner counts and amounts use dated Winner records announced on or before payment."
+    )
+    details = build_conversion_student_details(data)
+    if details is None or details.empty:
+        st.info("No admitted, deferral, or refunded students with Conversion detail data were found.")
+        return
+
+    status_low = details["Status"].astype(str).str.lower()
+    refunded_mask = status_low.str.contains("refund", na=False)
+    deferral_mask = status_low.str.contains("deferral", na=False) & (~refunded_mask)
+    refunded_count = int(refunded_mask.sum())
+    deferral_count = int(deferral_mask.sum())
+    admitted_count = int(len(details) - refunded_count - deferral_count)
+    k1, k2, k3, k4 = st.columns(4)
+    k1.metric("Total Students", f"{len(details):,}")
+    k2.metric("Admitted", f"{admitted_count:,}")
+    k3.metric("Deferral", f"{deferral_count:,}")
+    k4.metric("Refunded", f"{refunded_count:,}")
+
+    f1, f2, f3 = st.columns([1, 1.25, 1.75])
+    with f1:
+        program_filter = st.multiselect(
+            "Program",
+            ["UG", "PG"],
+            default=["UG", "PG"],
+            key="conversion_student_details_program_filter",
+        )
+    status_options = sorted([x for x in details["Status"].dropna().astype(str).unique().tolist() if clean_text(x)])
+    with f2:
+        status_filter = st.multiselect(
+            "Status",
+            status_options,
+            default=status_options,
+            key="conversion_student_details_status_filter",
+        )
+    with f3:
+        search_text = st.text_input(
+            "Search Name or Email",
+            value="",
+            key="conversion_student_details_search",
+        )
+
+    view = details.copy()
+    if program_filter:
+        view = view[view["Program (UG/PG)"].isin(program_filter)].copy()
+    else:
+        view = view.iloc[0:0].copy()
+    if status_filter:
+        view = view[view["Status"].isin(status_filter)].copy()
+    else:
+        view = view.iloc[0:0].copy()
+    if clean_text(search_text):
+        needle = clean_text(search_text).lower()
+        view = view[
+            view["Name"].astype(str).str.lower().str.contains(needle, na=False, regex=False)
+            | view["Email"].astype(str).str.lower().str.contains(needle, na=False, regex=False)
+        ].copy()
+
+    display = view.copy()
+    display["Payment Date"] = pd.to_datetime(display["Payment Date"], errors="coerce").dt.strftime("%d-%b-%Y").fillna("")
+    column_order = [
+        "Name", "Email", "Program (UG/PG)", "Batch", "Status", "Payment Date",
+        "Total activities before payment", "General/Fun",
+        "Online Events and Masterclasses", "Competitions/Hackathons",
+        "Winners before payment", "Amount won before payment", "T-7 count",
+    ]
+    st.caption(f"Showing {len(display):,} of {len(details):,} students")
+    st.dataframe(
+        display[column_order],
+        use_container_width=True,
+        hide_index=True,
+        height=560,
+        key="conversion_student_details_table",
+    )
+
 def render_retention_page(data):
     st.subheader("Conversion")
-    st.caption("Conversion analytics split into Total, UG, and PG views. Total keeps the combined view; UG and PG use their respective Tetr-X and batch sheets only.")
-    tab_total, tab_ug, tab_pg = st.tabs(["Total", "UG", "PG"])
+    st.caption("Conversion analytics split into Total, UG, PG, and Student Details views. Existing Total/UG/PG calculations remain unchanged.")
+    tab_total, tab_ug, tab_pg, tab_student_details = st.tabs(["Total", "UG", "PG", "Student Details"])
     with tab_total:
         _render_conversion_core_for_scope(data, "Total", "conversion_total")
         _render_conversion_averages_for_scope(data, "Total", "conversion_total")
@@ -9393,6 +9744,8 @@ def render_retention_page(data):
     with tab_pg:
         _render_conversion_core_for_scope(data, "PG", "conversion_pg")
         _render_conversion_averages_for_scope(data, "PG", "conversion_pg")
+    with tab_student_details:
+        render_conversion_student_details(data)
 
 def build_tx_risky_students(data, scope_label="Total"):
     top = _tx_top_engaged_students(data, scope_label)
