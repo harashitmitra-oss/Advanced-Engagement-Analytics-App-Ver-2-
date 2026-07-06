@@ -27,13 +27,15 @@ MASTER_SHEETS = ["Master UG", "Master PG"]
 UG_BATCH_SHEETS = ["UG - B1 to B4", "UG B5", "UG B6", "UG B7", "UG B8", "UG B9", "UG B10", "UG B11", "UG B12", "UG B13", "UG B14", "UG B15", "UG B16"]
 PG_BATCH_SHEETS = ["PG - B1 & B2", "PG - B3 & B4", "PG B5", "PG B6", "PG B7", "PG B8"]
 TX_SHEETS = ["Tetr-X-UG", "Tetr-X-PG"]
+GAP_YEAR_SHEET = "Gap Year"
+TETR_APP_SHEETS = ["TetrApp_Competitions", "TetrApp_Quizzes"]
 DATES_SHEET = "Dates"
 WINNER_SHEET = "Winner"
-ALL_REQUIRED = MASTER_SHEETS + UG_BATCH_SHEETS + PG_BATCH_SHEETS + TX_SHEETS
+ALL_REQUIRED = MASTER_SHEETS + UG_BATCH_SHEETS + PG_BATCH_SHEETS + TX_SHEETS + [GAP_YEAR_SHEET] + TETR_APP_SHEETS
 
 ALL_NAV_PAGES = [
     "Overview", "Recent Activity", "Success Metrics", "Student Profile",
-    "UG", "PG", "Courses", "UG vs PG", "Tetr-X", "T-7 & T+7 Analysis",
+    "UG", "PG", "Gap Year", "Tetr App", "Courses", "UG vs PG", "Tetr-X", "T-7 & T+7 Analysis",
     "Conversion", "Retention", "Refund Analytics", "Community Impact",
     "Activities", "Hritabh",
 ]
@@ -451,6 +453,8 @@ def deferral_status_mask_for_program(status_series: pd.Series, program_or_sheet:
 
 def map_profile_plot_event_type(event_type: str) -> str:
     s = clean_text(event_type).strip().lower()
+    if "tetr app" in s and ("competition" in s or "quiz" in s):
+        return "Competitions"
     if s in {"general", "poll", "fun", "fun task"}:
         return "General/Fun"
     if s in {"competition", "hackathon"}:
@@ -853,7 +857,9 @@ def select_payment_date_col(df: pd.DataFrame, sheet_name: str):
 
 
 def infer_program_from_sheet(sheet_name):
-    s = sheet_name.lower()
+    s = clean_text(sheet_name).lower()
+    if "gap year" in s or s == "gapyear":
+        return "Gap Year"
     if "ug" in s:
         return "UG"
     if "pg" in s:
@@ -1123,6 +1129,189 @@ def load_raw_sheet(source_mode: str, sheet_name: str, spreadsheet_id=None, file_
 # ---------------- Parsing ----------------
 
 
+
+
+def _parse_tetr_app_datetime_series(series: pd.Series) -> pd.Series:
+    """Parse Tetr App ISO timestamps and return timezone-naive IST datetimes."""
+    if series is None:
+        return pd.Series(dtype="datetime64[ns]")
+    try:
+        parsed = pd.to_datetime(series, errors="coerce", utc=True)
+        return parsed.dt.tz_convert("Asia/Kolkata").dt.tz_localize(None)
+    except Exception:
+        return pd.to_datetime(series, errors="coerce")
+
+
+def parse_tetr_app_sheet(raw: pd.DataFrame, sheet_name: str) -> pd.DataFrame:
+    """Parse row-level Tetr App competitions/quizzes into a common activity table.
+
+    Every valid registration row is treated as one Tetr App participation. The
+    activity date prefers Submission Submitted On and falls back to Registered At.
+    Continuation/corrupted text rows are excluded unless they contain a valid email
+    or a registration UUID.
+    """
+    columns = [
+        "source_sheet", "tetr_app_type", "event_type", "event_name", "event_date",
+        "registered_at", "submitted_at", "is_submitted", "submission_score",
+        "submission_rank", "registration_uuid", "submission_uuid", "student_name",
+        "student_key", "email_key", "mobile_key", "student_id", "last_form_stage",
+        "registration_status", "country", "record_id",
+    ]
+    if raw is None or raw.empty:
+        return pd.DataFrame(columns=columns)
+
+    header_row = None
+    for i in range(min(12, len(raw))):
+        vals = [clean_text(v).lower() for v in raw.iloc[i].tolist()]
+        joined = " | ".join(vals)
+        if "competition name" in joined and "email" in joined and "registered at" in joined:
+            header_row = i
+            break
+    if header_row is None:
+        return pd.DataFrame(columns=columns)
+
+    df = raw.iloc[header_row + 1:].copy().reset_index(drop=True)
+    df.columns = make_unique(raw.iloc[header_row].tolist())
+    df = df.dropna(how="all")
+    if df.empty:
+        return pd.DataFrame(columns=columns)
+
+    def _find_exact_or_best(exact_names, fallback_terms):
+        col = exact_matching_col(df, exact_names)
+        return col or best_matching_col(df, fallback_terms)
+
+    activity_col = _find_exact_or_best(["Competition Name", "Activity Name", "Quiz Name"], ["competition name", "activity name", "quiz name"])
+    reg_uuid_col = _find_exact_or_best(["Registration UUID"], ["registration uuid"])
+    name_col = _find_exact_or_best(["Name", "Student Name"], ["student name", "name"])
+    email_col = _find_exact_or_best(["Email"], ["email"])
+    mobile_col = _find_exact_or_best(["Mobile Number", "Mobile"], ["mobile number", "mobile", "phone"])
+    last_stage_col = _find_exact_or_best(["Last Form Stage"], ["last form stage"])
+    country_col = _find_exact_or_best(["Country ISO"], ["country iso", "country"])
+    status_col = _find_exact_or_best(["Status"], ["status"])
+    registered_col = _find_exact_or_best(["Registered At"], ["registered at", "registration date"])
+    submission_uuid_col = _find_exact_or_best(["Submission UUID"], ["submission uuid"])
+    submission_score_col = _find_exact_or_best(["Submission Score"], ["submission score", "score"])
+    submission_rank_col = _find_exact_or_best(["Submission Rank"], ["submission rank", "rank"])
+    submitted_col = _find_exact_or_best(["Submission Submitted On"], ["submission submitted on", "submitted on"])
+
+    if not activity_col or not name_col:
+        return pd.DataFrame(columns=columns)
+
+    out = pd.DataFrame(index=df.index)
+    out["source_sheet"] = sheet_name
+    is_quiz = "quiz" in clean_text(sheet_name).lower()
+    out["tetr_app_type"] = "Quizzes" if is_quiz else "Competitions"
+    out["event_type"] = "Tetr App Quiz" if is_quiz else "Tetr App Competition"
+    out["event_name"] = df[activity_col].map(clean_text)
+    out["registration_uuid"] = df[reg_uuid_col].map(clean_text) if reg_uuid_col else ""
+    out["submission_uuid"] = df[submission_uuid_col].map(clean_text) if submission_uuid_col else ""
+    out["student_name"] = df[name_col].map(clean_text)
+    out["student_key"] = out["student_name"].map(normalize_name)
+    out["email_key"] = df[email_col].map(normalize_email) if email_col else ""
+    out["mobile_key"] = df[mobile_col].map(normalize_phone) if mobile_col else ""
+    out["last_form_stage"] = df[last_stage_col].map(clean_text) if last_stage_col else ""
+    out["registration_status"] = df[status_col].map(clean_text) if status_col else ""
+    out["country"] = df[country_col].map(clean_text) if country_col else ""
+    out["registered_at"] = _parse_tetr_app_datetime_series(df[registered_col]) if registered_col else pd.NaT
+    out["submitted_at"] = _parse_tetr_app_datetime_series(df[submitted_col]) if submitted_col else pd.NaT
+    out["event_date"] = out["submitted_at"].where(out["submitted_at"].notna(), out["registered_at"])
+    out["submission_score"] = pd.to_numeric(df[submission_score_col], errors="coerce") if submission_score_col else np.nan
+    out["submission_rank"] = pd.to_numeric(df[submission_rank_col], errors="coerce") if submission_rank_col else np.nan
+    out["is_submitted"] = out["submission_uuid"].astype(str).str.len().gt(7) | out["submitted_at"].notna()
+    out["student_id"] = np.where(out["email_key"].astype(str).str.contains("@", regex=False), out["email_key"], out["student_key"])
+
+    uuid_mask = out["registration_uuid"].astype(str).str.match(r"^[0-9a-fA-F]{8}-[0-9a-fA-F-]{20,}$", na=False)
+    email_mask = out["email_key"].astype(str).str.contains("@", regex=False)
+    valid = out["event_name"].astype(str).str.len().gt(0) & (uuid_mask | email_mask)
+    out = out.loc[valid].copy()
+    if out.empty:
+        return pd.DataFrame(columns=columns)
+
+    fallback_record_id = (
+        out["student_id"].astype(str)
+        + "|" + out["event_type"].astype(str).map(normalize_name)
+        + "|" + out["event_name"].astype(str).map(normalize_name)
+        + "|" + pd.to_datetime(out["event_date"], errors="coerce").dt.strftime("%Y-%m-%d").fillna("undated")
+    )
+    out["record_id"] = out["registration_uuid"].where(uuid_mask.loc[out.index], fallback_record_id)
+    out = out.sort_values(["event_date", "event_name", "student_name"], na_position="last")
+    out = out.drop_duplicates(subset=["record_id"], keep="first")
+    return out[columns].reset_index(drop=True)
+
+
+def match_tetr_app_students(tetr_app_df: pd.DataFrame, profile_base_df: pd.DataFrame) -> pd.DataFrame:
+    """Match Tetr App records by email, name, then unique last-8 phone digits."""
+    if tetr_app_df is None or tetr_app_df.empty:
+        return pd.DataFrame() if tetr_app_df is None else tetr_app_df.copy()
+    out = tetr_app_df.copy()
+    for col, default in [
+        ("matched_student_name", ""), ("matched_program", ""), ("matched_batch", ""),
+        ("match_method", "Unmatched"), ("is_matched", False),
+    ]:
+        out[col] = default
+    if profile_base_df is None or profile_base_df.empty:
+        return out
+
+    base = profile_base_df.copy()
+    for col in ["student_name", "email_key", "student_key", "mobile_key", "Program", "Batch"]:
+        if col not in base.columns:
+            base[col] = ""
+    base["email_key"] = base["email_key"].astype(str).map(normalize_email)
+    base["student_key"] = base["student_key"].astype(str).map(clean_text)
+    base.loc[base["student_key"].eq(""), "student_key"] = base.loc[base["student_key"].eq(""), "student_name"].map(normalize_name)
+    base["mobile_key"] = base["mobile_key"].astype(str).map(normalize_phone)
+    base["phone_last8"] = base["mobile_key"].map(lambda x: x[-8:] if len(x) >= 8 else "")
+
+    def _group_record(grp):
+        names = [clean_text(x) for x in grp["student_name"].tolist() if clean_text(x)]
+        programs = [clean_text(x) for x in grp["Program"].tolist() if clean_text(x)]
+        batches = [clean_text(x) for x in grp["Batch"].tolist() if clean_text(x)]
+        return {
+            "name": names[0] if names else "",
+            "program": ", ".join(dict.fromkeys(programs)),
+            "batch": ", ".join(dict.fromkeys(batches)),
+        }
+
+    email_map = {k: _group_record(g) for k, g in base[base["email_key"].str.contains("@", regex=False)].groupby("email_key", sort=False)}
+    name_map = {k: _group_record(g) for k, g in base[base["student_key"].astype(str).str.len().gt(0)].groupby("student_key", sort=False)}
+
+    # Phone matching is intentionally a fallback after email and full-name matching.
+    # Only unique last-8-digit phone suffixes are used; shared/ambiguous numbers are
+    # excluded to avoid assigning Tetr App engagement to the wrong student.
+    phone_map = {}
+    phone_base = base[base["phone_last8"].astype(str).str.len().eq(8)].copy()
+    for phone_last8, grp in phone_base.groupby("phone_last8", sort=False):
+        identity_keys = set()
+        for _, phone_row in grp.iterrows():
+            identity = clean_text(phone_row.get("email_key", "")) or clean_text(phone_row.get("student_key", ""))
+            if identity:
+                identity_keys.add(identity)
+        if len(identity_keys) == 1:
+            phone_map[phone_last8] = _group_record(grp)
+
+    for idx, row in out.iterrows():
+        email = normalize_email(row.get("email_key", ""))
+        name_key = clean_text(row.get("student_key", "")) or normalize_name(row.get("student_name", ""))
+        mobile = normalize_phone(row.get("mobile_key", ""))
+        phone_last8 = mobile[-8:] if len(mobile) >= 8 else ""
+        rec = None
+        method = "Unmatched"
+        if email and email in email_map:
+            rec = email_map[email]
+            method = "Email"
+        elif name_key and name_key in name_map:
+            rec = name_map[name_key]
+            method = "Name"
+        elif phone_last8 and phone_last8 in phone_map:
+            rec = phone_map[phone_last8]
+            method = "Phone (last 8 digits)"
+        if rec:
+            out.at[idx, "matched_student_name"] = rec["name"]
+            out.at[idx, "matched_program"] = rec["program"]
+            out.at[idx, "matched_batch"] = rec["batch"]
+            out.at[idx, "match_method"] = method
+            out.at[idx, "is_matched"] = True
+    return out
 
 def parse_dates_sheet(raw: pd.DataFrame):
     if raw is None or raw.empty:
@@ -1690,6 +1879,18 @@ def sheets_needed_for_page(page: str):
     full = MASTER_SHEETS + UG_BATCH_SHEETS + PG_BATCH_SHEETS + TX_SHEETS + [DATES_SHEET, WINNER_SHEET]
     page = clean_text(page)
 
+    if page == "Overview":
+        # Tetr App engagement is included in Overview activation and first-30-days quality.
+        # Gap Year remains intentionally excluded from Overview.
+        return full + TETR_APP_SHEETS
+    if page == "Student Profile":
+        # Student Profile is the only existing section where Gap Year students are searchable.
+        return full + [GAP_YEAR_SHEET] + TETR_APP_SHEETS
+    if page == "Gap Year":
+        return [GAP_YEAR_SHEET]
+    if page == "Tetr App":
+        # Match Tetr App participants to the offered UG/PG master lists only.
+        return MASTER_SHEETS + TETR_APP_SHEETS
     if page == "UG":
         return UG_BATCH_SHEETS + TX_SHEETS + [DATES_SHEET, WINNER_SHEET]
     if page == "PG":
@@ -1700,8 +1901,8 @@ def sheets_needed_for_page(page: str):
         # Tetr-X summaries need batch sheets for pre-payment attendance logic.
         return UG_BATCH_SHEETS + PG_BATCH_SHEETS + TX_SHEETS + [DATES_SHEET, WINNER_SHEET]
 
-    # Overview/Student Profile/Success/Conversion/Retention/Refund/Impact pages
-    # intentionally need cross-sheet data for correctness.
+    # Other existing pages intentionally keep their previous sheet scope. Gap Year
+    # and Tetr App do not leak into those sections.
     return full
 
 
@@ -1716,7 +1917,7 @@ def should_build_heavy_indexes_for_page(page: str) -> bool:
 
 @st.cache_data(show_spinner=False, ttl=600)
 def load_dashboard_data(source_mode: str, spreadsheet_id=None, file_bytes=None, required_sheets_tuple=None, build_heavy_indexes=True):
-    required_sheets = list(required_sheets_tuple or (MASTER_SHEETS + UG_BATCH_SHEETS + PG_BATCH_SHEETS + TX_SHEETS + [DATES_SHEET, WINNER_SHEET]))
+    required_sheets = list(required_sheets_tuple or (MASTER_SHEETS + UG_BATCH_SHEETS + PG_BATCH_SHEETS + TX_SHEETS + [DATES_SHEET, WINNER_SHEET, GAP_YEAR_SHEET] + TETR_APP_SHEETS))
 
     # Fast source loading:
     # - Google Sheets: one values.batchGet call for all needed tabs.
@@ -1732,6 +1933,8 @@ def load_dashboard_data(source_mode: str, spreadsheet_id=None, file_bytes=None, 
 
     masters, master_ctx = {}, {}
     activities, activity_ctx = {}, {}
+    tetr_app_frames = []
+    tetr_app_df = pd.DataFrame()
     dates_df = pd.DataFrame()
     winner_df = pd.DataFrame()
 
@@ -1741,7 +1944,7 @@ def load_dashboard_data(source_mode: str, spreadsheet_id=None, file_bytes=None, 
             if not raw.empty:
                 masters[sheet], master_ctx[sheet] = parse_master_sheet(raw, "UG" if sheet.endswith("UG") else "PG", sheet)
 
-    for sheet in UG_BATCH_SHEETS + PG_BATCH_SHEETS + TX_SHEETS:
+    for sheet in UG_BATCH_SHEETS + PG_BATCH_SHEETS + TX_SHEETS + [GAP_YEAR_SHEET]:
         if sheet in raw_cache:
             raw = raw_cache.get(sheet, pd.DataFrame())
             if not raw.empty:
@@ -1758,6 +1961,13 @@ def load_dashboard_data(source_mode: str, spreadsheet_id=None, file_bytes=None, 
 
     if WINNER_SHEET in raw_cache and not raw_cache[WINNER_SHEET].empty:
         winner_df = parse_winner_sheet(raw_cache[WINNER_SHEET])
+
+    for sheet in TETR_APP_SHEETS:
+        if sheet in raw_cache and not raw_cache[sheet].empty:
+            parsed_tetr_app = parse_tetr_app_sheet(raw_cache[sheet], sheet)
+            if parsed_tetr_app is not None and not parsed_tetr_app.empty:
+                tetr_app_frames.append(parsed_tetr_app)
+    tetr_app_df = pd.concat(tetr_app_frames, ignore_index=True) if tetr_app_frames else pd.DataFrame()
 
     tx_df = pd.concat([activities[s] for s in TX_SHEETS if s in activities], ignore_index=True) if any(s in activities for s in TX_SHEETS) else pd.DataFrame()
     if not tx_df.empty:
@@ -1824,12 +2034,37 @@ def load_dashboard_data(source_mode: str, spreadsheet_id=None, file_bytes=None, 
         overview_df["offered_date_parsed"] = offered_vals
         overview_df["deadline_parsed"] = deadline_vals
 
+    # Student Profile base: Master UG/PG plus Gap Year only. Gap Year is not
+    # appended to Overview or any other existing analytics section.
+    student_profile_base_frames = []
+    if not overview_df.empty:
+        student_profile_base_frames.append(overview_df.copy())
+    gap_profile_df = activities.get(GAP_YEAR_SHEET, pd.DataFrame())
+    if gap_profile_df is not None and not gap_profile_df.empty:
+        gap_profile = gap_profile_df.copy()
+        gap_profile["resolved_status"] = gap_profile.get("sheet_status_raw", pd.Series("", index=gap_profile.index))
+        gap_profile["resolved_payment_date"] = pd.to_datetime(gap_profile.get("payment_date_parsed", pd.NaT), errors="coerce")
+        gap_profile["master_status_value"] = gap_profile["resolved_status"]
+        gap_profile["master_payment_value"] = gap_profile.get("payment_date_parsed", pd.Series("", index=gap_profile.index))
+        gap_profile["is_paid"] = gap_profile.get("sheet_is_paid", pd.Series(False, index=gap_profile.index)).fillna(False).astype(bool)
+        gap_profile["is_refunded"] = gap_profile.get("sheet_is_refunded", pd.Series(False, index=gap_profile.index)).fillna(False).astype(bool)
+        gap_profile["is_active"] = gap_profile.get("is_active", pd.Series(False, index=gap_profile.index)).fillna(False).astype(bool)
+        student_profile_base_frames.append(gap_profile)
+    student_profile_base_df = pd.concat(student_profile_base_frames, ignore_index=True, sort=False) if student_profile_base_frames else pd.DataFrame()
+    if not student_profile_base_df.empty:
+        student_profile_base_df = student_profile_base_df.drop_duplicates(
+            subset=[c for c in ["email_key", "student_key", "Program", "Batch"] if c in student_profile_base_df.columns],
+            keep="first",
+        ).reset_index(drop=True)
+
+    tetr_app_df = match_tetr_app_students(tetr_app_df, student_profile_base_df)
+
     combined_profiles = []
     if not overview_df.empty:
         combined_profiles.append(overview_df.assign(profile_source="master"))
     for s, df in activities.items():
         combined_profiles.append(df.assign(profile_source=s))
-    profile_df = pd.concat(combined_profiles, ignore_index=True) if combined_profiles else pd.DataFrame()
+    profile_df = pd.concat(combined_profiles, ignore_index=True, sort=False) if combined_profiles else pd.DataFrame()
 
     data = {
         "sheet_names": sheet_names,
@@ -1839,7 +2074,9 @@ def load_dashboard_data(source_mode: str, spreadsheet_id=None, file_bytes=None, 
         "activities": activities,
         "activity_ctx": activity_ctx,
         "overview_df": overview_df,
+        "student_profile_base_df": student_profile_base_df,
         "profile_df": profile_df,
+        "tetr_app_participations": tetr_app_df,
         "tx_df": tx_df,
         "dates_df": dates_df,
         "winner_df": winner_df,
@@ -2367,7 +2604,9 @@ def build_overview_activation_mask(data: dict, overview_df: pd.DataFrame) -> pd.
     # Batch + Tetr-X sheets: use already parsed activity frames so this does not
     # rescan Google Sheets or raw workbooks.
     activities = data.get("activities", {}) if isinstance(data, dict) else {}
-    for _, frame in activities.items():
+    for sheet_name, frame in activities.items():
+        if clean_text(sheet_name) == GAP_YEAR_SHEET:
+            continue
         if frame is None or frame.empty:
             continue
         sheet_mask = pd.Series(False, index=frame.index)
@@ -2412,6 +2651,9 @@ def build_all_time_student_activity_index(data: dict) -> pd.DataFrame:
     activity_ctx = data.get("activity_ctx", {}) if isinstance(data, dict) else {}
 
     for sheet, ctx in activity_ctx.items():
+        # Gap Year must remain fully separate from Overview engagement.
+        if clean_text(sheet) == GAP_YEAR_SHEET:
+            continue
         sdf = activities.get(sheet, pd.DataFrame())
         event_info = ctx.get("event_info", pd.DataFrame()) if isinstance(ctx, dict) else pd.DataFrame()
         if sdf is None or sdf.empty or event_info is None or event_info.empty:
@@ -2462,6 +2704,29 @@ def build_all_time_student_activity_index(data: dict) -> pd.DataFrame:
                 + "|" + date_key
             )
             rows.append(part)
+
+    # Tetr App is a row-level activity source rather than a wide attendance sheet.
+    # Append it directly so Overview activation and first-30-days quality include it.
+    tetr_app_df = data.get("tetr_app_participations", pd.DataFrame()) if isinstance(data, dict) else pd.DataFrame()
+    if tetr_app_df is not None and not tetr_app_df.empty:
+        ta = tetr_app_df.copy()
+        ta["event_date"] = pd.to_datetime(ta.get("event_date", pd.NaT), errors="coerce").dt.normalize()
+        ta["student_id"] = ta.get("student_id", pd.Series("", index=ta.index)).astype(str).map(clean_text)
+        ta = ta[ta["student_id"].ne("")].copy()
+        if not ta.empty:
+            ta["event_name"] = ta.get("event_name", pd.Series("", index=ta.index)).astype(str).map(clean_text)
+            ta["event_type"] = ta.get("event_type", pd.Series("Tetr App Competition", index=ta.index)).astype(str).map(clean_text)
+            ta["source_sheets"] = ta.get("source_sheet", pd.Series("Tetr App", index=ta.index)).astype(str).map(clean_text)
+            ta["email_key"] = ta.get("email_key", pd.Series("", index=ta.index)).astype(str).map(clean_text)
+            ta["student_key"] = ta.get("student_key", pd.Series("", index=ta.index)).astype(str).map(clean_text)
+            ta["student_name"] = ta.get("student_name", pd.Series("", index=ta.index)).astype(str).map(clean_text)
+            ta["dedupe_key"] = (
+                ta["student_id"].astype(str)
+                + "|" + ta["event_name"].map(normalize_name)
+                + "|" + ta["event_type"].map(normalize_name)
+                + "|" + ta["event_date"].dt.strftime("%Y-%m-%d").fillna("undated")
+            )
+            rows.append(ta[["student_id", "email_key", "student_key", "student_name", "event_name", "event_type", "event_date", "source_sheets", "dedupe_key"]])
 
     if not rows:
         return pd.DataFrame(columns=["student_id", "event_name", "event_type", "event_date", "source_sheets", "dedupe_key"])
@@ -3513,6 +3778,36 @@ def collect_student_profile_events(data, email_key: str, student_key: str, stude
                     "count": int(attended),
                     "dedupe_key": dedupe_key,
                 })
+    tetr_app_df = data.get("tetr_app_participations", pd.DataFrame())
+    if tetr_app_df is not None and not tetr_app_df.empty:
+        tmask = pd.Series(False, index=tetr_app_df.index)
+        if email_key and "email_key" in tetr_app_df.columns:
+            tmask = tmask | tetr_app_df["email_key"].astype(str).eq(email_key)
+        if student_key and "student_key" in tetr_app_df.columns:
+            tmask = tmask | tetr_app_df["student_key"].astype(str).eq(student_key)
+        tpart = tetr_app_df.loc[tmask].copy()
+        for _, tr in tpart.iterrows():
+            ev_name = clean_text(tr.get("event_name", ""))
+            ev_type = clean_text(tr.get("event_type", "Tetr App Competition")) or "Tetr App Competition"
+            ev_date = pd.to_datetime(tr.get("event_date", pd.NaT), errors="coerce")
+            ev_date_norm = ev_date.normalize() if pd.notna(ev_date) else pd.NaT
+            date_key = ev_date_norm.strftime("%Y-%m-%d") if pd.notna(ev_date_norm) else "undated"
+            dedupe_key = "|".join([
+                student_key or email_key or normalize_name(student_name),
+                normalize_name(ev_name),
+                normalize_name(ev_type),
+                date_key,
+            ])
+            rows.append({
+                "sheet": clean_text(tr.get("source_sheet", "Tetr App")) or "Tetr App",
+                "source_group": "tetr_app",
+                "event_name": ev_name,
+                "event_type": ev_type,
+                "event_date": ev_date_norm,
+                "count": 1,
+                "dedupe_key": dedupe_key,
+            })
+
     ev_df = pd.DataFrame(rows)
     if ev_df.empty:
         return ev_df
@@ -3616,13 +3911,14 @@ def create_student_profiles_pdf(profile_payloads):
 
 def render_student_profile(data):
     st.subheader("Student Profile")
-    overview_df = data["overview_df"]
-    if overview_df.empty:
-        st.warning("Master sheets not available.")
+    overview_df = data.get("overview_df", pd.DataFrame())
+    profile_base_df = data.get("student_profile_base_df", overview_df)
+    if profile_base_df is None or profile_base_df.empty:
+        st.warning("Master UG/PG and Gap Year student sources are not available.")
         return
 
-    base_cols = [c for c in ["student_name", "email_key", "student_key", "mobile_key", "Program", "Batch"] if c in overview_df.columns]
-    students = overview_df[base_cols].drop_duplicates().sort_values("student_name")
+    base_cols = [c for c in ["student_name", "email_key", "student_key", "mobile_key", "Program", "Batch"] if c in profile_base_df.columns]
+    students = profile_base_df[base_cols].drop_duplicates().sort_values("student_name")
 
     search_tab_name, search_tab_contact = st.tabs(["Search by Name", "Search by Email / Phone"])
     selected = []
@@ -3666,11 +3962,11 @@ def render_student_profile(data):
     pdf_payloads = []
 
     for i, student_name in enumerate(final_names):
-        matches = overview_df[overview_df["student_name"].str.lower() == student_name.lower()]
+        matches = profile_base_df[profile_base_df["student_name"].astype(str).str.lower() == student_name.lower()]
         if matches.empty:
-            matches = overview_df[overview_df["student_key"] == normalize_name(student_name)]
+            matches = profile_base_df[profile_base_df["student_key"].astype(str) == normalize_name(student_name)]
         if matches.empty:
-            st.warning(f"No master profile found for {student_name}")
+            st.warning(f"No profile source row found for {student_name}")
             continue
 
         master = matches.iloc[0]
@@ -4303,6 +4599,187 @@ def render_courses_page(data):
                 st.markdown("#### Course Event / Activity Attendance Details")
                 st.caption("Merged by same event/activity name, date and type across UG batch sheets. Eligible students are counted from Dates → Course using Offered Date to Deadline.")
                 st.dataframe(course_event_table_display, use_container_width=True, hide_index=True, height=420, key=f"{prefix}_course_merged_event_attendance")
+
+
+def _tetr_app_activity_summary(df: pd.DataFrame) -> pd.DataFrame:
+    cols = [
+        "Tetr App Type", "Activity", "Participations", "Unique Students",
+        "Submitted", "Submission %", "Matched Students", "Average Score",
+        "First Participation", "Latest Participation",
+    ]
+    if df is None or df.empty:
+        return pd.DataFrame(columns=cols)
+    rows = []
+    for (app_type, activity), grp in df.groupby(["tetr_app_type", "event_name"], dropna=False, sort=False):
+        total = int(len(grp))
+        unique_students = int(grp.get("student_id", pd.Series("", index=grp.index)).astype(str).replace("", np.nan).nunique())
+        submitted = int(grp.get("is_submitted", pd.Series(False, index=grp.index)).fillna(False).astype(bool).sum())
+        matched_students = int(grp.loc[grp.get("is_matched", pd.Series(False, index=grp.index)).fillna(False).astype(bool), "student_id"].astype(str).replace("", np.nan).nunique()) if "student_id" in grp.columns else 0
+        scores = pd.to_numeric(grp.get("submission_score", pd.Series(dtype=float)), errors="coerce").dropna()
+        dates = pd.to_datetime(grp.get("event_date", pd.NaT), errors="coerce").dropna()
+        rows.append({
+            "Tetr App Type": clean_text(app_type),
+            "Activity": clean_text(activity),
+            "Participations": total,
+            "Unique Students": unique_students,
+            "Submitted": submitted,
+            "Submission %": round(submitted / total * 100, 1) if total else 0.0,
+            "Matched Students": matched_students,
+            "Average Score": round(float(scores.mean()), 2) if not scores.empty else np.nan,
+            "First Participation": dates.min() if not dates.empty else pd.NaT,
+            "Latest Participation": dates.max() if not dates.empty else pd.NaT,
+        })
+    out = pd.DataFrame(rows)
+    return out.sort_values(["Participations", "Unique Students", "Activity"], ascending=[False, False, True]).reset_index(drop=True)
+
+
+def _tetr_app_student_summary(df: pd.DataFrame) -> pd.DataFrame:
+    cols = [
+        "Student Name", "Email", "Matched", "Match Method", "Program", "Batch",
+        "Total Tetr App Engagement", "Competition Participations", "Quiz Participations",
+        "Activities Participated In", "Submitted Activities", "First Participation",
+        "Latest Participation", "Average Score",
+    ]
+    if df is None or df.empty:
+        return pd.DataFrame(columns=cols)
+    rows = []
+    work = df.copy()
+    work["_sid"] = work.get("student_id", pd.Series("", index=work.index)).astype(str)
+    work = work[work["_sid"].str.len().gt(0)].copy()
+    for _, grp in work.groupby("_sid", sort=False):
+        matched_names = [clean_text(x) for x in grp.get("matched_student_name", pd.Series(dtype=str)).tolist() if clean_text(x)]
+        raw_names = [clean_text(x) for x in grp.get("student_name", pd.Series(dtype=str)).tolist() if clean_text(x)]
+        emails = [clean_text(x) for x in grp.get("email_key", pd.Series(dtype=str)).tolist() if clean_text(x)]
+        programs = [clean_text(x) for x in grp.get("matched_program", pd.Series(dtype=str)).tolist() if clean_text(x)]
+        batches = [clean_text(x) for x in grp.get("matched_batch", pd.Series(dtype=str)).tolist() if clean_text(x)]
+        methods = [clean_text(x) for x in grp.get("match_method", pd.Series(dtype=str)).tolist() if clean_text(x) and clean_text(x) != "Unmatched"]
+        activity_names = [clean_text(x) for x in grp.get("event_name", pd.Series(dtype=str)).tolist() if clean_text(x)]
+        dates = pd.to_datetime(grp.get("event_date", pd.NaT), errors="coerce").dropna()
+        scores = pd.to_numeric(grp.get("submission_score", pd.Series(dtype=float)), errors="coerce").dropna()
+        app_types = grp.get("tetr_app_type", pd.Series("", index=grp.index)).astype(str)
+        rows.append({
+            "Student Name": matched_names[0] if matched_names else (raw_names[0] if raw_names else ""),
+            "Email": emails[0] if emails else "",
+            "Matched": "Yes" if grp.get("is_matched", pd.Series(False, index=grp.index)).fillna(False).astype(bool).any() else "No",
+            "Match Method": methods[0] if methods else "Unmatched",
+            "Program": ", ".join(dict.fromkeys(programs)),
+            "Batch": ", ".join(dict.fromkeys(batches)),
+            "Total Tetr App Engagement": int(len(grp)),
+            "Competition Participations": int(app_types.eq("Competitions").sum()),
+            "Quiz Participations": int(app_types.eq("Quizzes").sum()),
+            "Activities Participated In": "; ".join(dict.fromkeys(activity_names)),
+            "Submitted Activities": int(grp.get("is_submitted", pd.Series(False, index=grp.index)).fillna(False).astype(bool).sum()),
+            "First Participation": dates.min() if not dates.empty else pd.NaT,
+            "Latest Participation": dates.max() if not dates.empty else pd.NaT,
+            "Average Score": round(float(scores.mean()), 2) if not scores.empty else np.nan,
+        })
+    return pd.DataFrame(rows).sort_values(["Total Tetr App Engagement", "Student Name"], ascending=[False, True]).reset_index(drop=True)
+
+
+def _render_tetr_app_records_panel(df: pd.DataFrame, key_prefix: str):
+    if df is None or df.empty:
+        st.info("No Tetr App participation records are available for this view.")
+        return
+    unique_students = int(df.get("student_id", pd.Series("", index=df.index)).astype(str).replace("", np.nan).nunique())
+    submitted = int(df.get("is_submitted", pd.Series(False, index=df.index)).fillna(False).astype(bool).sum())
+    matched = int(df.loc[df.get("is_matched", pd.Series(False, index=df.index)).fillna(False).astype(bool), "student_id"].astype(str).replace("", np.nan).nunique()) if "student_id" in df.columns else 0
+    activities_n = int(df.get("event_name", pd.Series("", index=df.index)).astype(str).replace("", np.nan).nunique())
+    c1, c2, c3, c4, c5 = st.columns(5)
+    c1.metric("Participations", f"{len(df):,}")
+    c2.metric("Unique Students", f"{unique_students:,}")
+    c3.metric("Activities", f"{activities_n:,}")
+    c4.metric("Submitted", f"{submitted:,}", delta=f"{(submitted/len(df)*100 if len(df) else 0):.1f}%")
+    c5.metric("Matched Students", f"{matched:,}", delta=f"{(matched/unique_students*100 if unique_students else 0):.1f}%")
+
+    summary = _tetr_app_activity_summary(df)
+    if not summary.empty:
+        disp = summary.copy()
+        for c in ["First Participation", "Latest Participation"]:
+            disp[c] = pd.to_datetime(disp[c], errors="coerce").dt.strftime("%d-%b-%Y").fillna("")
+        st.markdown("#### Activity Analytics")
+        st.dataframe(disp, use_container_width=True, hide_index=True, height=min(520, 80 + 35 * len(disp)), key=f"{key_prefix}_activity_summary")
+
+    detail_cols = [c for c in [
+        "event_name", "event_type", "student_name", "email_key", "event_date",
+        "is_submitted", "submission_score", "submission_rank", "matched_student_name",
+        "matched_program", "matched_batch", "match_method", "last_form_stage", "country",
+    ] if c in df.columns]
+    details = df[detail_cols].copy()
+    if "event_date" in details.columns:
+        details["event_date"] = pd.to_datetime(details["event_date"], errors="coerce").dt.strftime("%d-%b-%Y %I:%M %p").fillna("")
+    details = details.rename(columns={
+        "event_name": "Activity", "event_type": "Type", "student_name": "Tetr App Name",
+        "email_key": "Email", "event_date": "Participation Date", "is_submitted": "Submitted",
+        "submission_score": "Score", "submission_rank": "Rank", "matched_student_name": "Matched Student",
+        "matched_program": "Program", "matched_batch": "Batch", "match_method": "Match Method",
+        "last_form_stage": "Last Form Stage", "country": "Country",
+    })
+    st.markdown("#### Participation Records")
+    st.dataframe(details, use_container_width=True, hide_index=True, height=460, key=f"{key_prefix}_records")
+
+
+def render_tetr_app_page(data):
+    st.subheader("Tetr App")
+    st.caption("Tetr App competitions and quizzes are matched to offered students by exact email first, normalized full name second, and unique last 8 phone digits as a fallback. Each valid registration is one Tetr App engagement.")
+    df = data.get("tetr_app_participations", pd.DataFrame())
+    if df is None or df.empty:
+        st.warning("TetrApp_Competitions and TetrApp_Quizzes could not be loaded or contain no valid participation rows.")
+        return
+
+    tabs = st.tabs(["Overview", "Competitions", "Quizzes", "Student Participation"])
+    with tabs[0]:
+        _render_tetr_app_records_panel(df, "tetr_app_all")
+        type_summary = df.groupby("tetr_app_type", as_index=False).agg(
+            Participations=("record_id", "count"),
+            **{"Unique Students": ("student_id", pd.Series.nunique)},
+        )
+        ch1, ch2 = st.columns(2)
+        with ch1:
+            fig = px.pie(type_summary, names="tetr_app_type", values="Participations", hole=0.56, title="Tetr App Engagement by Type")
+            st.plotly_chart(nice_layout(fig, height=360), use_container_width=True, key="tetr_app_type_pie")
+        with ch2:
+            top = df.groupby(["event_name", "tetr_app_type"], as_index=False).size().rename(columns={"size": "Participations"}).sort_values("Participations", ascending=False).head(15)
+            fig = px.bar(top, x="Participations", y="event_name", color="tetr_app_type", orientation="h", title="Top Tetr App Activities")
+            st.plotly_chart(nice_layout(fig, height=430), use_container_width=True, key="tetr_app_top_activities")
+
+        dated = df[pd.to_datetime(df.get("event_date", pd.NaT), errors="coerce").notna()].copy()
+        if not dated.empty:
+            dated["Date"] = pd.to_datetime(dated["event_date"], errors="coerce").dt.normalize()
+            timeline = dated.groupby(["Date", "tetr_app_type"], as_index=False).size().rename(columns={"size": "Participations"})
+            fig = px.line(timeline, x="Date", y="Participations", color="tetr_app_type", markers=True, title="Tetr App Participation Timeline")
+            st.plotly_chart(nice_layout(fig, height=360), use_container_width=True, key="tetr_app_timeline")
+
+        program_series = df.get("matched_program", pd.Series("", index=df.index)).astype(str).replace("", "Unmatched")
+        program_plot = program_series.value_counts().reset_index()
+        program_plot.columns = ["Matched Program", "Participations"]
+        fig = px.bar(program_plot, x="Matched Program", y="Participations", title="Matched Program Split")
+        fig.update_traces(marker_color=GREEN_2)
+        st.plotly_chart(nice_layout(fig, height=340), use_container_width=True, key="tetr_app_program_split")
+
+    with tabs[1]:
+        _render_tetr_app_records_panel(df[df["tetr_app_type"].eq("Competitions")].copy(), "tetr_app_competitions")
+    with tabs[2]:
+        _render_tetr_app_records_panel(df[df["tetr_app_type"].eq("Quizzes")].copy(), "tetr_app_quizzes")
+    with tabs[3]:
+        summary = _tetr_app_student_summary(df)
+        if summary.empty:
+            st.info("No student-level Tetr App summary is available.")
+        else:
+            disp = summary.copy()
+            for c in ["First Participation", "Latest Participation"]:
+                disp[c] = pd.to_datetime(disp[c], errors="coerce").dt.strftime("%d-%b-%Y").fillna("")
+            st.dataframe(disp, use_container_width=True, hide_index=True, height=620, key="tetr_app_student_summary")
+
+
+def render_gap_year_page(data):
+    st.subheader("Gap Year")
+    st.caption("Gap Year is maintained as a completely separate student category. Its data is not included in Overview, UG, PG, Conversion, Retention, Community Impact, or other existing analytics sections.")
+    gap_df = data.get("activities", {}).get(GAP_YEAR_SHEET, pd.DataFrame())
+    gap_ctx = data.get("activity_ctx", {}).get(GAP_YEAR_SHEET, {})
+    if gap_df is None or gap_df.empty:
+        st.warning("The Gap Year sheet could not be loaded or has no valid student rows.")
+        return
+    render_sheet_detail(GAP_YEAR_SHEET, gap_df, gap_ctx, "gap_year", data=data)
 
 def render_program_page(title, sheets, data, page_prefix):
     st.subheader(title)
@@ -8600,6 +9077,8 @@ def render_sheet_detail(sheet_name, df, ctx, prefix, data=None):
 
 def _activity_event_type_norm(x):
     s = clean_text(x).lower()
+    if "tetr app" in s and ("competition" in s or "quiz" in s):
+        return "Competition"
     if "online" in s or "ama" in s:
         return "Online Event"
     if "masterclass" in s or "skill bootcamp" in s or "bootcamp" in s:
@@ -9836,6 +10315,9 @@ def _community_impact_event_bucket(event_type: str) -> str:
     typ = _activity_event_type_norm(event_type)
     typ_l = clean_text(typ).lower()
     raw_l = clean_text(event_type).lower()
+    if "tetr app" in raw_l and ("competition" in raw_l or "quiz" in raw_l):
+        # Tetr App competitions and quizzes carry the same weight as Competition.
+        return "Competition"
     if typ in {"Online Event", "Masterclass"}:
         return "Online Events & Masterclasses"
     if typ in {"Competition", "Hackathon"}:
@@ -10356,6 +10838,8 @@ def _svg_nav_icon_data_uri(icon_name: str, stroke_color: str = "#53625c", stroke
         "student profile": f"<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 20 20'><circle cx='10' cy='7' r='3' {common}/><path d='M4.5 16c1.3-2.6 3.2-4 5.5-4s4.2 1.4 5.5 4' {common}/></svg>",
         "ug": f"<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 20 20'><path d='M2 8.2L10 4l8 4.2L10 12.4 2 8.2Z' {common}/><path d='M5.5 10.6V14c2.8 1.7 6.2 1.7 9 0v-3.4' {common}/></svg>",
         "pg": f"<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 20 20'><path d='M2 8.2L10 4l8 4.2L10 12.4 2 8.2Z' {common}/><path d='M5.5 10.6V14c2.8 1.7 6.2 1.7 9 0v-3.4' {common}/></svg>",
+        "gap year": f"<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 20 20'><circle cx='10' cy='10' r='7' {common}/><path d='M12.8 7.2 11.2 11.2 7.2 12.8 8.8 8.8 12.8 7.2Z' {common}/></svg>",
+        "tetr app": f"<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 20 20'><rect x='5' y='2.5' width='10' height='15' rx='2.2' {common}/><line x1='8' y1='5.5' x2='12' y2='5.5' {common}/><circle cx='10' cy='14.3' r='0.8' {common}/></svg>",
         "courses": f"<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 20 20'><path d='M4.5 3.5H14.5a2 2 0 0 1 2 2v11H6.5a2 2 0 0 0-2 2V5.5a2 2 0 0 1 2-2Z' {common}/><line x1='7' y1='7.5' x2='14' y2='7.5' {common}/><line x1='7' y1='10.5' x2='14' y2='10.5' {common}/><line x1='7' y1='13.5' x2='11.5' y2='13.5' {common}/></svg>",
         "tetr-x": f"<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 20 20'><rect x='3' y='3' width='14' height='14' rx='3' {common}/><polyline points='6.2,10.2 8.7,12.7 13.8,7.4' {common}/></svg>",
         "conversion": f"<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 20 20'><polyline points='3,13.5 7,9.5 10,11.5 16.5,5' {common}/><polyline points='12.2,5 16.5,5 16.5,9.3' {common}/></svg>",
@@ -10586,6 +11070,10 @@ def main():
         render_program_page("UG Batch Sheets", UG_BATCH_SHEETS, data, "ug")
     elif page == "PG":
         render_program_page("PG Batch Sheets", PG_BATCH_SHEETS, data, "pg")
+    elif page == "Gap Year":
+        render_gap_year_page(data)
+    elif page == "Tetr App":
+        render_tetr_app_page(data)
     elif page == "Courses":
         render_courses_page(data)
     elif page == "UG vs PG":
