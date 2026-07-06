@@ -4719,7 +4719,7 @@ def render_courses_page(data):
 def _tetr_app_activity_summary(df: pd.DataFrame) -> pd.DataFrame:
     cols = [
         "Tetr App Type", "Activity", "Participations", "Unique Students",
-        "Submitted", "Submission %", "Matched Students", "Average Score",
+        "Submitted", "Submission %", "Offered Students", "Average Score",
         "First Participation", "Latest Participation",
     ]
     if df is None or df.empty:
@@ -4739,7 +4739,7 @@ def _tetr_app_activity_summary(df: pd.DataFrame) -> pd.DataFrame:
             "Unique Students": unique_students,
             "Submitted": submitted,
             "Submission %": round(submitted / total * 100, 1) if total else 0.0,
-            "Matched Students": matched_students,
+            "Offered Students": matched_students,
             "Average Score": round(float(scores.mean()), 2) if not scores.empty else np.nan,
             "First Participation": dates.min() if not dates.empty else pd.NaT,
             "Latest Participation": dates.max() if not dates.empty else pd.NaT,
@@ -4750,7 +4750,7 @@ def _tetr_app_activity_summary(df: pd.DataFrame) -> pd.DataFrame:
 
 def _tetr_app_student_summary(df: pd.DataFrame) -> pd.DataFrame:
     cols = [
-        "Student Name", "Email", "Matched", "Match Method", "Program", "Batch",
+        "Student Name", "Email", "Phone", "Offer Status", "Offer Match Method", "Program", "Batch",
         "Total Tetr App Engagement", "Competition Participations", "Quiz Participations",
         "Activities Participated In", "Submitted Activities", "First Participation",
         "Latest Participation", "Average Score",
@@ -4765,6 +4765,7 @@ def _tetr_app_student_summary(df: pd.DataFrame) -> pd.DataFrame:
         matched_names = [clean_text(x) for x in grp.get("matched_student_name", pd.Series(dtype=str)).tolist() if clean_text(x)]
         raw_names = [clean_text(x) for x in grp.get("student_name", pd.Series(dtype=str)).tolist() if clean_text(x)]
         emails = [clean_text(x) for x in grp.get("email_key", pd.Series(dtype=str)).tolist() if clean_text(x)]
+        phones = [clean_text(x) for x in grp.get("mobile_key", pd.Series(dtype=str)).tolist() if clean_text(x)]
         programs = [clean_text(x) for x in grp.get("matched_program", pd.Series(dtype=str)).tolist() if clean_text(x)]
         batches = [clean_text(x) for x in grp.get("matched_batch", pd.Series(dtype=str)).tolist() if clean_text(x)]
         methods = [clean_text(x) for x in grp.get("match_method", pd.Series(dtype=str)).tolist() if clean_text(x) and clean_text(x) != "Unmatched"]
@@ -4772,11 +4773,13 @@ def _tetr_app_student_summary(df: pd.DataFrame) -> pd.DataFrame:
         dates = pd.to_datetime(grp.get("event_date", pd.NaT), errors="coerce").dropna()
         scores = pd.to_numeric(grp.get("submission_score", pd.Series(dtype=float)), errors="coerce").dropna()
         app_types = grp.get("tetr_app_type", pd.Series("", index=grp.index)).astype(str)
+        is_offered = grp.get("is_matched", pd.Series(False, index=grp.index)).fillna(False).astype(bool).any()
         rows.append({
             "Student Name": matched_names[0] if matched_names else (raw_names[0] if raw_names else ""),
             "Email": emails[0] if emails else "",
-            "Matched": "Yes" if grp.get("is_matched", pd.Series(False, index=grp.index)).fillna(False).astype(bool).any() else "No",
-            "Match Method": methods[0] if methods else "Unmatched",
+            "Phone": phones[0] if phones else "",
+            "Offer Status": "Offered" if is_offered else "Non-Offered",
+            "Offer Match Method": methods[0] if methods else "Non-Offered",
             "Program": ", ".join(dict.fromkeys(programs)),
             "Batch": ", ".join(dict.fromkeys(batches)),
             "Total Tetr App Engagement": int(len(grp)),
@@ -4788,7 +4791,7 @@ def _tetr_app_student_summary(df: pd.DataFrame) -> pd.DataFrame:
             "Latest Participation": dates.max() if not dates.empty else pd.NaT,
             "Average Score": round(float(scores.mean()), 2) if not scores.empty else np.nan,
         })
-    return pd.DataFrame(rows).sort_values(["Total Tetr App Engagement", "Student Name"], ascending=[False, True]).reset_index(drop=True)
+    return pd.DataFrame(rows, columns=cols).sort_values(["Total Tetr App Engagement", "Student Name"], ascending=[False, True]).reset_index(drop=True)
 
 
 
@@ -4816,7 +4819,7 @@ def _tetr_app_program_tokens(value) -> list:
 def _tetr_app_program_mask(df: pd.DataFrame, program_label: str) -> pd.Series:
     if df is None or df.empty:
         return pd.Series(dtype=bool)
-    if program_label == "All Matched":
+    if program_label in {"All Matched", "All Offered"}:
         return df.get("is_matched", pd.Series(False, index=df.index)).fillna(False).astype(bool)
     programs = df.get("matched_program", pd.Series("", index=df.index)).map(_tetr_app_program_tokens)
     matched = df.get("is_matched", pd.Series(False, index=df.index)).fillna(False).astype(bool)
@@ -4874,7 +4877,7 @@ def _tetr_app_matched_student_summary(df: pd.DataFrame) -> pd.DataFrame:
             "Country": clean_text(first.get("matched_country", "")),
             "Counsellor": clean_text(first.get("matched_counsellor", "")),
             "Profile Source": clean_text(first.get("matched_profile_source", "")),
-            "Match Method": clean_text(first.get("match_method", "")) or "Unmatched",
+            "Match Method": clean_text(first.get("match_method", "")) or "Not Available",
             "Total Tetr App Engagement": total,
             "Competition Participations": int(app_types.eq("Competitions").sum()),
             "Quiz Participations": int(app_types.eq("Quizzes").sum()),
@@ -4896,7 +4899,7 @@ def _render_tetr_app_matched_program_view(df: pd.DataFrame, program_label: str, 
     mask = _tetr_app_program_mask(df, program_label)
     work = df.loc[mask].copy() if len(mask) else pd.DataFrame()
     if work.empty:
-        st.info(f"No matched {program_label} Tetr App participants are available.")
+        st.info(f"No offered {program_label} Tetr App participants are available.")
         return
 
     work["_matched_sid"] = _tetr_app_matched_identity_series(work)
@@ -4908,7 +4911,7 @@ def _render_tetr_app_matched_program_view(df: pd.DataFrame, program_label: str, 
     quizzes = int(work.get("tetr_app_type", pd.Series("", index=work.index)).astype(str).eq("Quizzes").sum())
 
     c1, c2, c3, c4, c5, c6 = st.columns(6)
-    c1.metric("Matched Students", f"{unique_students:,}")
+    c1.metric("Offered Students", f"{unique_students:,}")
     c2.metric("Participations", f"{len(work):,}")
     c3.metric("Activities", f"{activities_n:,}")
     c4.metric("Competitions", f"{competitions:,}")
@@ -4950,13 +4953,13 @@ def _render_tetr_app_matched_program_view(df: pd.DataFrame, program_label: str, 
         batch_values = summary.get("Batch", pd.Series("", index=summary.index)).replace("", "Not Available")
         batch_plot = batch_values.value_counts().head(15).reset_index()
         batch_plot.columns = ["Batch", "Students"]
-        fig = px.bar(batch_plot, x="Students", y="Batch", orientation="h", title=f"{program_label} Matched Students by Batch")
+        fig = px.bar(batch_plot, x="Students", y="Batch", orientation="h", title=f"{program_label} Offered Students by Batch")
         fig.update_traces(marker_color=GREEN)
         st.plotly_chart(nice_layout(fig, height=390), use_container_width=True, key=f"{key_prefix}_batch_bar")
     with ch6:
-        method_plot = summary.get("Match Method", pd.Series("", index=summary.index)).replace("", "Unmatched").value_counts().reset_index()
+        method_plot = summary.get("Match Method", pd.Series("", index=summary.index)).replace("", "Not Available").value_counts().reset_index()
         method_plot.columns = ["Match Method", "Students"]
-        fig = px.pie(method_plot, names="Match Method", values="Students", hole=0.54, title=f"{program_label} Student Match Method")
+        fig = px.pie(method_plot, names="Match Method", values="Students", hole=0.54, title=f"{program_label} Offer Matching Method")
         st.plotly_chart(nice_layout(fig, height=390), use_container_width=True, key=f"{key_prefix}_match_method")
 
     ch7, ch8 = st.columns(2)
@@ -4964,7 +4967,7 @@ def _render_tetr_app_matched_program_view(df: pd.DataFrame, program_label: str, 
         country_values = summary.get("Country", pd.Series("", index=summary.index)).replace("", "Not Available")
         country_plot = country_values.value_counts().head(12).reset_index()
         country_plot.columns = ["Country", "Students"]
-        fig = px.bar(country_plot, x="Students", y="Country", orientation="h", title=f"{program_label} Matched Students by Country")
+        fig = px.bar(country_plot, x="Students", y="Country", orientation="h", title=f"{program_label} Offered Students by Country")
         fig.update_traces(marker_color=GREEN_2)
         st.plotly_chart(nice_layout(fig, height=390), use_container_width=True, key=f"{key_prefix}_country_bar")
     with ch8:
@@ -4974,27 +4977,36 @@ def _render_tetr_app_matched_program_view(df: pd.DataFrame, program_label: str, 
         fig = px.pie(payment_plot, names="Payment Category", values="Students", hole=0.54, title=f"{program_label} Payment Status Split")
         st.plotly_chart(nice_layout(fig, height=390), use_container_width=True, key=f"{key_prefix}_payment_pie")
 
-    st.markdown(f"#### {program_label} Matched Student Details")
+    st.markdown(f"#### {program_label} Offered Student Details")
     display = summary.copy()
     for col in ["Payment Date", "First Participation", "Latest Participation"]:
         if col in display.columns:
             display[col] = pd.to_datetime(display[col], errors="coerce").dt.strftime("%d-%b-%Y").fillna("")
     st.dataframe(display, use_container_width=True, hide_index=True, height=620, key=f"{key_prefix}_student_details")
 
-def _render_tetr_app_records_panel(df: pd.DataFrame, key_prefix: str):
+def _render_tetr_app_records_panel(
+    df: pd.DataFrame,
+    key_prefix: str,
+    show_metrics: bool = True,
+    show_tables: bool = True,
+):
     if df is None or df.empty:
         st.info("No Tetr App participation records are available for this view.")
         return
     unique_students = int(df.get("student_id", pd.Series("", index=df.index)).astype(str).replace("", np.nan).nunique())
     submitted = int(df.get("is_submitted", pd.Series(False, index=df.index)).fillna(False).astype(bool).sum())
-    matched = int(df.loc[df.get("is_matched", pd.Series(False, index=df.index)).fillna(False).astype(bool), "student_id"].astype(str).replace("", np.nan).nunique()) if "student_id" in df.columns else 0
+    offered = int(df.loc[df.get("is_matched", pd.Series(False, index=df.index)).fillna(False).astype(bool), "student_id"].astype(str).replace("", np.nan).nunique()) if "student_id" in df.columns else 0
     activities_n = int(df.get("event_name", pd.Series("", index=df.index)).astype(str).replace("", np.nan).nunique())
-    c1, c2, c3, c4, c5 = st.columns(5)
-    c1.metric("Participations", f"{len(df):,}")
-    c2.metric("Unique Students", f"{unique_students:,}")
-    c3.metric("Activities", f"{activities_n:,}")
-    c4.metric("Submitted", f"{submitted:,}", delta=f"{(submitted/len(df)*100 if len(df) else 0):.1f}%")
-    c5.metric("Matched Students", f"{matched:,}", delta=f"{(matched/unique_students*100 if unique_students else 0):.1f}%")
+    if show_metrics:
+        c1, c2, c3, c4, c5 = st.columns(5)
+        c1.metric("Participations", f"{len(df):,}")
+        c2.metric("Unique Students", f"{unique_students:,}")
+        c3.metric("Activities", f"{activities_n:,}")
+        c4.metric("Submitted", f"{submitted:,}", delta=f"{(submitted/len(df)*100 if len(df) else 0):.1f}%")
+        c5.metric("Offered Students", f"{offered:,}", delta=f"{(offered/unique_students*100 if unique_students else 0):.1f}%")
+
+    if not show_tables:
+        return
 
     summary = _tetr_app_activity_summary(df)
     if not summary.empty:
@@ -5017,27 +5029,104 @@ def _render_tetr_app_records_panel(df: pd.DataFrame, key_prefix: str):
         details["event_date"] = pd.to_datetime(details["event_date"], errors="coerce").dt.strftime("%d-%b-%Y %I:%M %p").fillna("")
     if "matched_payment_date" in details.columns:
         details["matched_payment_date"] = pd.to_datetime(details["matched_payment_date"], errors="coerce").dt.strftime("%d-%b-%Y").fillna("")
+    if "match_method" in details.columns:
+        details["match_method"] = details["match_method"].replace("Unmatched", "Non-Offered").replace("", "Non-Offered")
     details = details.rename(columns={
         "event_name": "Activity", "event_type": "Type", "student_name": "Tetr App Name",
         "email_key": "Tetr App Email", "mobile_key": "Tetr App Phone", "event_date": "Participation Date",
         "is_submitted": "Submitted", "submission_score": "Score", "submission_rank": "Rank",
-        "matched_student_name": "Matched Student", "matched_student_email": "Matched Email",
-        "matched_phone": "Matched Phone", "matched_program": "Program", "matched_batch": "Batch",
+        "matched_student_name": "Offered Student", "matched_student_email": "Offered Email",
+        "matched_phone": "Offered Phone", "matched_program": "Program", "matched_batch": "Batch",
         "matched_status": "Student Status", "matched_payment_category": "Payment Category",
-        "matched_payment_date": "Payment Date", "matched_country": "Matched Country",
+        "matched_payment_date": "Payment Date", "matched_country": "Offered Country",
         "matched_community_status": "Community Status", "matched_counsellor": "Counsellor",
-        "matched_profile_source": "Profile Source", "match_method": "Match Method",
+        "matched_profile_source": "Profile Source", "match_method": "Offer Match Method",
         "last_form_stage": "Last Form Stage", "country": "Tetr App Country",
     })
     st.markdown("#### Participation Records")
     st.dataframe(details, use_container_width=True, hide_index=True, height=460, key=f"{key_prefix}_records")
 
 
+def _render_tetr_app_non_offered_view(df: pd.DataFrame, key_prefix: str = "tetr_app_non_offered"):
+    non_offered_mask = ~df.get("is_matched", pd.Series(False, index=df.index)).fillna(False).astype(bool)
+    work = df.loc[non_offered_mask].copy()
+    if work.empty:
+        st.info("No Non-Offered Tetr App participants are available.")
+        return
+
+    summary = _tetr_app_student_summary(work)
+    unique_students = int(summary.shape[0])
+    activities_n = int(work.get("event_name", pd.Series("", index=work.index)).astype(str).replace("", np.nan).nunique())
+    submitted = int(work.get("is_submitted", pd.Series(False, index=work.index)).fillna(False).astype(bool).sum())
+    competitions = int(work.get("tetr_app_type", pd.Series("", index=work.index)).astype(str).eq("Competitions").sum())
+    quizzes = int(work.get("tetr_app_type", pd.Series("", index=work.index)).astype(str).eq("Quizzes").sum())
+
+    c1, c2, c3, c4, c5, c6 = st.columns(6)
+    c1.metric("Non-Offered Students", f"{unique_students:,}")
+    c2.metric("Participations", f"{len(work):,}")
+    c3.metric("Activities", f"{activities_n:,}")
+    c4.metric("Competitions", f"{competitions:,}")
+    c5.metric("Quizzes", f"{quizzes:,}")
+    c6.metric("Submitted", f"{submitted:,}", delta=f"{(submitted/len(work)*100 if len(work) else 0):.1f}%")
+
+    ch1, ch2 = st.columns(2)
+    with ch1:
+        type_plot = work.get("tetr_app_type", pd.Series("", index=work.index)).replace("", "Other").value_counts().reset_index()
+        type_plot.columns = ["Tetr App Type", "Participations"]
+        fig = px.pie(type_plot, names="Tetr App Type", values="Participations", hole=0.54, title="Non-Offered Participation by Type")
+        st.plotly_chart(nice_layout(fig, height=350), use_container_width=True, key=f"{key_prefix}_type_pie")
+    with ch2:
+        student_counts = work.groupby(work.get("student_id", pd.Series("", index=work.index)).astype(str)).size()
+        bands = pd.cut(student_counts, bins=[0, 1, 3, 6, np.inf], labels=["1", "2–3", "4–6", "7+"], include_lowest=True)
+        band_plot = bands.value_counts(sort=False).reset_index()
+        band_plot.columns = ["Engagement Frequency", "Students"]
+        fig = px.bar(band_plot, x="Engagement Frequency", y="Students", title="Non-Offered Student Engagement Frequency")
+        fig.update_traces(marker_color=GREEN_2)
+        st.plotly_chart(nice_layout(fig, height=350), use_container_width=True, key=f"{key_prefix}_frequency_bar")
+
+    ch3, ch4 = st.columns(2)
+    with ch3:
+        top = work.groupby(["event_name", "tetr_app_type"], as_index=False).size().rename(columns={"size": "Participations"}).sort_values("Participations", ascending=False).head(12)
+        fig = px.bar(top, x="Participations", y="event_name", color="tetr_app_type", orientation="h", title="Top Non-Offered Tetr App Activities")
+        st.plotly_chart(nice_layout(fig, height=430), use_container_width=True, key=f"{key_prefix}_top_activities")
+    with ch4:
+        dated = work[pd.to_datetime(work.get("event_date", pd.NaT), errors="coerce").notna()].copy()
+        if dated.empty:
+            st.info("No dated Non-Offered participation records are available for the timeline.")
+        else:
+            dated["Date"] = pd.to_datetime(dated["event_date"], errors="coerce").dt.normalize()
+            timeline = dated.groupby(["Date", "tetr_app_type"], as_index=False).size().rename(columns={"size": "Participations"})
+            fig = px.line(timeline, x="Date", y="Participations", color="tetr_app_type", markers=True, title="Non-Offered Participation Timeline")
+            st.plotly_chart(nice_layout(fig, height=430), use_container_width=True, key=f"{key_prefix}_timeline")
+
+    ch5, ch6 = st.columns(2)
+    with ch5:
+        submission_plot = work.assign(
+            **{"Submission Status": np.where(work.get("is_submitted", pd.Series(False, index=work.index)).fillna(False).astype(bool), "Submitted", "Registered Only")}
+        ).groupby(["tetr_app_type", "Submission Status"], as_index=False).size().rename(columns={"size": "Participations"})
+        fig = px.bar(submission_plot, x="tetr_app_type", y="Participations", color="Submission Status", barmode="group", title="Non-Offered Submission Outcomes")
+        st.plotly_chart(nice_layout(fig, height=360), use_container_width=True, key=f"{key_prefix}_submission_outcome")
+    with ch6:
+        country_plot = work.get("country", pd.Series("", index=work.index)).replace("", "Not Available").value_counts().head(12).reset_index()
+        country_plot.columns = ["Country", "Participations"]
+        fig = px.bar(country_plot, x="Participations", y="Country", orientation="h", title="Non-Offered Participation by Country")
+        fig.update_traces(marker_color=GREEN)
+        st.plotly_chart(nice_layout(fig, height=360), use_container_width=True, key=f"{key_prefix}_country_bar")
+
+    st.markdown("#### Non-Offered Student Details")
+    display = summary.copy()
+    for col in ["First Participation", "Latest Participation"]:
+        if col in display.columns:
+            display[col] = pd.to_datetime(display[col], errors="coerce").dt.strftime("%d-%b-%Y").fillna("")
+    st.dataframe(display, use_container_width=True, hide_index=True, height=620, key=f"{key_prefix}_student_details")
+
+
 def render_tetr_app_page(data):
     st.subheader("Tetr App")
     st.caption(
-        "Tetr App competitions and quizzes are matched to UG, PG and the separate Gap Year profiles "
+        "Tetr App competitions and quizzes are classified against offered UG, PG and the separate Gap Year profiles "
         "by exact email first, normalized full name second, and unique last 8 phone digits as a fallback. "
+        "Students found in these profiles are shown as Offered; students without a profile match are shown as Non-Offered. "
         "Each valid registration is one Tetr App engagement."
     )
     df = data.get("tetr_app_participations", pd.DataFrame())
@@ -5045,9 +5134,47 @@ def render_tetr_app_page(data):
         st.warning("TetrApp_Competitions and TetrApp_Quizzes could not be loaded or contain no valid participation rows.")
         return
 
-    tabs = st.tabs(["Overview", "Competitions", "Quizzes", "Student Participation", "Matched UG / PG / Gap Year"])
+    tabs = st.tabs(["Overview", "Competitions", "Quizzes", "Student Participation", "Offered UG / PG / Gap Year", "Non-Offered"])
     with tabs[0]:
-        _render_tetr_app_records_panel(df, "tetr_app_all")
+        offered_mask = df.get("is_matched", pd.Series(False, index=df.index)).fillna(False).astype(bool)
+        offered_df = df.loc[offered_mask].copy()
+        non_offered_df = df.loc[~offered_mask].copy()
+        all_summary = _tetr_app_student_summary(df)
+        offered_summary = _tetr_app_matched_student_summary(offered_df)
+
+        unique_students = int(all_summary.shape[0])
+        offered_students = int(offered_summary.shape[0])
+        non_offered_students = int((all_summary.get("Offer Status", pd.Series("", index=all_summary.index)) == "Non-Offered").sum())
+        activities_n = int(df.get("event_name", pd.Series("", index=df.index)).astype(str).replace("", np.nan).nunique())
+        submitted = int(df.get("is_submitted", pd.Series(False, index=df.index)).fillna(False).astype(bool).sum())
+
+        m1, m2, m3, m4, m5, m6 = st.columns(6)
+        m1.metric("Participations", f"{len(df):,}")
+        m2.metric("Unique Students", f"{unique_students:,}")
+        m3.metric("Activities", f"{activities_n:,}")
+        m4.metric("Submitted", f"{submitted:,}", delta=f"{(submitted/len(df)*100 if len(df) else 0):.1f}%")
+        m5.metric("Offered Students", f"{offered_students:,}", delta=f"{(offered_students/unique_students*100 if unique_students else 0):.1f}%")
+        m6.metric("Non-Offered Students", f"{non_offered_students:,}", delta=f"{(non_offered_students/unique_students*100 if unique_students else 0):.1f}%")
+
+        # Most decision-relevant charts are shown first.
+        top1, top2 = st.columns(2)
+        with top1:
+            offer_plot = pd.DataFrame([
+                {"Offer Status": "Offered", "Students": offered_students},
+                {"Offer Status": "Non-Offered", "Students": non_offered_students},
+            ])
+            fig = px.pie(offer_plot, names="Offer Status", values="Students", hole=0.56, title="Offered vs Non-Offered Tetr App Students")
+            st.plotly_chart(nice_layout(fig, height=360), use_container_width=True, key="tetr_app_offer_status_pie")
+        with top2:
+            program_unique = []
+            for label in ["UG", "PG", "Gap Year"]:
+                mask = offered_summary.get("Program", pd.Series("", index=offered_summary.index)).map(_tetr_app_program_tokens).map(lambda vals: label in vals)
+                program_unique.append({"Program": label, "Offered Students": int(mask.sum())})
+            program_unique_df = pd.DataFrame(program_unique)
+            fig = px.bar(program_unique_df, x="Program", y="Offered Students", title="Offered Tetr App Students by Program")
+            fig.update_traces(marker_color=GREEN)
+            st.plotly_chart(nice_layout(fig, height=360), use_container_width=True, key="tetr_app_unique_offered_program_split")
+
         type_summary = df.groupby("tetr_app_type", as_index=False).agg(
             Participations=("record_id", "count"),
             **{"Unique Students": ("student_id", pd.Series.nunique)},
@@ -5055,61 +5182,68 @@ def render_tetr_app_page(data):
         ch1, ch2 = st.columns(2)
         with ch1:
             fig = px.pie(type_summary, names="tetr_app_type", values="Participations", hole=0.56, title="Tetr App Engagement by Type")
-            st.plotly_chart(nice_layout(fig, height=360), use_container_width=True, key="tetr_app_type_pie")
+            st.plotly_chart(nice_layout(fig, height=380), use_container_width=True, key="tetr_app_type_pie")
         with ch2:
             top = df.groupby(["event_name", "tetr_app_type"], as_index=False).size().rename(columns={"size": "Participations"}).sort_values("Participations", ascending=False).head(15)
             fig = px.bar(top, x="Participations", y="event_name", color="tetr_app_type", orientation="h", title="Top Tetr App Activities")
             st.plotly_chart(nice_layout(fig, height=430), use_container_width=True, key="tetr_app_top_activities")
 
-        dated = df[pd.to_datetime(df.get("event_date", pd.NaT), errors="coerce").notna()].copy()
-        if not dated.empty:
-            dated["Date"] = pd.to_datetime(dated["event_date"], errors="coerce").dt.normalize()
-            timeline = dated.groupby(["Date", "tetr_app_type"], as_index=False).size().rename(columns={"size": "Participations"})
-            fig = px.line(timeline, x="Date", y="Participations", color="tetr_app_type", markers=True, title="Tetr App Participation Timeline")
-            st.plotly_chart(nice_layout(fig, height=360), use_container_width=True, key="tetr_app_timeline")
+        ch3, ch4 = st.columns(2)
+        with ch3:
+            dated = df[pd.to_datetime(df.get("event_date", pd.NaT), errors="coerce").notna()].copy()
+            if dated.empty:
+                st.info("No dated Tetr App participation records are available for the timeline.")
+            else:
+                dated["Date"] = pd.to_datetime(dated["event_date"], errors="coerce").dt.normalize()
+                timeline = dated.groupby(["Date", "tetr_app_type"], as_index=False).size().rename(columns={"size": "Participations"})
+                fig = px.line(timeline, x="Date", y="Participations", color="tetr_app_type", markers=True, title="Tetr App Participation Timeline")
+                st.plotly_chart(nice_layout(fig, height=380), use_container_width=True, key="tetr_app_timeline")
+        with ch4:
+            program_series = df.get("matched_program", pd.Series("", index=df.index)).astype(str).replace("", "Non-Offered")
+            program_plot = program_series.value_counts().reset_index()
+            program_plot.columns = ["Offer Category / Program", "Participations"]
+            fig = px.bar(program_plot, x="Offer Category / Program", y="Participations", title="Participations by Offered Program / Non-Offered")
+            fig.update_traces(marker_color=GREEN_2)
+            st.plotly_chart(nice_layout(fig, height=380), use_container_width=True, key="tetr_app_program_split")
 
-        program_series = df.get("matched_program", pd.Series("", index=df.index)).astype(str).replace("", "Unmatched")
-        program_plot = program_series.value_counts().reset_index()
-        program_plot.columns = ["Matched Program", "Participations"]
-        fig = px.bar(program_plot, x="Matched Program", y="Participations", title="Matched Program Split — Participations")
-        fig.update_traces(marker_color=GREEN_2)
-        st.plotly_chart(nice_layout(fig, height=340), use_container_width=True, key="tetr_app_program_split")
-
-        matched_summary = _tetr_app_matched_student_summary(df)
-        if not matched_summary.empty:
-            extra1, extra2 = st.columns(2)
-            with extra1:
-                program_unique = []
-                for label in ["UG", "PG", "Gap Year"]:
-                    mask = matched_summary.get("Program", pd.Series("", index=matched_summary.index)).map(_tetr_app_program_tokens).map(lambda vals: label in vals)
-                    program_unique.append({"Program": label, "Matched Students": int(mask.sum())})
-                program_unique_df = pd.DataFrame(program_unique)
-                fig = px.bar(program_unique_df, x="Program", y="Matched Students", title="Unique Matched Students by Program")
-                fig.update_traces(marker_color=GREEN)
-                st.plotly_chart(nice_layout(fig, height=350), use_container_width=True, key="tetr_app_unique_program_split")
-            with extra2:
-                method_plot = matched_summary["Match Method"].replace("", "Unmatched").value_counts().reset_index()
-                method_plot.columns = ["Match Method", "Students"]
-                fig = px.pie(method_plot, names="Match Method", values="Students", hole=0.54, title="Matched Student Method Distribution")
-                st.plotly_chart(nice_layout(fig, height=350), use_container_width=True, key="tetr_app_overview_match_method")
-
-            extra3, extra4 = st.columns(2)
-            with extra3:
-                submission_plot = df.assign(
-                    **{"Submission Status": np.where(df.get("is_submitted", pd.Series(False, index=df.index)).fillna(False).astype(bool), "Submitted", "Registered Only")}
-                ).groupby(["tetr_app_type", "Submission Status"], as_index=False).size().rename(columns={"size": "Participations"})
-                fig = px.bar(submission_plot, x="tetr_app_type", y="Participations", color="Submission Status", barmode="group", title="Submission Outcome by Tetr App Type")
-                st.plotly_chart(nice_layout(fig, height=360), use_container_width=True, key="tetr_app_submission_outcome")
-            with extra4:
-                matched_work = df[df.get("is_matched", pd.Series(False, index=df.index)).fillna(False).astype(bool)].copy()
-                matched_work["_matched_sid"] = _tetr_app_matched_identity_series(matched_work)
-                counts = matched_work.groupby("_matched_sid").size()
+        ch5, ch6 = st.columns(2)
+        with ch5:
+            submission_plot = df.assign(
+                **{"Submission Status": np.where(df.get("is_submitted", pd.Series(False, index=df.index)).fillna(False).astype(bool), "Submitted", "Registered Only")}
+            ).groupby(["tetr_app_type", "Submission Status"], as_index=False).size().rename(columns={"size": "Participations"})
+            fig = px.bar(submission_plot, x="tetr_app_type", y="Participations", color="Submission Status", barmode="group", title="Submission Outcome by Tetr App Type")
+            st.plotly_chart(nice_layout(fig, height=360), use_container_width=True, key="tetr_app_submission_outcome")
+        with ch6:
+            if offered_df.empty:
+                st.info("No Offered Tetr App students are available for the engagement-frequency chart.")
+            else:
+                offered_df["_offered_sid"] = _tetr_app_matched_identity_series(offered_df)
+                counts = offered_df.groupby("_offered_sid").size()
                 bands = pd.cut(counts, bins=[0, 1, 3, 6, np.inf], labels=["1", "2–3", "4–6", "7+"], include_lowest=True)
                 band_plot = bands.value_counts(sort=False).reset_index()
-                band_plot.columns = ["Engagement Frequency", "Matched Students"]
-                fig = px.bar(band_plot, x="Engagement Frequency", y="Matched Students", title="Tetr App Engagement Frequency — Matched Students")
+                band_plot.columns = ["Engagement Frequency", "Offered Students"]
+                fig = px.bar(band_plot, x="Engagement Frequency", y="Offered Students", title="Tetr App Engagement Frequency — Offered Students")
                 fig.update_traces(marker_color=GREEN_2)
-                st.plotly_chart(nice_layout(fig, height=360), use_container_width=True, key="tetr_app_matched_frequency")
+                st.plotly_chart(nice_layout(fig, height=360), use_container_width=True, key="tetr_app_offered_frequency")
+
+        ch7, ch8 = st.columns(2)
+        with ch7:
+            if offered_summary.empty:
+                st.info("No Offered student matching-method data is available.")
+            else:
+                method_plot = offered_summary["Match Method"].replace("", "Not Available").value_counts().reset_index()
+                method_plot.columns = ["Offer Match Method", "Students"]
+                fig = px.pie(method_plot, names="Offer Match Method", values="Students", hole=0.54, title="Offered Student Matching Method")
+                st.plotly_chart(nice_layout(fig, height=350), use_container_width=True, key="tetr_app_overview_offer_match_method")
+        with ch8:
+            status_plot = all_summary.get("Offer Status", pd.Series("", index=all_summary.index)).value_counts().reset_index()
+            status_plot.columns = ["Offer Status", "Students"]
+            fig = px.bar(status_plot, x="Offer Status", y="Students", title="Unique Student Offer Status")
+            fig.update_traces(marker_color=GREEN)
+            st.plotly_chart(nice_layout(fig, height=350), use_container_width=True, key="tetr_app_unique_offer_status_bar")
+
+        st.markdown("#### Detailed Tetr App Analytics")
+        _render_tetr_app_records_panel(df, "tetr_app_all", show_metrics=False, show_tables=True)
 
     with tabs[1]:
         _render_tetr_app_records_panel(df[df["tetr_app_type"].eq("Competitions")].copy(), "tetr_app_competitions")
@@ -5126,28 +5260,31 @@ def render_tetr_app_page(data):
             st.dataframe(disp, use_container_width=True, hide_index=True, height=620, key="tetr_app_student_summary")
 
     with tabs[4]:
-        matched_mask = df.get("is_matched", pd.Series(False, index=df.index)).fillna(False).astype(bool)
-        matched_df = df.loc[matched_mask].copy()
-        if matched_df.empty:
-            st.info("No Tetr App participants matched to UG, PG or Gap Year profiles.")
+        offered_mask = df.get("is_matched", pd.Series(False, index=df.index)).fillna(False).astype(bool)
+        offered_df = df.loc[offered_mask].copy()
+        if offered_df.empty:
+            st.info("No Tetr App participants are classified as Offered across UG, PG or Gap Year profiles.")
         else:
-            all_summary = _tetr_app_matched_student_summary(matched_df)
-            unmatched_unique = int(df.loc[~matched_mask, "student_id"].astype(str).replace("", np.nan).nunique()) if "student_id" in df.columns else 0
+            all_offered_summary = _tetr_app_matched_student_summary(offered_df)
+            non_offered_unique = int(df.loc[~offered_mask, "student_id"].astype(str).replace("", np.nan).nunique()) if "student_id" in df.columns else 0
             p1, p2, p3, p4, p5 = st.columns(5)
-            p1.metric("All Matched Students", f"{len(all_summary):,}")
+            p1.metric("All Offered Students", f"{len(all_offered_summary):,}")
             for metric_col, label, program_label in [(p2, "UG", "UG"), (p3, "PG", "PG"), (p4, "Gap Year", "Gap Year")]:
-                count = int(all_summary.get("Program", pd.Series("", index=all_summary.index)).map(_tetr_app_program_tokens).map(lambda vals: program_label in vals).sum())
-                metric_col.metric(f"Matched {label}", f"{count:,}")
-            p5.metric("Unmatched Students", f"{unmatched_unique:,}")
+                count = int(all_offered_summary.get("Program", pd.Series("", index=all_offered_summary.index)).map(_tetr_app_program_tokens).map(lambda vals: program_label in vals).sum())
+                metric_col.metric(f"Offered {label}", f"{count:,}")
+            p5.metric("Non-Offered Students", f"{non_offered_unique:,}")
 
-            program_tabs = st.tabs(["All Matched", "UG", "PG", "Gap Year"])
+            program_tabs = st.tabs(["All Offered", "UG", "PG", "Gap Year"])
             for tab, label, prefix in zip(
                 program_tabs,
-                ["All Matched", "UG", "PG", "Gap Year"],
-                ["tetr_app_matched_all", "tetr_app_matched_ug", "tetr_app_matched_pg", "tetr_app_matched_gap_year"],
+                ["All Offered", "UG", "PG", "Gap Year"],
+                ["tetr_app_offered_all", "tetr_app_offered_ug", "tetr_app_offered_pg", "tetr_app_offered_gap_year"],
             ):
                 with tab:
                     _render_tetr_app_matched_program_view(df, label, prefix)
+
+    with tabs[5]:
+        _render_tetr_app_non_offered_view(df, "tetr_app_non_offered")
 
 def render_gap_year_page(data):
     st.subheader("Gap Year")
