@@ -1146,7 +1146,8 @@ def parse_tetr_app_sheet(raw: pd.DataFrame, sheet_name: str) -> pd.DataFrame:
     """Parse row-level Tetr App competitions/quizzes into a common activity table.
 
     Every valid registration row is treated as one Tetr App participation. The
-    activity date prefers Submission Submitted On and falls back to Registered At.
+    participation date is taken from Registered At and falls back to Submission
+    Submitted On only when Registered At is missing.
     Continuation/corrupted text rows are excluded unless they contain a valid email
     or a registration UUID.
     """
@@ -1214,7 +1215,7 @@ def parse_tetr_app_sheet(raw: pd.DataFrame, sheet_name: str) -> pd.DataFrame:
     out["country"] = df[country_col].map(clean_text) if country_col else ""
     out["registered_at"] = _parse_tetr_app_datetime_series(df[registered_col]) if registered_col else pd.NaT
     out["submitted_at"] = _parse_tetr_app_datetime_series(df[submitted_col]) if submitted_col else pd.NaT
-    out["event_date"] = out["submitted_at"].where(out["submitted_at"].notna(), out["registered_at"])
+    out["event_date"] = out["registered_at"].where(out["registered_at"].notna(), out["submitted_at"])
     out["submission_score"] = pd.to_numeric(df[submission_score_col], errors="coerce") if submission_score_col else np.nan
     out["submission_rank"] = pd.to_numeric(df[submission_rank_col], errors="coerce") if submission_rank_col else np.nan
     out["is_submitted"] = out["submission_uuid"].astype(str).str.len().gt(7) | out["submitted_at"].notna()
@@ -1996,6 +1997,10 @@ def sheets_needed_for_page(page: str):
     if page == "Overview":
         # Tetr App engagement is included in Overview activation and first-30-days quality.
         # Gap Year remains intentionally excluded from Overview.
+        return full + TETR_APP_SHEETS
+    if page in {"Conversion", "Community Impact"}:
+        # These two sections calculate pre-payment Tetr App participation. Load the
+        # two row-level Tetr App tabs without changing any other page's sheet scope.
         return full + TETR_APP_SHEETS
     if page == "Student Profile":
         # Student Profile is the only existing section where Gap Year students are searchable.
@@ -2825,16 +2830,40 @@ def build_all_time_student_activity_index(data: dict) -> pd.DataFrame:
     tetr_app_df = data.get("tetr_app_participations", pd.DataFrame()) if isinstance(data, dict) else pd.DataFrame()
     if tetr_app_df is not None and not tetr_app_df.empty:
         ta = tetr_app_df.copy()
-        ta["event_date"] = pd.to_datetime(ta.get("event_date", pd.NaT), errors="coerce").dt.normalize()
-        ta["student_id"] = ta.get("student_id", pd.Series("", index=ta.index)).astype(str).map(clean_text)
-        ta = ta[ta["student_id"].ne("")].copy()
+
+        # Registered At is the participation timestamp. Submission time is only a
+        # fallback when a registration timestamp is genuinely unavailable.
+        registered_dates = pd.to_datetime(ta.get("registered_at", pd.NaT), errors="coerce")
+        existing_event_dates = pd.to_datetime(ta.get("event_date", pd.NaT), errors="coerce")
+        submitted_dates = pd.to_datetime(ta.get("submitted_at", pd.NaT), errors="coerce")
+        ta["event_date"] = registered_dates.where(
+            registered_dates.notna(),
+            existing_event_dates.where(existing_event_dates.notna(), submitted_dates),
+        ).dt.normalize()
+
+        # Use the offered-profile identity after email/name/unique-phone matching.
+        # This makes phone-fallback matches count in Overview without mixing Gap
+        # Year students into the UG/PG Overview cohort.
+        matched_program = ta.get("matched_program", pd.Series("", index=ta.index)).astype(str)
+        ta = ta[~matched_program.str.lower().str.contains("gap year", na=False)].copy()
+        matched_email = ta.get("matched_student_email", pd.Series("", index=ta.index)).astype(str).map(normalize_email)
+        raw_email = ta.get("email_key", pd.Series("", index=ta.index)).astype(str).map(normalize_email)
+        matched_name = ta.get("matched_student_name", pd.Series("", index=ta.index)).astype(str).map(clean_text)
+        raw_name = ta.get("student_name", pd.Series("", index=ta.index)).astype(str).map(clean_text)
+
+        ta["email_key"] = matched_email.where(matched_email.str.contains("@", regex=False), raw_email)
+        ta["student_name"] = matched_name.where(matched_name.str.len().gt(0), raw_name)
+        ta["student_key"] = ta["student_name"].map(normalize_name)
+        ta["student_id"] = ta["email_key"].where(
+            ta["email_key"].str.contains("@", regex=False),
+            ta["student_key"],
+        )
+        ta = ta[ta["student_id"].astype(str).str.len().gt(0)].copy()
+
         if not ta.empty:
             ta["event_name"] = ta.get("event_name", pd.Series("", index=ta.index)).astype(str).map(clean_text)
             ta["event_type"] = ta.get("event_type", pd.Series("Tetr App Competition", index=ta.index)).astype(str).map(clean_text)
             ta["source_sheets"] = ta.get("source_sheet", pd.Series("Tetr App", index=ta.index)).astype(str).map(clean_text)
-            ta["email_key"] = ta.get("email_key", pd.Series("", index=ta.index)).astype(str).map(clean_text)
-            ta["student_key"] = ta.get("student_key", pd.Series("", index=ta.index)).astype(str).map(clean_text)
-            ta["student_name"] = ta.get("student_name", pd.Series("", index=ta.index)).astype(str).map(clean_text)
             ta["dedupe_key"] = (
                 ta["student_id"].astype(str)
                 + "|" + ta["event_name"].map(normalize_name)
@@ -9574,7 +9603,13 @@ def _student_tetr_app_participations(
     if work.empty:
         return work
 
-    work["event_date"] = pd.to_datetime(work.get("event_date", pd.NaT), errors="coerce").dt.normalize()
+    registered_dates = pd.to_datetime(work.get("registered_at", pd.NaT), errors="coerce")
+    existing_event_dates = pd.to_datetime(work.get("event_date", pd.NaT), errors="coerce")
+    submitted_dates = pd.to_datetime(work.get("submitted_at", pd.NaT), errors="coerce")
+    work["event_date"] = registered_dates.where(
+        registered_dates.notna(),
+        existing_event_dates.where(existing_event_dates.notna(), submitted_dates),
+    ).dt.normalize()
     cutoff = pd.to_datetime(on_or_before, errors="coerce")
     if pd.notna(cutoff):
         work = work[work["event_date"].notna() & work["event_date"].le(cutoff.normalize())].copy()
