@@ -9535,6 +9535,64 @@ def _conversion_winner_before_payment(data: dict, email_key: str, student_key: s
     return int(len(matched)), amount
 
 
+
+def _student_tetr_app_participations(
+    data: dict,
+    email_key: str = "",
+    student_key: str = "",
+    student_name: str = "",
+    on_or_before=pd.NaT,
+) -> pd.DataFrame:
+    """Return deduped Tetr App participations matched to one offered student.
+
+    Matching accepts both the raw Tetr App identity and the enriched offered-profile
+    identity produced by email, full-name, or unique last-8 phone matching. When a
+    cutoff is supplied, only dated participations on/before that date are retained.
+    """
+    tetr_app = data.get("tetr_app_participations", pd.DataFrame()) if isinstance(data, dict) else pd.DataFrame()
+    if tetr_app is None or tetr_app.empty:
+        return pd.DataFrame()
+
+    work = tetr_app.copy()
+    email = normalize_email(email_key)
+    name_key = clean_text(student_key) or normalize_name(student_name)
+    mask = pd.Series(False, index=work.index)
+
+    if email:
+        if "email_key" in work.columns:
+            mask = mask | work["email_key"].astype(str).map(normalize_email).eq(email)
+        if "matched_student_email" in work.columns:
+            mask = mask | work["matched_student_email"].astype(str).map(normalize_email).eq(email)
+
+    if name_key:
+        if "student_key" in work.columns:
+            mask = mask | work["student_key"].astype(str).map(clean_text).eq(name_key)
+        if "matched_student_name" in work.columns:
+            mask = mask | work["matched_student_name"].astype(str).map(normalize_name).eq(name_key)
+
+    work = work.loc[mask].copy()
+    if work.empty:
+        return work
+
+    work["event_date"] = pd.to_datetime(work.get("event_date", pd.NaT), errors="coerce").dt.normalize()
+    cutoff = pd.to_datetime(on_or_before, errors="coerce")
+    if pd.notna(cutoff):
+        work = work[work["event_date"].notna() & work["event_date"].le(cutoff.normalize())].copy()
+    if work.empty:
+        return work
+
+    if "record_id" in work.columns:
+        record_key = work["record_id"].astype(str).map(clean_text)
+    else:
+        record_key = pd.Series("", index=work.index)
+    fallback_key = (
+        work.get("event_type", pd.Series("Tetr App Competition", index=work.index)).astype(str).map(normalize_name)
+        + "|" + work.get("event_name", pd.Series("", index=work.index)).astype(str).map(normalize_name)
+        + "|" + work["event_date"].dt.strftime("%Y-%m-%d").fillna("undated")
+    )
+    work["_student_tetr_app_dedupe"] = record_key.where(record_key.str.len().gt(0), fallback_key)
+    return work.sort_values(["event_date", "event_name"], na_position="last").drop_duplicates("_student_tetr_app_dedupe")
+
 def build_conversion_student_details(data: dict) -> pd.DataFrame:
     """Student-level pre-payment activity table for paid/deferral/refunded students."""
     cohort = _conversion_paid_refunded_cohort(data)
@@ -9624,6 +9682,15 @@ def build_conversion_student_details(data: dict) -> pd.DataFrame:
             payment_date=payment_date,
         )
 
+        tetr_app_pre_payment = _student_tetr_app_participations(
+            data,
+            email_key=email_key,
+            student_key=student_key,
+            student_name=student_name,
+            on_or_before=payment_date,
+        )
+        tetr_app_participation_count = int(len(tetr_app_pre_payment)) if tetr_app_pre_payment is not None else 0
+
         amount_text = f"${amount_won:,.0f}" if float(amount_won).is_integer() else f"${amount_won:,.2f}"
         output_rows.append({
             "Name": student_name,
@@ -9636,6 +9703,7 @@ def build_conversion_student_details(data: dict) -> pd.DataFrame:
             "General/Fun": general_count,
             "Online Events and Masterclasses": online_count,
             "Competitions/Hackathons": competition_count,
+            "Tetr App Participation count": tetr_app_participation_count,
             "Winners before payment": winner_count,
             "Amount won before payment": amount_text,
             "T-7 count": t7_count,
@@ -9655,6 +9723,7 @@ def render_conversion_student_details(data: dict):
     st.caption(
         "Includes Admitted, valid UG/PG deferral statuses, and Refunded students. "
         "Pre-payment activities are deduped from the relevant UG/PG batch sheets and grouped into the three requested categories. "
+        "Tetr App Participation count separately shows deduped Tetr App competitions/quizzes dated on or before payment. "
         "T-7 follows the existing Conversion rule of payment date minus 7 days through the payment date. "
         "Winner counts and amounts use dated Winner records announced on or before payment."
     )
@@ -9720,7 +9789,8 @@ def render_conversion_student_details(data: dict):
         "Name", "Email", "Program (UG/PG)", "Batch", "Status", "Payment Date",
         "Total activities before payment", "General/Fun",
         "Online Events and Masterclasses", "Competitions/Hackathons",
-        "Winners before payment", "Amount won before payment", "T-7 count",
+        "Tetr App Participation count", "Winners before payment",
+        "Amount won before payment", "T-7 count",
     ]
     st.caption(f"Showing {len(display):,} of {len(details):,} students")
     st.dataframe(
@@ -11591,6 +11661,7 @@ def _community_impact_paid_students(data: dict, include_refunded_as_paid: bool =
     online_masterclass_counts = []
     competition_counts = []
     general_fun_counts = []
+    tetr_app_touchpoint_counts = []
 
     for _, r in cohort.iterrows():
         pay_dt = pd.to_datetime(r.get("Payment Date", pd.NaT), errors="coerce")
@@ -11606,22 +11677,62 @@ def _community_impact_paid_students(data: dict, include_refunded_as_paid: bool =
             deadline_dt=deadline_dt,
         )
         counts = {}
+        prepay_batch = pd.DataFrame()
+        prepay_tetr_app = pd.DataFrame()
         prepay = pd.DataFrame()
-        if ev is not None and not ev.empty and pd.notna(pay_dt):
-            ev2 = ev.copy()
-            ev2["event_date"] = pd.to_datetime(ev2.get("event_date", pd.NaT), errors="coerce")
-            source = ev2.get("source_group", pd.Series("", index=ev2.index)).astype(str).str.lower()
-            # Pre-payment touchpoints come from batch sheets and include payment-date activities because we do not have times.
-            mask = source.str.contains("batch", na=False) & ev2["event_date"].notna() & ev2["event_date"].le(pay_dt.normalize())
-            prepay = ev2.loc[mask].copy()
+
+        if pd.notna(pay_dt):
+            if ev is not None and not ev.empty:
+                ev2 = ev.copy()
+                ev2["event_date"] = pd.to_datetime(ev2.get("event_date", pd.NaT), errors="coerce")
+                source = ev2.get("source_group", pd.Series("", index=ev2.index)).astype(str).str.lower()
+                # Existing Community Impact batch touchpoints include payment-date activities because times are unavailable.
+                batch_mask = source.str.contains("batch", na=False) & ev2["event_date"].notna() & ev2["event_date"].le(pay_dt.normalize())
+                prepay_batch = ev2.loc[batch_mask].copy()
+                if not prepay_batch.empty and "dedupe_key" in prepay_batch.columns:
+                    prepay_batch = prepay_batch.drop_duplicates(subset=["dedupe_key"]).copy()
+
+            # Add offered-student Tetr App competitions/quizzes on/before payment.
+            # This also captures records matched through the unique last-8 phone fallback,
+            # even when the student has no batch-sheet touchpoint in the period.
+            tetr_app_pre = _student_tetr_app_participations(
+                data,
+                email_key=clean_text(r.get("email_key", "")),
+                student_key=clean_text(r.get("student_key", "")),
+                student_name=clean_text(r.get("Name", "")),
+                on_or_before=pay_dt,
+            )
+            tetr_app_rows = []
+            if tetr_app_pre is not None and not tetr_app_pre.empty:
+                identity = clean_text(r.get("student_key", "")) or clean_text(r.get("email_key", "")) or normalize_name(r.get("Name", ""))
+                for _, tr in tetr_app_pre.iterrows():
+                    ta_name = clean_text(tr.get("event_name", ""))
+                    ta_type = clean_text(tr.get("event_type", "Tetr App Competition")) or "Tetr App Competition"
+                    ta_date = pd.to_datetime(tr.get("event_date", pd.NaT), errors="coerce")
+                    ta_date = ta_date.normalize() if pd.notna(ta_date) else pd.NaT
+                    if pd.isna(ta_date):
+                        continue
+                    tetr_app_rows.append({
+                        "event_name": ta_name,
+                        "event_type": ta_type,
+                        "event_date": ta_date,
+                        "source_group": "tetr_app",
+                        "dedupe_key": "|".join([
+                            identity,
+                            normalize_name(ta_name),
+                            normalize_name(ta_type),
+                            ta_date.strftime("%Y-%m-%d"),
+                        ]),
+                    })
+            prepay_tetr_app = pd.DataFrame(tetr_app_rows)
+            prepay = pd.concat([prepay_batch, prepay_tetr_app], ignore_index=True, sort=False)
             if not prepay.empty and "dedupe_key" in prepay.columns:
                 prepay = prepay.drop_duplicates(subset=["dedupe_key"]).copy()
-            for typ in prepay.get("event_type", pd.Series(dtype=str)).tolist():
-                bucket = _community_impact_event_bucket(typ)
-                counts[bucket] = int(counts.get(bucket, 0)) + 1
-            n = int(prepay["dedupe_key"].nunique()) if (not prepay.empty and "dedupe_key" in prepay.columns) else int(len(prepay))
-        else:
-            n = 0
+
+        for typ in prepay.get("event_type", pd.Series(dtype=str)).tolist():
+            bucket = _community_impact_event_bucket(typ)
+            counts[bucket] = int(counts.get(bucket, 0)) + 1
+        n = int(prepay["dedupe_key"].nunique()) if (not prepay.empty and "dedupe_key" in prepay.columns) else int(len(prepay))
 
         touchpoints.append(n)
         event_breakdowns.append(_community_impact_event_breakdown_text(counts))
@@ -11629,6 +11740,7 @@ def _community_impact_paid_students(data: dict, include_refunded_as_paid: bool =
         online_masterclass_counts.append(int(counts.get("Online Events & Masterclasses", 0)))
         competition_counts.append(int(counts.get("Competition", 0)))
         general_fun_counts.append(int(counts.get("General/Fun", 0)))
+        tetr_app_touchpoint_counts.append(int(len(prepay_tetr_app)) if prepay_tetr_app is not None else 0)
 
     cohort["Total Touchpoints (n)"] = touchpoints
     cohort["Event Breakdown"] = event_breakdowns
@@ -11636,6 +11748,7 @@ def _community_impact_paid_students(data: dict, include_refunded_as_paid: bool =
     cohort["_OnlineMasterclass Count"] = online_masterclass_counts
     cohort["_Competition Count"] = competition_counts
     cohort["_General/Fun Count"] = general_fun_counts
+    cohort["Tetr App Touchpoints"] = tetr_app_touchpoint_counts
 
     def _baseline_impact(n):
         try:
@@ -11720,7 +11833,7 @@ def _format_community_impact_table(df: pd.DataFrame) -> pd.DataFrame:
     for col in ["Payment Date", "Offered Date", "Deadline"]:
         if col in out.columns:
             out[col] = pd.to_datetime(out[col], errors="coerce").dt.strftime("%d %b %Y").fillna("")
-    cols = ["Name", "Email", "Country", "UG/PG", "Batch", "Payment Date", "Offered Date", "Total Touchpoints (n)", "Event Breakdown", "Pre-Payment Winner", "Impact score", "Impact"]
+    cols = ["Name", "Email", "Country", "UG/PG", "Batch", "Payment Date", "Offered Date", "Total Touchpoints (n)", "Tetr App Touchpoints", "Event Breakdown", "Pre-Payment Winner", "Impact score", "Impact"]
     return out[[c for c in cols if c in out.columns]].sort_values(["Impact score", "Total Touchpoints (n)", "Name"], ascending=[False, False, True])
 
 
@@ -11792,7 +11905,7 @@ def render_community_impact_page(data):
     )
     if include_refunded_as_paid_community:
         st.caption("Temporary Community Impact view active: refunded students are included as paid/admitted only in this section.")
-    st.caption("Paid cohort = Tetr-X students with Status = Admitted or valid Deferral. Refund rows are excluded unless the checkbox above is ticked. Touchpoints count deduped batch-sheet activities attended on/before payment date; winner and event-type overrides are applied before final impact tier.")
+    st.caption("Paid cohort = Tetr-X students with Status = Admitted or valid Deferral. Refund rows are excluded unless the checkbox above is ticked. Touchpoints count deduped batch-sheet activities plus Tetr App competitions/quizzes attended on/before payment date. Tetr App competitions and quizzes carry the same Community Impact weight as Competitions/Hackathons; winner and event-type overrides are then applied before the final impact tier.")
     cohort = _community_impact_paid_students(data, include_refunded_as_paid=include_refunded_as_paid_community)
     tabs = st.tabs(["Total", "UG", "PG"])
     with tabs[0]:
