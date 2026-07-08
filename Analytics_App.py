@@ -9724,7 +9724,29 @@ def build_conversion_student_details(data: dict) -> pd.DataFrame:
             student_name=student_name,
             on_or_before=payment_date,
         )
-        tetr_app_participation_count = int(len(tetr_app_pre_payment)) if tetr_app_pre_payment is not None else 0
+        tetr_app_competitions_count = 0
+        tetr_app_quizzes_count = 0
+        if tetr_app_pre_payment is not None and not tetr_app_pre_payment.empty:
+            app_type_text = tetr_app_pre_payment.get(
+                "tetr_app_type",
+                pd.Series("", index=tetr_app_pre_payment.index),
+            ).astype(str).str.strip().str.lower()
+            event_type_text = tetr_app_pre_payment.get(
+                "event_type",
+                pd.Series("", index=tetr_app_pre_payment.index),
+            ).astype(str).str.strip().str.lower()
+
+            competition_mask = (
+                app_type_text.str.contains("competition", na=False)
+                | event_type_text.str.contains("competition", na=False)
+            )
+            quiz_mask = (
+                app_type_text.str.contains("quiz", na=False)
+                | event_type_text.str.contains("quiz", na=False)
+            )
+
+            tetr_app_competitions_count = int(competition_mask.sum())
+            tetr_app_quizzes_count = int((quiz_mask & ~competition_mask).sum())
 
         amount_text = f"${amount_won:,.0f}" if float(amount_won).is_integer() else f"${amount_won:,.2f}"
         output_rows.append({
@@ -9738,7 +9760,8 @@ def build_conversion_student_details(data: dict) -> pd.DataFrame:
             "General/Fun": general_count,
             "Online Events and Masterclasses": online_count,
             "Competitions/Hackathons": competition_count,
-            "Tetr App Participation count": tetr_app_participation_count,
+            "Tetr App Competitions": tetr_app_competitions_count,
+            "Tetr App Quizzes": tetr_app_quizzes_count,
             "Winners before payment": winner_count,
             "Amount won before payment": amount_text,
             "T-7 count": t7_count,
@@ -9758,7 +9781,7 @@ def render_conversion_student_details(data: dict):
     st.caption(
         "Includes Admitted, valid UG/PG deferral statuses, and Refunded students. "
         "Pre-payment activities are deduped from the relevant UG/PG batch sheets and grouped into the three requested categories. "
-        "Tetr App Participation count separately shows deduped Tetr App competitions/quizzes dated on or before payment. "
+        "Tetr App Competitions and Tetr App Quizzes separately show deduped registrations dated on or before payment. "
         "T-7 follows the existing Conversion rule of payment date minus 7 days through the payment date. "
         "Winner counts and amounts use dated Winner records announced on or before payment."
     )
@@ -9824,7 +9847,7 @@ def render_conversion_student_details(data: dict):
         "Name", "Email", "Program (UG/PG)", "Batch", "Status", "Payment Date",
         "Total activities before payment", "General/Fun",
         "Online Events and Masterclasses", "Competitions/Hackathons",
-        "Tetr App Participation count", "Winners before payment",
+        "Tetr App Competitions", "Tetr App Quizzes", "Winners before payment",
         "Amount won before payment", "T-7 count",
     ]
     st.caption(f"Showing {len(display):,} of {len(details):,} students")
