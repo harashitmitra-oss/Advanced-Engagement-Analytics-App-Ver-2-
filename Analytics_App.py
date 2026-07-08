@@ -3149,7 +3149,8 @@ def render_overview(data):
     st.caption(
         "Logic: count unique dated participation touchpoints within each student's first 30 days from Offered Date using the Dates sheet. "
         "Deadline is used as the first-30-days end date when available; otherwise Offered Date + 30 days is used. "
-        "Winner/Spotlight records are counted all-time. No payment-date or pre-payment filter is applied."
+        "Winner/Spotlight records are counted all-time. No payment-date or pre-payment filter is applied. "
+        "Tetr App Competitions use the Competitions/Hackathons category, while Tetr App Quizzes use the General/Fun/Poll/Quiz category."
     )
     st.checkbox(
         "Count refunded students as paid/admitted for this section only",
@@ -11536,9 +11537,13 @@ def _community_impact_event_bucket(event_type: str) -> str:
     typ = _activity_event_type_norm(event_type)
     typ_l = clean_text(typ).lower()
     raw_l = clean_text(event_type).lower()
-    if "tetr app" in raw_l and ("competition" in raw_l or "quiz" in raw_l):
-        # Tetr App competitions and quizzes carry the same weight as Competition.
-        return "Competition"
+    if "tetr app" in raw_l:
+        # Tetr App competitions follow the Competition/Hackathon weight.
+        if "competition" in raw_l:
+            return "Competition"
+        # Tetr App quizzes follow the General/Fun/Poll/Quiz weight.
+        if "quiz" in raw_l:
+            return "General/Fun"
     if typ in {"Online Event", "Masterclass"}:
         return "Online Events & Masterclasses"
     if typ in {"Competition", "Hackathon"}:
@@ -11963,7 +11968,7 @@ def render_community_impact_page(data):
     )
     if include_refunded_as_paid_community:
         st.caption("Temporary Community Impact view active: refunded students are included as paid/admitted only in this section.")
-    st.caption("Paid cohort = Tetr-X students with Status = Admitted or valid Deferral. Refund rows are excluded unless the checkbox above is ticked. Touchpoints count deduped batch-sheet activities plus Tetr App competitions/quizzes attended on/before payment date. Tetr App competitions and quizzes carry the same Community Impact weight as Competitions/Hackathons; winner and event-type overrides are then applied before the final impact tier.")
+    st.caption("Paid cohort = Tetr-X students with Status = Admitted or valid Deferral. Refund rows are excluded unless the checkbox above is ticked. Touchpoints count deduped batch-sheet activities plus Tetr App competitions/quizzes attended on/before payment date. Tetr App Competitions carry the Competitions/Hackathons weight, while Tetr App Quizzes carry the General/Fun/Poll/Quiz weight; winner and event-type overrides are then applied before the final impact tier.")
     cohort = _community_impact_paid_students(data, include_refunded_as_paid=include_refunded_as_paid_community)
     tabs = st.tabs(["Total", "UG", "PG"])
     with tabs[0]:
