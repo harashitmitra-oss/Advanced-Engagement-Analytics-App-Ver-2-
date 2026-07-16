@@ -9751,8 +9751,10 @@ def build_conversion_student_details(data: dict) -> pd.DataFrame:
             if not eligible_attended.empty:
                 eligible_participation_count = int(eligible_attended.drop_duplicates("dedupe_key").shape[0])
         if eligible_total > 0:
-            eligible_pct_text = f"{eligible_participation_count:,}/{eligible_total:,} ({(eligible_participation_count / eligible_total) * 100:.1f}%)"
+            eligible_ratio_text = f"{eligible_participation_count:,}/{eligible_total:,}"
+            eligible_pct_text = f"{(eligible_participation_count / eligible_total) * 100:.1f}%"
         else:
+            eligible_ratio_text = ""
             eligible_pct_text = ""
 
         t7_count = 0
@@ -9817,7 +9819,8 @@ def build_conversion_student_details(data: dict) -> pd.DataFrame:
             "Spotlight count before payment": spotlight_count,
             "Amount won before payment": amount_text,
             "T-7 count": t7_count,
-            "Participation before payment / Eligible activities %": eligible_pct_text,
+            "Participation before payment / Total eligible activities": eligible_ratio_text,
+            "Eligible activities %": eligible_pct_text,
         })
 
     out = pd.DataFrame(output_rows)
@@ -9837,7 +9840,7 @@ def render_conversion_student_details(data: dict):
         "Tetr App Competitions and Tetr App Quizzes separately show deduped registrations dated on or before payment. "
         "T-7 follows the existing Conversion rule of payment date minus 7 days through the payment date. "
         "Winner, Spotlight counts and amounts use dated Winner/Spotlight records announced on or before payment. "
-        "The eligible-activity percentage uses the student's offer date to payment date window from the Dates sheet."
+        "The eligible-activity columns use the student's offer date to payment date window from the Dates sheet."
     )
     details = build_conversion_student_details(data)
     if details is None or details.empty:
@@ -9903,7 +9906,7 @@ def render_conversion_student_details(data: dict):
         "Online Events and Masterclasses", "Competitions/Hackathons",
         "Tetr App Competitions", "Tetr App Quizzes", "Winners before payment",
         "Spotlight count before payment", "Amount won before payment", "T-7 count",
-        "Participation before payment / Eligible activities %",
+        "Participation before payment / Total eligible activities", "Eligible activities %",
     ]
     st.caption(f"Showing {len(display):,} of {len(details):,} students")
     st.dataframe(
