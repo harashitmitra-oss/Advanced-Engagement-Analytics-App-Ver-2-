@@ -9708,10 +9708,11 @@ def build_conversion_student_details(data: dict) -> pd.DataFrame:
                     # Eligibility denominator: every dated activity that occurred
                     # from offer date through payment date for the student's
                     # relevant batch/program, regardless of whether they attended.
-                    if pd.notna(offer_date) and offer_date <= event_date <= payment_date:
+                    if pd.notna(offer_date) and offer_date <= event_date <= payment_date and bucket != "General/Fun":
                         eligible_event_rows.append({
                             "dedupe_key": dedupe_key,
                             "event_date": event_date,
+                            "bucket": bucket,
                         })
 
                     if attended <= 0:
@@ -9747,6 +9748,7 @@ def build_conversion_student_details(data: dict) -> pd.DataFrame:
                     payment_date,
                     inclusive="both",
                 )
+                & ev_df.get("bucket", pd.Series("", index=ev_df.index)).ne("General/Fun")
             ].copy()
             if not eligible_attended.empty:
                 eligible_participation_count = int(eligible_attended.drop_duplicates("dedupe_key").shape[0])
@@ -9821,6 +9823,7 @@ def build_conversion_student_details(data: dict) -> pd.DataFrame:
             "T-7 count": t7_count,
             "Participation before payment / Total eligible activities": eligible_ratio_text,
             "Eligible activities %": eligible_pct_text,
+            "Eligible activities excluding General/Fun/Quiz": eligible_total,
         })
 
     out = pd.DataFrame(output_rows)
@@ -9840,7 +9843,7 @@ def render_conversion_student_details(data: dict):
         "Tetr App Competitions and Tetr App Quizzes separately show deduped registrations dated on or before payment. "
         "T-7 follows the existing Conversion rule of payment date minus 7 days through the payment date. "
         "Winner, Spotlight counts and amounts use dated Winner/Spotlight records announced on or before payment. "
-        "The eligible-activity columns use the student's offer date to payment date window from the Dates sheet."
+        "The eligible-activity columns use the student's offer date to payment date window from the Dates sheet and exclude General/Fun/Fun Task/Quiz activities from both participation and eligibility."
     )
     details = build_conversion_student_details(data)
     if details is None or details.empty:
@@ -9907,6 +9910,7 @@ def render_conversion_student_details(data: dict):
         "Tetr App Competitions", "Tetr App Quizzes", "Winners before payment",
         "Spotlight count before payment", "Amount won before payment", "T-7 count",
         "Participation before payment / Total eligible activities", "Eligible activities %",
+        "Eligible activities excluding General/Fun/Quiz",
     ]
     st.caption(f"Showing {len(display):,} of {len(details):,} students")
     st.dataframe(
