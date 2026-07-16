@@ -9522,17 +9522,14 @@ def _conversion_paid_refunded_cohort(data: dict) -> pd.DataFrame:
     return pd.DataFrame(cohort_rows)
 
 
-def _conversion_winner_before_payment(data: dict, email_key: str, student_key: str, batch: str, payment_date) -> tuple[int, float]:
+def _conversion_winner_before_payment(data: dict, email_key: str, student_key: str, batch: str, payment_date) -> tuple[int, int, float]:
+    """Return winner count, spotlight count and winner amount on/before payment."""
     winner_df = data.get("winner_df", pd.DataFrame()) if isinstance(data, dict) else pd.DataFrame()
     pay_dt = pd.to_datetime(payment_date, errors="coerce")
     if winner_df is None or winner_df.empty or pd.isna(pay_dt):
-        return 0, 0.0
+        return 0, 0, 0.0
 
     w = winner_df.copy()
-    if "is_winner" in w.columns:
-        w = w[w["is_winner"].fillna(False).astype(bool)].copy()
-    if w.empty:
-        return 0, 0.0
 
     email_matches = pd.Series(False, index=w.index)
     name_matches = pd.Series(False, index=w.index)
@@ -9552,18 +9549,23 @@ def _conversion_winner_before_payment(data: dict, email_key: str, student_key: s
                 matched = narrowed
 
     if matched.empty:
-        return 0, 0.0
+        return 0, 0, 0.0
+
     matched["announcement_date"] = pd.to_datetime(matched.get("announcement_date", pd.NaT), errors="coerce").dt.normalize()
     matched = matched[matched["announcement_date"].notna() & matched["announcement_date"].le(pay_dt.normalize())].copy()
     if matched.empty:
-        return 0, 0.0
+        return 0, 0, 0.0
 
     dedupe_cols = [c for c in ["challenge_name", "announcement_date", "entry_type"] if c in matched.columns]
     if dedupe_cols:
         matched = matched.drop_duplicates(subset=dedupe_cols)
-    amount = float(pd.to_numeric(matched.get("amount_usd", 0), errors="coerce").fillna(0).sum())
-    return int(len(matched)), amount
 
+    is_winner = matched.get("is_winner", pd.Series(False, index=matched.index)).fillna(False).astype(bool)
+    is_spotlight = matched.get("is_spotlight", pd.Series(False, index=matched.index)).fillna(False).astype(bool)
+    winner_count = int(is_winner.sum())
+    spotlight_count = int(is_spotlight.sum())
+    amount = float(pd.to_numeric(matched.loc[is_winner, "amount_usd"] if "amount_usd" in matched.columns else pd.Series(0, index=matched.index), errors="coerce").fillna(0).sum())
+    return winner_count, spotlight_count, amount
 
 
 def _student_tetr_app_participations(
@@ -9637,6 +9639,7 @@ def build_conversion_student_details(data: dict) -> pd.DataFrame:
 
     activities = data.get("activities", {})
     contexts = data.get("activity_ctx", {})
+    dates_df = data.get("dates_df", pd.DataFrame())
     output_rows = []
 
     for _, student in cohort.iterrows():
@@ -9646,8 +9649,23 @@ def build_conversion_student_details(data: dict) -> pd.DataFrame:
         email_key = clean_text(student.get("email_key", ""))
         student_key = clean_text(student.get("student_key", ""))
         student_name = clean_text(student.get("Name", ""))
+        batch_value = clean_text(student.get("Batch", ""))
+
+        offer_date = pd.NaT
+        dates_row = find_student_dates_row(
+            dates_df,
+            student_name,
+            email_key=email_key,
+            student_key=student_key,
+            program=program,
+            batch=batch_value,
+        )
+        if dates_row is not None:
+            offer_date = pd.to_datetime(dates_row.get("offered_date_parsed", pd.NaT), errors="coerce")
+            offer_date = offer_date.normalize() if pd.notna(offer_date) else pd.NaT
 
         event_rows = []
+        eligible_event_rows = []
         batch_sheets = UG_BATCH_SHEETS if program == "UG" else PG_BATCH_SHEETS
         for sheet in batch_sheets:
             sdf = activities.get(sheet, pd.DataFrame())
@@ -9670,16 +9688,11 @@ def build_conversion_student_details(data: dict) -> pd.DataFrame:
                     if not col or col not in prow.index:
                         continue
                     attended = pd.to_numeric(pd.Series([prow.get(col, 0)]), errors="coerce").fillna(0).iloc[0]
-                    if attended <= 0:
-                        continue
                     event_date = pd.to_datetime(ev.get("event_date", pd.NaT), errors="coerce")
                     if pd.isna(event_date) or pd.isna(payment_date):
                         continue
                     event_date = event_date.normalize()
-                    # Date-granularity rule used by the existing Conversion T-7 logic:
-                    # an activity dated on the payment date is included.
-                    if event_date > payment_date:
-                        continue
+
                     event_type = clean_text(ev.get("event_type", "Other")) or "Other"
                     bucket = _conversion_student_detail_bucket(event_type)
                     if not bucket:
@@ -9691,6 +9704,22 @@ def build_conversion_student_details(data: dict) -> pd.DataFrame:
                         normalize_name(event_type),
                         event_date.strftime("%Y-%m-%d"),
                     ])
+
+                    # Eligibility denominator: every dated activity that occurred
+                    # from offer date through payment date for the student's
+                    # relevant batch/program, regardless of whether they attended.
+                    if pd.notna(offer_date) and offer_date <= event_date <= payment_date:
+                        eligible_event_rows.append({
+                            "dedupe_key": dedupe_key,
+                            "event_date": event_date,
+                        })
+
+                    if attended <= 0:
+                        continue
+                    # Date-granularity rule used by the existing Conversion T-7 logic:
+                    # an activity dated on the payment date is included.
+                    if event_date > payment_date:
+                        continue
                     event_rows.append({
                         "dedupe_key": dedupe_key,
                         "bucket": bucket,
@@ -9705,16 +9734,37 @@ def build_conversion_student_details(data: dict) -> pd.DataFrame:
         online_count = int((ev_df["bucket"] == "Online Events & Masterclasses").sum()) if not ev_df.empty else 0
         competition_count = int((ev_df["bucket"] == "Competitions & Hackathons").sum()) if not ev_df.empty else 0
         total_before = general_count + online_count + competition_count
+
+        eligible_df = pd.DataFrame(eligible_event_rows)
+        if not eligible_df.empty:
+            eligible_df = eligible_df.sort_values(["event_date", "dedupe_key"]).drop_duplicates("dedupe_key")
+        eligible_total = int(len(eligible_df)) if not eligible_df.empty else 0
+        eligible_participation_count = 0
+        if not ev_df.empty and pd.notna(offer_date) and pd.notna(payment_date):
+            eligible_attended = ev_df[
+                pd.to_datetime(ev_df["event_date"], errors="coerce").between(
+                    offer_date,
+                    payment_date,
+                    inclusive="both",
+                )
+            ].copy()
+            if not eligible_attended.empty:
+                eligible_participation_count = int(eligible_attended.drop_duplicates("dedupe_key").shape[0])
+        if eligible_total > 0:
+            eligible_pct_text = f"{eligible_participation_count:,}/{eligible_total:,} ({(eligible_participation_count / eligible_total) * 100:.1f}%)"
+        else:
+            eligible_pct_text = ""
+
         t7_count = 0
         if not ev_df.empty and pd.notna(payment_date):
             delta = (pd.to_datetime(ev_df["event_date"]) - payment_date).dt.days
             t7_count = int(delta.between(-7, 0, inclusive="both").sum())
 
-        winner_count, amount_won = _conversion_winner_before_payment(
+        winner_count, spotlight_count, amount_won = _conversion_winner_before_payment(
             data,
             email_key=email_key,
             student_key=student_key,
-            batch=clean_text(student.get("Batch", "")),
+            batch=batch_value,
             payment_date=payment_date,
         )
 
@@ -9754,7 +9804,7 @@ def build_conversion_student_details(data: dict) -> pd.DataFrame:
             "Name": student_name,
             "Email": email_key,
             "Program (UG/PG)": program,
-            "Batch": clean_text(student.get("Batch", "")),
+            "Batch": batch_value,
             "Status": clean_text(student.get("Status", "")),
             "Payment Date": payment_date,
             "Total activities before payment": total_before,
@@ -9764,8 +9814,10 @@ def build_conversion_student_details(data: dict) -> pd.DataFrame:
             "Tetr App Competitions": tetr_app_competitions_count,
             "Tetr App Quizzes": tetr_app_quizzes_count,
             "Winners before payment": winner_count,
+            "Spotlight count before payment": spotlight_count,
             "Amount won before payment": amount_text,
             "T-7 count": t7_count,
+            "Participation before payment / Eligible activities %": eligible_pct_text,
         })
 
     out = pd.DataFrame(output_rows)
@@ -9784,7 +9836,8 @@ def render_conversion_student_details(data: dict):
         "Pre-payment activities are deduped from the relevant UG/PG batch sheets and grouped into the three requested categories. "
         "Tetr App Competitions and Tetr App Quizzes separately show deduped registrations dated on or before payment. "
         "T-7 follows the existing Conversion rule of payment date minus 7 days through the payment date. "
-        "Winner counts and amounts use dated Winner records announced on or before payment."
+        "Winner, Spotlight counts and amounts use dated Winner/Spotlight records announced on or before payment. "
+        "The eligible-activity percentage uses the student's offer date to payment date window from the Dates sheet."
     )
     details = build_conversion_student_details(data)
     if details is None or details.empty:
@@ -9849,7 +9902,8 @@ def render_conversion_student_details(data: dict):
         "Total activities before payment", "General/Fun",
         "Online Events and Masterclasses", "Competitions/Hackathons",
         "Tetr App Competitions", "Tetr App Quizzes", "Winners before payment",
-        "Amount won before payment", "T-7 count",
+        "Spotlight count before payment", "Amount won before payment", "T-7 count",
+        "Participation before payment / Eligible activities %",
     ]
     st.caption(f"Showing {len(display):,} of {len(details):,} students")
     st.dataframe(
